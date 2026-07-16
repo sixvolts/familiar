@@ -1,0 +1,26 @@
+# familiar-workspace configuration.
+#
+# Copy to workspace.toml and edit. All fields are optional —
+# defaults produce a usable dev-mode service (plain HTTP on :3000,
+# gateway at localhost:8000, static from ./static).
+
+# Address the workspace HTTP server binds to.
+# Default: ":8443" when [tls] is set, ":3000" otherwise.
+listen_addr = ":8443"
+
+# Base URL of familiar-gateway (API server).
+# After Phase 0 the gateway listens on localhost only; from the
+# workspace's perspective it's always http://localhost:8000.
+gateway_url = "http://localhost:8000"
+
+# Directory of static files served by the workspace (index.html,
+# app.js, app.css, fonts, etc.). Relative paths are joined with the
+# process working directory at startup.
+static_dir = "./static"
+
+# Optional TLS termination. With both cert + key set, the workspace
+# listens HTTPS on listen_addr. Without them, plain HTTP — useful
+# for development or when fronted by an external terminator.
+[tls]
+cert = "/etc/letsencrypt/live/host-a.your-tailnet.ts.net/fullchain.pem"
+key  = "/etc/letsencrypt/live/host-a.your-tailnet.ts.net/privkey.pem"

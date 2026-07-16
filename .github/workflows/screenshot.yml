@@ -1,0 +1,95 @@
+# Keep docs/screenshot.png (the README hero) in sync with the real UI.
+#
+# Runs ONLY when the frontend changes, regenerates the screenshot from a
+# live gateway+workspace stack via the Playwright generator
+# (tests/e2e/screenshot/), and commits the refreshed PNG back. This is the
+# only place Node/Playwright touches the screenshot — local builds and the
+# Makefile stay pure Go.
+#
+# No loop: the trigger watches familiar-workspace/static/**, but the
+# commit only changes docs/screenshot.png (+ '[skip ci]'), which isn't a
+# trigger path.
+
+name: screenshot
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'familiar-workspace/static/**'
+  workflow_dispatch:
+
+concurrency:
+  group: screenshot-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  FAMILIAR_TEST_DSN: postgres://postgres:test@localhost:5432/postgres?sslmode=disable
+
+jobs:
+  screenshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache-dependency-path: |
+            familiar-gateway/go.sum
+            familiar-workspace/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tests/e2e/package-lock.json
+
+      - name: npm ci
+        working-directory: tests/e2e
+        run: npm ci
+      - name: resolve playwright version
+        id: pw
+        working-directory: tests/e2e
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
+      - name: install chromium
+        working-directory: tests/e2e
+        run: npx playwright install --with-deps chromium
+
+      - name: build gateway + workspace
+        run: |
+          (cd familiar-gateway && go build ./...)
+          (cd familiar-workspace && go build ./...)
+
+      - name: regenerate screenshot
+        working-directory: tests/e2e
+        run: npm run screenshot
+
+      - name: commit if changed
+        run: |
+          if git diff --quiet -- docs/screenshot.png; then
+            echo "Screenshot unchanged — nothing to commit."
+            exit 0
+          fi
+          git config user.name "familiar-bot"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/screenshot.png
+          git commit -m "ci: refresh README workspace screenshot [skip ci]"
+          git push

@@ -1,0 +1,21 @@
+# gitleaks config for the public publisher's scan (scripts/publish-public.sh
+# passes this via --config). Extends the stock ruleset and allowlists the
+# handful of known-safe fixtures/placeholders that would otherwise block
+# every publish. Keep entries NARROW (specific values), so a real secret
+# in the same file is still caught.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known-safe test fixtures and documentation placeholders"
+regexTarget = "match"
+regexes = [
+  # Throwaway VAPID keypair for E2E (tests/e2e/fixtures/gateway.ts) —
+  # documented as not tied to any real push service.
+  '''BJORr4S4nLXH9s2-VWvhtgCd4n8Pyw0c2fxyleJtKJxgfF9FInFiiXYk3ao0a972b5U2YC8q5BB4K7FSdeTJstM''',
+  '''poibXqmMhNxH1o0sBfCKzU7W2vSQesqrm_G1pao7N6Q''',
+  # Doc placeholder tokens: base64 of "this is a test token..."
+  # (docs/archive/CROSS-DOMAIN-ENROLLMENT.md).
+  '''dGhpcyBpcyBhIHRlc3QgdG9rZW4''',
+]

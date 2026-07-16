@@ -1,0 +1,388 @@
+syntax = "proto3";
+
+package familiar.engine;
+
+option go_package = "github.com/familiar/gateway/proto/engine";
+
+import "google/protobuf/timestamp.proto";
+
+// CoreEngine is the IPC service exposed by the previous engine over a Unix domain socket.
+// The Go gateway connects to this to delegate memory, crypto, and skill operations.
+service CoreEngine {
+    // --- Memory operations ---
+    rpc QueryMemory(MemoryQueryRequest) returns (MemoryQueryResponse);
+    rpc CommitFacts(CommitFactsRequest) returns (CommitFactsResponse);
+    rpc AssembleContext(AssembleContextRequest) returns (AssembleContextResponse);
+    rpc DeleteFact(DeleteFactRequest) returns (DeleteFactResponse);
+    rpc UpdateFact(UpdateFactRequest) returns (UpdateFactResponse);
+    rpc PromoteFacts(PromoteFactsRequest) returns (PromoteFactsResponse);
+
+    rpc Rehydrate(RehydrateRequest) returns (RehydrateResponse);
+
+    // --- Crypto ---
+    rpc Sign(SignRequest) returns (SignResponse);
+    rpc VerifySkill(VerifySkillRequest) returns (VerifySkillResponse);
+    rpc GetAgentIdentity(Empty) returns (AgentIdentityResponse);
+    rpc VaultGet(VaultGetRequest) returns (VaultGetResponse);
+    rpc VaultSet(VaultSetRequest) returns (VaultSetResponse);
+
+    // --- Skill sandbox ---
+    rpc PrepSandbox(PrepSandboxRequest) returns (PrepSandboxResponse);
+    rpc ExecInSandbox(ExecInSandboxRequest) returns (ExecInSandboxResponse);
+
+    // --- Sleep cycle ---
+    rpc StartSleep(StartSleepRequest) returns (StartSleepResponse);
+    rpc SleepStatus(SleepStatusRequest) returns (SleepStatusResponse);
+    rpc WakeSleep(WakeSleepRequest) returns (WakeSleepResponse);
+    rpc GetBriefing(Empty) returns (BriefingResponse);
+
+    // --- Health ---
+    rpc Ping(Empty) returns (PingResponse);
+}
+
+message Empty {}
+
+// ============================================================
+// Memory
+// ============================================================
+
+message VisibilityContext {
+    string channel_id = 1;
+    string agent_id = 2;
+    repeated string active_domains = 3;
+    bool is_multi_agent_request = 4;
+    string user_id = 5;  // canonical user identity of the requester
+}
+
+message MemoryQueryRequest {
+    oneof query {
+        SemanticQuery semantic = 1;
+        EntityQuery entity = 2;
+        RelationalQuery relational = 3;
+        TemporalQuery temporal = 4;
+        HybridQuery hybrid = 5;
+    }
+}
+
+message SemanticQuery {
+    string query_text = 1;
+    uint32 limit = 2;
+    string scope = 3;  // "user", "session", "agent", "shared", or empty for all
+    VisibilityContext visibility = 4;
+    repeated float query_vector = 5;  // precomputed embedding from gateway; empty = keyword fallback
+}
+
+message EntityQuery {
+    string name = 1;
+    uint32 depth = 2;
+    VisibilityContext visibility = 3;
+}
+
+message RelationalQuery {
+    string entity_id = 1;
+    string rel_type = 2;  // empty for all
+    uint32 depth = 3;
+    VisibilityContext visibility = 4;
+}
+
+message TemporalQuery {
+    google.protobuf.Timestamp after = 1;
+    google.protobuf.Timestamp before = 2;
+    string scope = 3;
+    VisibilityContext visibility = 4;
+}
+
+message HybridQuery {
+    string query_text = 1;
+    string entity_hint = 2;
+    uint32 limit = 3;
+    VisibilityContext visibility = 4;
+}
+
+message FactProto {
+    string id = 1;
+    string content = 2;
+    repeated float embedding = 3;
+    string source_type = 4;
+    string source_ref = 5;
+    string source_description = 6;
+    float confidence = 7;
+    string confidence_basis = 8;
+    google.protobuf.Timestamp created_at = 9;
+    google.protobuf.Timestamp last_accessed = 10;
+    google.protobuf.Timestamp last_verified = 11;
+    uint64 access_count = 12;
+    string scope = 13;
+    repeated string tags = 14;
+    repeated string domains = 15;
+    repeated string allowed_channels = 16;
+    repeated string allowed_agents = 17;
+    bool agent_private = 18;
+    bool internal_only = 19;
+    string supersedes = 20;  // fact ID this replaced
+    string user_id = 21;     // canonical user identity; empty = global, visible to all
+    // Shard scope this fact belongs to (FAMILIAR-SHARDS-PHASE1-SPEC).
+    // Empty means the fact was produced by the top-level Familiar
+    // environment. Non-empty points at the owning shard's
+    // `shards.scope_tag`; the top-level retrieval query filters out
+    // facts whose scope_tag belongs to an `isolated` shard. Ephemeral
+    // shards never populate this — they don't commit memory at all.
+    string scope_tag = 22;
+    // Skip the engine's hot RAM tier on commit
+    // (FAMILIAR-SHARDS-PHASE1-FINDINGS Issue 3). When true, the
+    // engine writes the fact directly to the persistent tier and
+    // does NOT add it to RAM — closing the leak path where an
+    // isolated-shard write would otherwise be visible to top-level
+    // retrieval through the hot cache before the gateway-side
+    // pgvector filter could re-hide it. Set by the gateway when
+    // committing on behalf of an isolated-visibility shard.
+    bool exclude_from_hot = 23;
+}
+
+message MemoryResultProto {
+    FactProto fact = 1;
+    float relevance_score = 2;
+    string tier_source = 3;  // "ram", "persistent", "bulk"
+    string provenance_summary = 4;
+    string staleness = 5;  // "fresh", "aging", "stale", "unverified"
+}
+
+message MemoryQueryResponse {
+    repeated MemoryResultProto results = 1;
+    string error = 2;
+}
+
+message CommitFactsRequest {
+    string session_id = 1;
+    repeated FactProto facts = 2;
+}
+
+message CommitFactsResponse {
+    uint32 committed = 1;
+    string error = 2;
+}
+
+message AssembleContextRequest {
+    string session_id = 1;
+    string user_message = 2;
+    VisibilityContext visibility = 3;
+    uint32 memory_token_budget = 4;
+    uint32 conversation_token_budget = 5;
+    repeated float query_vector = 6;  // precomputed embedding from gateway; empty = keyword fallback
+}
+
+message AssembleContextResponse {
+    repeated MemoryResultProto memory_context = 1;
+    repeated ConversationTurn conversation_history = 2;
+    repeated string relevant_skill_ids = 3;
+    string error = 4;
+}
+
+message ConversationTurn {
+    string role = 1;
+    string content = 2;
+    google.protobuf.Timestamp timestamp = 3;
+}
+
+// DeleteFact removes a fact from the engine's RAM tier (hot memory). The
+// gateway is responsible for the persistent-tier mirror delete via its
+// pgvector MemoryManager — the engine's persistent tier is optional and
+// typically disabled in deployments where pgvector lives on the gateway.
+message DeleteFactRequest {
+    string session_id = 1;
+    string fact_id = 2;                    // UUID of the fact to remove
+    VisibilityContext visibility = 3;      // scope/user gate — caller must be allowed to see the fact before deleting
+}
+
+message DeleteFactResponse {
+    bool deleted = 1;                      // true if the fact was present in RAM and removed
+    string tier = 2;                       // "ram" when deleted; empty when not found
+    string error = 3;
+}
+
+// UpdateFact rewrites a RAM-tier fact's content (and optionally its
+// embedding, if the gateway pre-computed one). Same tier semantics as
+// DeleteFact — persistent-side updates flow through the gateway's
+// MemoryManager.UpdateMemoryContent.
+message UpdateFactRequest {
+    string session_id = 1;
+    string fact_id = 2;
+    string new_content = 3;
+    repeated float new_embedding = 4;      // optional; empty = preserve existing embedding
+    VisibilityContext visibility = 5;
+}
+
+message UpdateFactResponse {
+    bool updated = 1;
+    string tier = 2;                       // "ram" when updated; empty when not found
+    string error = 3;
+}
+
+// PromoteFacts mirrors persistent-tier facts into the engine's RAM
+// cache on access — the gateway-side companion to the engine's own
+// promote-on-access path in query_semantic. Call shape matches
+// CommitFacts but with two contract differences:
+//   (a) promoted facts are written with dirty=false, because the
+//       persistent tier already has the authoritative copy and no
+//       re-flush is owed;
+//   (b) facts already resident in RAM are left untouched, so a
+//       locally-edited RAM copy isn't clobbered by a stale
+//       pgvector view.
+// The RPC is safe to fire-and-forget from the gateway.
+message PromoteFactsRequest {
+    string session_id = 1;
+    repeated FactProto facts = 2;
+}
+
+message PromoteFactsResponse {
+    uint32 promoted = 1;                   // number of facts newly resident in RAM
+    uint32 skipped = 2;                    // facts already present in RAM (no-op)
+    string error = 3;
+}
+message RehydrateRequest {
+    string session_id = 1;
+    string content = 2;
+}
+
+message RehydrateResponse {
+    string original_content = 1;
+    string error = 2;
+}
+
+// ============================================================
+// Crypto
+// ============================================================
+
+message SignRequest {
+    bytes data = 1;
+}
+
+message SignResponse {
+    bytes signature = 1;
+    string error = 2;
+}
+
+message VerifySkillRequest {
+    string skill_path = 1;
+}
+
+message VerifySkillResponse {
+    bool valid = 1;
+    string trust_tier = 2;  // "owner", "verified", "community", "unvetted"
+    string error = 3;
+}
+
+message AgentIdentityResponse {
+    string agent_id = 1;
+    bytes certificate_der = 2;
+    string fingerprint = 3;
+}
+
+message VaultGetRequest {
+    string key = 1;
+}
+
+message VaultGetResponse {
+    string value = 1;  // decrypted secret
+    bool found = 2;
+    string error = 3;
+}
+
+message VaultSetRequest {
+    string key = 1;
+    string value = 2;
+}
+
+message VaultSetResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+// ============================================================
+// Skill Sandbox
+// ============================================================
+
+message PrepSandboxRequest {
+    string skill_id = 1;
+    string skill_path = 2;
+    string trust_tier = 3;
+}
+
+message PrepSandboxResponse {
+    string sandbox_handle = 1;
+    string error = 2;
+}
+
+message ExecInSandboxRequest {
+    string sandbox_handle = 1;
+    string command = 2;
+    repeated string args = 3;
+    map<string, string> env = 4;
+    uint64 timeout_secs = 5;
+}
+
+message ExecInSandboxResponse {
+    int32 exit_code = 1;
+    string stdout = 2;
+    string stderr = 3;
+    bool timed_out = 4;
+    string error = 5;
+}
+
+// ============================================================
+// Sleep Cycle
+// ============================================================
+
+message StartSleepRequest {
+    repeated string phases = 1;  // empty = all phases
+}
+
+message StartSleepResponse {
+    string handle = 1;
+    string error = 2;
+}
+
+message SleepStatusRequest {
+    string handle = 1;
+}
+
+message SleepStatusResponse {
+    string phase = 1;      // current phase
+    float progress = 2;    // 0.0 - 1.0
+    bool completed = 3;
+    string error = 4;
+}
+
+message WakeSleepRequest {
+    string handle = 1;
+}
+
+message WakeSleepResponse {
+    string checkpoint = 1;
+    string error = 2;
+}
+
+message BriefingResponse {
+    string summary = 1;
+    uint32 facts_merged = 2;
+    uint32 facts_expired = 3;
+    uint32 documents_processed = 4;
+    uint32 facts_verified = 5;
+    repeated string notable_updates = 6;
+    string error = 7;
+    // Phase 3 consolidation stats
+    uint32 conflicts_resolved = 8;
+    uint32 facts_promoted = 9;
+    uint32 facts_decayed = 10;
+    uint32 facts_archived = 11;
+}
+
+// ============================================================
+// Health
+// ============================================================
+
+message PingResponse {
+    string version = 1;
+    uint64 uptime_secs = 2;
+    string memory_tier = 3;  // "ram_only", "persistent", "full"
+}

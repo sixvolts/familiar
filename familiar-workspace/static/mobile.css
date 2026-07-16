@@ -1,0 +1,2175 @@
+/* Familiar Mobile UI — companion stylesheet to mobile.html.
+   Ported from "Familiar Mobile · Static.html" mockup. Uses the same
+   color tokens as the desktop app.css so categories and accents read
+   identically across surfaces. */
+
+:root {
+    --graphite-950: #0B0B0F;
+    --graphite-900: #101014;
+    --graphite-850: #15151B;
+    --graphite-800: #1B1B23;
+    --graphite-750: #22222C;
+    --graphite-700: #2B2B36;
+    --graphite-600: #3A3A48;
+    --graphite-500: #52525F;
+    --graphite-400: #7A7A86;
+    --graphite-300: #A3A3AD;
+    --graphite-200: #C9C9D1;
+    --graphite-100: #E6E6EB;
+    --graphite-050: #F4F4F7;
+
+    --iris-500: #6A4CE0;
+    --iris-400: #8A70EC;
+    --iris-300: #AC98F3;
+    --rc-iris: 154, 124, 245;  /* pixel working-indicator rgb (global) */
+    --danger: #D0514A;
+    --danger-rgb: 208, 81, 74;
+
+    --slate-500: #4E6AAD;
+    --slate-400: #7E97D4;
+    --slate-300: #B0C0E4;
+
+    --sun-400: #E8BE55;
+    --sun-300: #F1D284;
+
+    --moss-400: #5CB585;
+    --moss-500: #3E9A6A;
+
+    --teal-500: #14B8A6;   /* scheduled actions accent */
+    --teal-400: #2DD4BF;
+    --teal-300: #5EEAD4;
+    --teal-soft-bg: rgba(20, 184, 166, 0.14);
+    --teal-soft-border: rgba(20, 184, 166, 0.32);
+
+    --bg-canvas: #0B0B0F;
+    --bg-card: #1B1B23;
+    --bg-raised: #15151B;
+    --fg-1: #F4F4F7;
+    --fg-2: #C9C9D1;
+    --fg-3: #7A7A86;
+    --fg-4: #52525F;
+    --border-subtle: rgba(255, 255, 255, 0.06);
+    --border-default: rgba(255, 255, 255, 0.10);
+
+    --iris-soft-bg: rgba(106, 76, 224, 0.14);
+    --iris-soft-border: rgba(106, 76, 224, 0.28);
+
+    --font-sans: 'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+    --font-mono: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+    --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg-canvas);
+    color: var(--fg-2);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    height: 100%;
+    height: -webkit-fill-available;
+    overflow: hidden;
+    overscroll-behavior: none;
+    /* Dark scrollbars throughout — when the mobile shell is
+       previewed in a desktop browser via ?ui=mobile or a narrow
+       viewport, default UA scrollbars appear lighter than the
+       canvas and read as bright bars on a dark page. Match the
+       desktop chrome so the artificial preview surface looks the
+       same as a real phone. (iOS / Android render scrollbars as
+       transient overlays so this is a no-op in the wild.) */
+    scrollbar-color: var(--graphite-700) transparent;
+    scrollbar-width: thin;
+}
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+    background: var(--graphite-700);
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--graphite-600); background-clip: padding-box; }
+
+button { font-family: inherit; }
+
+/* SVGs without an explicit width attribute fill their container.
+   The mockup nests bare <svg viewBox="0 0 24 24"> inside fixed-size
+   spans (.glyph, .icon-tile span, etc.) and relies on the parent
+   for sizing; in a flex context that only works if we tell the SVG
+   to fill. SVGs that DO carry a width attribute (chevrons at 14px,
+   icon-button glyphs at 16px, the F-mark at 22px) are left alone. */
+.mob-app svg:not([width]) {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+
+/* ----------------------------------------------------------------
+   Auth views — three of them (loading / setup / login). Only one
+   is visible at a time; mobile.js boot() picks. Centered card,
+   roomy inputs, primary iris button, ghost secondary.
+   ---------------------------------------------------------------- */
+
+.mob-auth {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding: max(env(safe-area-inset-top, 0px), 32px) 24px 32px;
+    background: var(--bg-canvas);
+    overflow: auto;
+}
+.mob-auth[hidden] { display: none; }
+
+.mob-auth-card {
+    width: 100%;
+    max-width: 360px;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    text-align: left;
+    margin-top: 6vh;
+}
+.mob-auth-mark {
+    width: 56px;
+    height: 64px;
+    margin-bottom: 24px;
+    align-self: flex-start;
+}
+.mob-auth-mark svg { width: 100%; height: 100%; display: block; }
+
+.mob-auth-eyebrow {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--fg-4);
+    margin-bottom: 8px;
+}
+.mob-auth-title {
+    font-size: 28px;
+    font-weight: 600;
+    letter-spacing: -0.025em;
+    color: var(--fg-1);
+    margin: 0 0 12px;
+    line-height: 1.1;
+}
+.mob-auth-body {
+    font-size: 14px;
+    color: var(--fg-3);
+    line-height: 1.5;
+    margin: 0 0 24px;
+}
+.mob-auth-micro {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--fg-4);
+    margin-bottom: 8px;
+}
+.mob-auth-input {
+    width: 100%;
+    padding: 12px 14px;
+    font-size: 16px;
+    font-family: inherit;
+    background: var(--bg-card);
+    border: 1px solid var(--border-default);
+    border-radius: 12px;
+    color: var(--fg-1);
+    margin-bottom: 8px;
+    outline: none;
+}
+.mob-auth-input:focus {
+    border-color: var(--iris-500);
+    box-shadow: 0 0 0 3px rgba(106, 76, 224, 0.25);
+}
+.mob-auth-btn {
+    width: 100%;
+    padding: 12px 14px;
+    font-size: 14.5px;
+    font-weight: 600;
+    font-family: inherit;
+    background: var(--iris-500);
+    border: 0;
+    border-radius: 12px;
+    color: #fff;
+    cursor: pointer;
+    margin-top: 8px;
+    letter-spacing: -0.01em;
+}
+.mob-auth-btn:active { transform: scale(0.99); }
+.mob-auth-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.mob-auth-btn.is-ghost {
+    background: transparent;
+    color: var(--fg-2);
+    border: 1px solid var(--border-default);
+}
+.mob-auth-error {
+    margin-top: 12px;
+    padding: 10px 12px;
+    font-size: 12.5px;
+    font-family: var(--font-mono);
+    color: var(--ember-400, #E37A74);
+    background: rgba(227, 122, 116, 0.08);
+    border: 1px solid rgba(227, 122, 116, 0.24);
+    border-radius: 10px;
+    word-wrap: break-word;
+}
+.mob-auth-sub {
+    margin-top: 20px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border-subtle);
+}
+
+/* Boot loader — the brand F-mark with the logo's yellow dot
+   pulsing, matching the desktop .fmark-loader treatment. Scoped to
+   the loading card so the shared mark on the setup/login screens
+   stays static. */
+#mob-auth-loading .fmark-loader-dot {
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: fmark-pulse 1100ms ease-in-out infinite;
+}
+@keyframes fmark-pulse {
+    0%, 100% { opacity: 0.25; transform: scale(0.8); }
+    50%      { opacity: 1;    transform: scale(1.15); }
+}
+
+/* Mobile login design — ported from the standalone login-mobile.html
+   mockup so the auth view sits inside the SPA shell with no
+   cross-page navigation. .lpm-* prefix avoids collisions. */
+.lpm-page {
+    align-items: stretch;
+    justify-content: center;
+    flex-direction: column;
+    padding: max(env(safe-area-inset-top, 0px), 32px) 24px calc(40px + env(safe-area-inset-bottom, 0px));
+}
+.lpm-page::before {
+    content: "";
+    position: absolute; inset: 0;
+    background-image: radial-gradient(rgba(255,255,255,0.06) 1px, transparent 1px);
+    background-size: 16px 16px;
+    background-position: -1px -1px;
+    opacity: 0.7;
+    pointer-events: none;
+}
+.lpm-glow {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -60%) scale(0.7);
+    width: 720px; height: 720px;
+    pointer-events: none;
+    background: radial-gradient(closest-side,
+        rgba(106,76,224,0.35),
+        rgba(106,76,224,0.10) 45%,
+        transparent 70%);
+    filter: blur(8px);
+}
+.lpm-brand, .lpm-tagline, .lpm-form {
+    position: relative;
+    z-index: 2;
+    width: 100%;
+    max-width: 340px;
+    margin-left: auto;
+    margin-right: auto;
+}
+.lpm-brand { display: flex; justify-content: center; margin-bottom: 24px; }
+.lpm-wordmark {
+    display: inline-flex; align-items: center; gap: 14px;
+    color: var(--fg-1);
+    font-family: var(--font-sans);
+    font-weight: 600; font-size: 31px;
+    letter-spacing: -0.03em; line-height: 1;
+}
+.lpm-tagline { display: flex; justify-content: center; margin-bottom: 32px; }
+.lpm-tagline p {
+    margin: 0; font-size: 13px; color: var(--fg-3);
+    letter-spacing: -0.01em;
+}
+.lpm-form { display: flex; flex-direction: column; gap: 12px; }
+.lpm-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    gap: 8px;
+    font: 500 14px/1 var(--font-sans);
+    letter-spacing: -0.01em;
+    height: 44px; padding: 0 18px;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
+    width: 100%;
+    box-sizing: border-box;
+    -webkit-tap-highlight-color: transparent;
+}
+.lpm-btn svg { width: 16px; height: 16px; stroke-width: 1.75; }
+.lpm-btn-primary {
+    background: var(--iris-500);
+    color: #fff;
+    box-shadow: 0 0 0 1px rgba(106,76,224,0.35),
+                0 8px 32px -8px rgba(106,76,224,0.45);
+}
+.lpm-btn-primary:active { transform: scale(0.99); }
+.lpm-btn-shard {
+    background: #E8BE55;
+    color: #1B1B23;
+    box-shadow: 0 0 0 1px rgba(232,190,85,0.35),
+                0 8px 32px -8px rgba(232,190,85,0.45);
+}
+.lpm-btn-shard:active { transform: scale(0.99); }
+.lpm-btn-shard svg { stroke: #1B1B23; }
+.lpm-btn-secondary {
+    background: var(--bg-card);
+    color: var(--fg-1);
+    border-color: var(--border-default);
+}
+.lpm-btn[disabled] { opacity: 0.6; cursor: not-allowed; }
+.lpm-divider {
+    display: flex; align-items: center; gap: 12px; margin: 6px 0;
+    font-size: 13px; color: var(--fg-3);
+    letter-spacing: -0.01em;
+}
+.lpm-divider::before, .lpm-divider::after {
+    content: ""; flex: 1; height: 1px;
+    background: var(--border-default);
+}
+.lpm-field { position: relative; }
+.lpm-input {
+    font: 400 16px var(--font-sans);
+    color: var(--fg-1);
+    background: var(--bg-card);
+    border: 1px solid var(--border-default);
+    border-radius: 6px;
+    padding: 0 14px; height: 44px; width: 100%;
+    outline: none;
+    letter-spacing: -0.01em;
+    box-sizing: border-box;
+    transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease;
+    -webkit-appearance: none;
+    appearance: none;
+}
+.lpm-input::placeholder { color: var(--fg-4); }
+.lpm-input:focus {
+    border-color: var(--iris-500);
+    box-shadow: 0 0 0 3px rgba(106,76,224,0.35);
+    background: var(--bg-raised);
+}
+.lpm-input-icon {
+    position: absolute; right: 12px; top: 50%;
+    transform: translateY(-50%);
+    width: 18px; height: 18px;
+    color: var(--fg-4);
+    cursor: pointer; background: none; border: 0; padding: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+}
+.lpm-forgot-row { display: flex; justify-content: center; margin-top: 12px; }
+.lpm-forgot {
+    font-size: 13px; color: var(--fg-3);
+    letter-spacing: -0.01em;
+    text-decoration: underline; text-underline-offset: 3px;
+    text-decoration-color: rgba(255,255,255,0.25);
+}
+.lpm-error {
+    margin-top: 12px;
+    padding: 10px 12px;
+    font-size: 13px;
+    color: #E37A74;
+    background: rgba(227, 122, 116, 0.08);
+    border: 1px solid rgba(227, 122, 116, 0.24);
+    border-radius: 6px;
+    word-wrap: break-word;
+}
+.lpm-error[hidden] { display: none; }
+.lpm-hint {
+    margin-top: 12px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: rgba(255, 255, 255, 0.42);
+    text-align: center;
+}
+
+/* ----------------------------------------------------------------
+   Mobile shell — fills viewport. Three rows: optional safe-area
+   spacer at top (handled by env() below), scrolling content, and
+   the bottom tab bar.
+   ---------------------------------------------------------------- */
+
+.mob-app {
+    height: 100vh;
+    height: 100dvh;
+    height: -webkit-fill-available;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-canvas);
+    color: var(--fg-2);
+    overflow: hidden;
+    /* The safe-area top inset is absorbed by each screen's header
+       (.mob-home-header / .mob-title-header / .mob-thread-head) so
+       the header's colored background bleeds up through the iOS
+       status-bar strip. Putting the inset on .mob-app instead
+       leaves an unstyled gap above the header that reads as wasted
+       screen space when a colored header is visible. */
+}
+/* The bare [hidden] UA rule is `display: none` (specificity 0,0,1,0)
+   and loses to `.mob-app { display: flex }` above. Re-establish the
+   hide with explicit class+attr selector so the auth gate actually
+   covers the home tab on first paint. */
+.mob-app[hidden] { display: none; }
+
+.mob-screen {
+    flex: 1 1 0;
+    display: none;
+    flex-direction: column;
+    overflow: hidden;
+}
+.mob-screen.is-active { display: flex; }
+
+/* ----------------------------------------------------------------
+   Headers — two variants:
+   1) Home header: F-mark + wordmark + ellipsis button, with search.
+   2) Title header: large 32px title + 1-2 round action buttons.
+   ---------------------------------------------------------------- */
+
+.mob-home-header {
+    padding: calc(14px + env(safe-area-inset-top, 0px)) 18px 14px;
+    flex: 0 0 auto;
+}
+.mob-home-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 14px;
+}
+.mob-brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+/* .mob-brand-name is the home wordmark. It piggybacks on .mob-title
+   to keep size/weight/letter-spacing in lockstep with the Chat /
+   Wiki / Notes / Shards titles — there's no separate "logo font"
+   any more; the brand IS the section title at the home position. */
+.mob-brand-name {
+    color: var(--fg-1);
+}
+.mob-icon-btn {
+    width: 34px;
+    height: 34px;
+    border-radius: 10px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--fg-2);
+    cursor: pointer;
+    padding: 0;
+}
+.mob-icon-btn.is-iris {
+    background: var(--iris-soft-bg);
+    border-color: var(--iris-soft-border);
+    color: var(--iris-300);
+}
+.mob-icon-btn.is-teal {
+    background: var(--teal-soft-bg);
+    border-color: var(--teal-soft-border);
+    color: var(--teal-300);
+}
+
+.mob-search-pill {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: 12px;
+    padding: 10px 14px;
+    cursor: pointer;
+    text-align: left;
+    color: var(--fg-4);
+    font-size: 14px;
+}
+.mob-search-pill svg { flex-shrink: 0; }
+
+.mob-title-header {
+    padding: calc(12px + env(safe-area-inset-top, 0px)) 18px 14px;
+    flex: 0 0 auto;
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    /* Soft hairline along the bottom so the colored header has a
+       visible terminator instead of dissolving into the scroll
+       content. Without this the eyebrow / pills underneath read
+       as part of the colored bar. */
+    border-bottom: 1px solid var(--border-subtle);
+}
+.mob-title {
+    font-size: 32px;
+    font-weight: 600;
+    letter-spacing: -0.025em;
+    color: var(--fg-1);
+    line-height: 1.05;
+}
+/* "Scheduled Actions" is the only two-word page title; size it down so it
+   stays on one line beside the + button (other screens are single words). */
+.mob-screen[data-screen="scheduled"] > .mob-title-header > .mob-title {
+    font-size: 23px;
+    white-space: nowrap;
+}
+.mob-title-actions {
+    display: flex;
+    gap: 6px;
+}
+
+/* Per-section header tinting — mirrors the desktop sidebar's
+   category color so a section reads as the same surface across
+   form factors. The same gradients apply to the .mob-thread-head
+   bar on the corresponding detail screen so the chrome stays
+   coherent when the user drills in. Iris/Moss/Slate softs match
+   app.css:3271 (.chat-header), :3672 (.notes-header), :3687
+   (.notes-header.is-wiki). */
+.mob-screen[data-screen="chat"]         > .mob-title-header,
+.mob-screen[data-screen="chat-thread"]  > .mob-thread-head {
+    background: linear-gradient(rgba(62, 154, 106, 0.16), rgba(62, 154, 106, 0.16)), var(--graphite-950);
+}
+.mob-screen[data-screen="notes"]        > .mob-title-header,
+.mob-screen[data-screen="notes-detail"] > .mob-thread-head {
+    background: linear-gradient(rgba(106, 76, 224, 0.14), rgba(106, 76, 224, 0.14)), var(--graphite-950);
+}
+.mob-screen[data-screen="wiki"]         > .mob-title-header,
+.mob-screen[data-screen="wiki-page"]    > .mob-thread-head {
+    background: linear-gradient(rgba(78, 106, 173, 0.18), rgba(78, 106, 173, 0.18)), var(--graphite-950);
+}
+.mob-screen[data-screen="shards"]       > .mob-title-header {
+    background: linear-gradient(rgba(232, 190, 85, 0.14), rgba(232, 190, 85, 0.14)), var(--graphite-950);
+}
+.mob-screen[data-screen="scheduled"]        > .mob-title-header,
+.mob-screen[data-screen="scheduled-detail"] > .mob-thread-head,
+.mob-screen[data-screen="scheduled-new"]    > .mob-thread-head {
+    background: linear-gradient(rgba(20, 184, 166, 0.16), rgba(20, 184, 166, 0.16)), var(--graphite-950);
+}
+
+/* ----------------------------------------------------------------
+   Body scroll area — every screen has the same flex-1 scrolling
+   region. Padding sits inside the scroll so the scrollbar (when
+   visible) hugs the edge.
+   ---------------------------------------------------------------- */
+
+.mob-scroll {
+    overflow: auto;
+    flex: 1 1 0;
+    -webkit-overflow-scrolling: touch;
+}
+.mob-scroll-pad-h     { padding-left: 18px; padding-right: 18px; padding-bottom: 16px; }
+.mob-scroll-pad-tight { padding: 0 12px 16px; }
+
+/* Breathing room below colored title headers. Home keeps a tight
+   layout because its header is neutral; the four screens below
+   carry a tinted bar that benefits from extra space before the
+   first row. */
+.mob-screen[data-screen="chat"]   > .mob-scroll-pad-tight,
+.mob-screen[data-screen="notes"]  > .mob-scroll-pad-h,
+.mob-screen[data-screen="wiki"]   > .mob-scroll-pad-h,
+.mob-screen[data-screen="shards"] > .mob-scroll-pad-h,
+.mob-screen[data-screen="scheduled"] > .mob-scroll-pad-h {
+    padding-top: 18px;
+}
+
+/* ----------------------------------------------------------------
+   2-col quick-action grid (Home: New note / New chat).
+   ---------------------------------------------------------------- */
+
+.mob-quick-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-bottom: 24px;
+}
+.mob-quick-btn {
+    padding: 12px 14px;
+    border-radius: 12px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    text-align: left;
+    color: var(--fg-1);
+    font-size: 13.5px;
+    font-weight: 600;
+}
+.mob-quick-btn .glyph {
+    width: 20px;
+    height: 20px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+.mob-quick-btn.is-notes .glyph { color: var(--iris-400); }
+.mob-quick-btn.is-chat  .glyph { color: var(--moss-400); }
+
+/* ----------------------------------------------------------------
+   Section headings — Pinned / Recent labels.
+   ---------------------------------------------------------------- */
+
+.mob-section-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--fg-4);
+    /* Drop the 4px horizontal pad so eyebrow text starts at the
+       same x as the F-mark above and the row icon-tiles below. */
+    padding: 0 0 10px;
+}
+.mob-section-head .count {
+    text-transform: none;
+    letter-spacing: 0;
+    font-family: var(--font-sans);
+    font-size: 11px;
+}
+.mob-section-spacer { height: 22px; }
+
+/* ----------------------------------------------------------------
+   "List row" — shared by Home Pinned/Recent + Notes list. 32px
+   square icon + title + subtitle + chevron, separated by 1px
+   divider. Tappable.
+   ---------------------------------------------------------------- */
+
+.mob-list { display: flex; flex-direction: column; }
+
+.mob-row {
+    background: transparent;
+    border: 0;
+    border-bottom: 1px solid var(--border-subtle);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    /* Drop the 4px horizontal pad so the row icon-tile lines up
+       with the F-mark + section eyebrow x. */
+    padding: 12px 0;
+    text-align: left;
+    width: 100%;
+    color: inherit;
+}
+.mob-row:last-child { border-bottom: 0; }
+.mob-row .icon-tile {
+    width: 32px;
+    height: 32px;
+    border-radius: 9px;
+    flex-shrink: 0;
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.mob-row .icon-tile.is-chat  span { color: var(--moss-400); }
+.mob-row .icon-tile.is-notes span { color: var(--iris-400); }
+.mob-row .icon-tile.is-wiki  span { color: var(--slate-300); }
+.mob-row .icon-tile span {
+    width: 14px;
+    height: 14px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+.mob-row .body { flex: 1 1 0; min-width: 0; }
+.mob-row .title {
+    font-size: 13.5px;
+    font-weight: 500;
+    color: var(--fg-1);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.mob-row .meta {
+    font-size: 11px;
+    color: var(--fg-4);
+    margin-top: 2px;
+}
+.mob-row .chev { color: var(--fg-4); display: flex; }
+
+/* ----------------------------------------------------------------
+   Chat conversation row — slightly different shape: 38px round
+   avatar with chat glyph + title/timestamp on one line + last
+   message preview with name prefix.
+   ---------------------------------------------------------------- */
+
+.mob-chat-row {
+    display: flex;
+    gap: 12px;
+    padding: 11px 8px;
+    border-radius: 12px;
+    background: transparent;
+    border: 0;
+    cursor: pointer;
+    width: 100%;
+    text-align: left;
+    color: inherit;
+}
+.mob-chat-row .avatar {
+    width: 38px;
+    height: 38px;
+    border-radius: 11px;
+    flex-shrink: 0;
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.mob-chat-row .avatar span {
+    width: 15px;
+    height: 15px;
+    color: var(--moss-400);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+.mob-chat-row .body { flex: 1 1 0; min-width: 0; }
+.mob-chat-row .head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+}
+.mob-chat-row .name {
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--fg-1);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.mob-chat-row .when {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--fg-4);
+    flex-shrink: 0;
+}
+.mob-chat-row .preview {
+    font-size: 11.5px;
+    color: var(--fg-3);
+    line-height: 1.45;
+    margin-top: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.mob-chat-row .preview .who {
+    font-size: 11.5px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    margin-right: 6px;
+}
+.mob-chat-row .preview .who.is-familiar { color: var(--fg-1); }
+.mob-chat-row .preview .who.is-user     { color: var(--moss-400); }
+
+/* ----------------------------------------------------------------
+   Empty / loading state for list panes that fetch async data.
+   ---------------------------------------------------------------- */
+
+.mob-empty {
+    padding: 32px 18px;
+    color: var(--fg-4);
+    font-size: 13px;
+    text-align: center;
+}
+
+/* ----------------------------------------------------------------
+   Chat thread sub-screen — header + scrolling messages + input
+   pill. The bottom tab bar still shows so the user can jump out.
+   ---------------------------------------------------------------- */
+
+.mob-thread-head {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: calc(8px + env(safe-area-inset-top, 0px)) 12px 8px;
+    border-bottom: 1px solid var(--border-subtle);
+    gap: 6px;
+}
+.mob-thread-back {
+    background: transparent;
+    border: 0;
+    color: var(--fg-2);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    padding: 6px;
+    font-size: 13px;
+}
+.mob-thread-back svg { flex-shrink: 0; }
+.mob-thread-title {
+    text-align: center;
+    flex: 1 1 0;
+    min-width: 0;
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--fg-1);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Screen-center the title on the Actions detail/new headers. These have a
+   clean 3-part row (back · title · ⋯ or spacer), so flex-centering leaves
+   the title off-center because the back button is wider than the right
+   slot. Pull the title out of flow and center it on the header width.
+   (Notes/Wiki headers have a 4-element layout and keep the flex title.) */
+.mob-screen[data-screen="scheduled-detail"] > .mob-thread-head,
+.mob-screen[data-screen="scheduled-new"]    > .mob-thread-head { position: relative; }
+.mob-screen[data-screen="scheduled-detail"] > .mob-thread-head > .mob-thread-title,
+.mob-screen[data-screen="scheduled-new"]    > .mob-thread-head > .mob-thread-title {
+    position: absolute; left: 0; right: 0; margin: 0 auto;
+    width: max-content; max-width: 56%; pointer-events: none;
+}
+
+.mob-thread-scroll {
+    overflow: auto;
+    flex: 1 1 0;
+    -webkit-overflow-scrolling: touch;
+    padding: 14px 14px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+/* Anchor messages to the bottom of the scroll area when the
+   thread is short. The ::before pseudo absorbs leftover space as
+   a flex item; when content overflows it collapses to 0 and the
+   container scrolls normally so older messages remain reachable. */
+.mob-thread-scroll::before {
+    content: '';
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+/* No bubble chrome — names sit above plain wrapped text on the
+   canvas, same as desktop chat (.chat-msg). The visual back-and-
+   forth comes from a 10% indent against the OPPOSITE edge:
+   Familiar hugs the left and leaves a gap on the right; user
+   messages hug the right and leave a gap on the left. */
+.mob-msg {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-width: 90%;
+}
+.mob-msg.is-assistant {
+    align-self: flex-start;
+    align-items: flex-start;
+    text-align: left;
+}
+.mob-msg.is-user {
+    align-self: flex-end;
+    /* Block hugs the right; inside the block, name + body share
+       the same LEFT edge so the eyebrow doesn't drift over the
+       wrapped text. */
+    align-items: flex-start;
+    text-align: left;
+}
+.mob-msg .who {
+    font-family: var(--font-sans);
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+}
+.mob-msg.is-user      .who { color: var(--moss-400); }
+.mob-msg.is-assistant .who {
+    color: var(--fg-1);
+    font-weight: 600;
+}
+.mob-msg .bubble {
+    font-size: 14px;
+    line-height: 1.55;
+    color: var(--fg-1);
+    word-wrap: break-word;
+    overflow-wrap: anywhere;
+    background: transparent;
+    border: 0;
+    padding: 0;
+    border-radius: 0;
+}
+
+/* Working signal: the pixel indicator rides the "Thinking" reasoning
+   head while the model reasons, then drops when tokens stream (mobile.js
+   removes it) — the text carries the motion. Replaces the blinking caret.
+   The .rc-px component is shared with the research strip. */
+.mob-think-px { margin-left: 7px; vertical-align: -1px; }
+
+/* Send button becomes a small red-octagon Stop while generating. */
+.mob-thread-send.is-stop {
+    background: transparent; border: 0; padding: 0; min-width: 40px;
+    display: grid; place-items: center;
+}
+.mob-stop-oct {
+    width: 20px; height: 20px; background: var(--danger);
+    clip-path: polygon(30% 0, 70% 0, 100% 30%, 100% 70%, 70% 100%, 30% 100%, 0 70%, 0 30%);
+    box-shadow: 0 0 0 0 rgba(var(--danger-rgb), 0.35);
+    animation: mob-stop-pulse 1.7s ease-in-out infinite;
+}
+@keyframes mob-stop-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(var(--danger-rgb), 0.35); }
+    50% { box-shadow: 0 0 0 5px rgba(var(--danger-rgb), 0); }
+}
+/* Stop button on the research strip header. */
+.mob-research-strip .rc-stop {
+    flex: 0 0 auto; background: transparent; border: 0; cursor: pointer;
+    padding: 4px; margin: -4px 0 -4px 6px; border-radius: 6px; display: grid; place-items: center;
+}
+.mob-research-strip .rc-stop .mob-stop-oct { width: 17px; height: 17px; animation: none; }
+@media (prefers-reduced-motion: reduce) { .mob-stop-oct { animation: none; } }
+
+/* Research-in-progress strip (RESEARCH-SKILL-SPEC §6.7): compact,
+   single-line status pinned above the composer while an autonomous
+   deep-research run is live. Moss-tinted to echo the chat header;
+   rebuilt from polled server state each tick. */
+.mob-research-strip {
+    margin: 0 12px 6px;
+    border: 1px solid #5a3fce;
+    border-radius: 12px;
+    background: linear-gradient(180deg, rgba(106, 76, 224, 0.12), rgba(106, 76, 224, 0.03)), var(--bg-card);
+    box-shadow: 0 0 0 1px rgba(106, 76, 224, 0.10), 0 6px 20px rgba(8, 4, 22, 0.4);
+    color: var(--fg-2);
+    font-size: 13px;
+    line-height: 1.35;
+    overflow: hidden;
+    position: relative;
+    /* rgb triples for the pixel-indicator opacity math */
+    --rc-iris: 154, 124, 245;
+    --rc-moss: 92, 181, 133;
+    --rc-amber: 224, 164, 76;
+}
+.mob-research-strip[hidden] { display: none; }
+
+.mob-research-strip .rc-head { display: flex; align-items: center; gap: 10px; padding: 11px 12px; }
+.mob-research-strip .rc-title { min-width: 0; flex: 1 1 auto; }
+.mob-research-strip .rc-t { color: var(--fg-1); font-weight: 600; display: flex; gap: 6px; align-items: baseline; font-size: 13px; }
+.mob-research-strip .rc-topic { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mob-research-strip .rc-s { color: var(--fg-3); font-size: 11.5px; margin-top: 2px; }
+
+.mob-research-strip .rc-roster { padding: 2px 6px 4px; max-height: 38vh; overflow-y: auto; overscroll-behavior: contain; }
+.mob-research-strip .rc-row { display: flex; align-items: center; gap: 11px; padding: 8px; }
+.mob-research-strip .rc-row + .rc-row { border-top: 1px solid var(--border-subtle); }
+.mob-research-strip .rc-slot { width: 15px; display: flex; justify-content: center; flex: 0 0 auto; }
+.mob-research-strip .rc-label { flex: 1 1 auto; min-width: 0; color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.mob-research-strip .rc-row.rc-done .rc-label { color: var(--fg-3); }
+.mob-research-strip .rc-row.rc-queued .rc-label { color: var(--fg-4); }
+.mob-research-strip .rc-wstate { font-size: 11px; color: var(--fg-4); font-family: var(--font-mono, ui-monospace, monospace); flex: 0 0 auto; }
+.mob-research-strip .rc-row.rc-active .rc-wstate { color: #b9a6f8; }
+.mob-research-strip .rc-row.rc-done .rc-wstate { color: #82cfa4; }
+.mob-research-strip .rc-row.rc-failed .rc-wstate { color: #e0a44c; }
+
+.mob-research-strip .rc-meta {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 9px 12px; border-top: 1px solid var(--border-subtle);
+    font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; color: var(--fg-3);
+    font-variant-numeric: tabular-nums;
+}
+.mob-research-strip .rc-m { display: flex; align-items: baseline; gap: 5px; }
+.mob-research-strip .rc-k { color: var(--fg-4); font-size: 9.5px; letter-spacing: 0.08em; text-transform: uppercase; }
+.mob-research-strip .rc-m b { color: #b9a6f8; font-weight: 600; }
+.mob-research-strip .rc-m-moss b { color: #82cfa4; }
+
+/* Pixel indicator — shared shape with desktop (see app.css). */
+.rc-px { display: inline-flex; align-items: flex-end; gap: 3px; --pc: var(--rc-iris); }
+.rc-px .rc-c { display: flex; flex-direction: column; gap: 3px; }
+.rc-px .rc-c i { display: block; width: 3px; height: 3px; border-radius: 1px; background: rgba(var(--pc), 0.26); }
+.rc-px-anim .rc-c i { animation: rc-pxpulse 1.35s ease-in-out infinite; }
+.rc-px-anim .rc-c1 i { animation-delay: 0s; }
+.rc-px-anim .rc-c2 i { animation-delay: 0.16s; }
+.rc-px-anim .rc-c3 i { animation-delay: 0.32s; }
+@keyframes rc-pxpulse {
+    0%, 42%, 100% { background: rgba(var(--pc), 0.26); box-shadow: none; }
+    13% { background: rgba(var(--pc), 1); box-shadow: 0 0 6px rgba(var(--pc), 0.85); }
+}
+.rc-px-moss { --pc: var(--rc-moss); }
+.rc-px-amber { --pc: var(--rc-amber); }
+.rc-px-dim .rc-c i { background: rgba(var(--pc), 0.14); }
+.rc-px-fill .rc-c i { background: rgba(var(--pc), 0.9); }
+
+@media (prefers-reduced-motion: reduce) {
+    .rc-px-anim .rc-c i { animation: none; }
+    .rc-px-anim .rc-c i { background: rgba(var(--pc), 0.6); }
+}
+
+/* Markdown rendering inside the bubble — same shape as desktop's
+   .chat-msg-body rules, scaled for mobile. The renderer (marked +
+   DOMPurify) emits real <h1>/<p>/<pre>/<ul> nodes, so we style
+   them here. */
+.mob-msg .bubble > :first-child { margin-top: 0; }
+.mob-msg .bubble > :last-child  { margin-bottom: 0; }
+.mob-msg .bubble p { margin: 0 0 10px; }
+.mob-msg .bubble h1,
+.mob-msg .bubble h2,
+.mob-msg .bubble h3,
+.mob-msg .bubble h4,
+.mob-msg .bubble h5,
+.mob-msg .bubble h6 {
+    font-family: var(--font-sans);
+    font-weight: 600;
+    color: var(--fg-1);
+    margin: 14px 0 6px;
+    line-height: 1.25;
+    letter-spacing: -0.01em;
+}
+.mob-msg .bubble h1 { font-size: 18px; }
+.mob-msg .bubble h2 { font-size: 16px; }
+.mob-msg .bubble h3 { font-size: 15px; }
+.mob-msg .bubble h4,
+.mob-msg .bubble h5,
+.mob-msg .bubble h6 { font-size: 14px; }
+.mob-msg .bubble code:not(.hljs) {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    padding: 1px 5px;
+    border-radius: 4px;
+    color: var(--fg-1);
+}
+.mob-msg .bubble pre {
+    margin: 8px 0;
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    padding: 10px 12px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    font-size: 12px;
+    line-height: 1.5;
+}
+.mob-msg .bubble pre code,
+.mob-msg .bubble pre code.hljs {
+    background: transparent;
+    border: 0;
+    padding: 0;
+    font-size: inherit;
+    color: var(--fg-1);
+    white-space: pre;
+}
+.mob-msg .bubble ul,
+.mob-msg .bubble ol {
+    margin: 4px 0 10px;
+    padding-left: 22px;
+}
+.mob-msg .bubble li { margin: 2px 0; }
+.mob-msg .bubble blockquote {
+    margin: 8px 0;
+    padding: 0 12px;
+    border-left: 2px solid var(--border-default);
+    color: var(--fg-3);
+}
+.mob-msg .bubble a {
+    color: var(--iris-300);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+.mob-msg .bubble hr {
+    margin: 12px 0;
+    border: 0;
+    border-top: 1px solid var(--border-subtle);
+}
+.mob-msg .bubble table {
+    margin: 8px 0;
+    border-collapse: collapse;
+    font-size: 12.5px;
+}
+.mob-msg .bubble th,
+.mob-msg .bubble td {
+    padding: 6px 10px;
+    border: 1px solid var(--border-subtle);
+    text-align: left;
+}
+.mob-msg .bubble .mob-md-fallback {
+    white-space: pre-wrap;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+}
+
+
+.mob-msg .reasoning {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--fg-3);
+    margin-bottom: 8px;
+    letter-spacing: 0.02em;
+    padding-left: 10px;
+    border-left: 2px solid var(--iris-400);
+    cursor: pointer;
+}
+.mob-msg .reasoning .body { display: none; margin-top: 6px; white-space: pre-wrap; }
+.mob-msg .reasoning.is-open .body { display: block; }
+/* Debug metrics tucked at the bottom of the reasoning body — only
+   surfaces when the user expands. Hairline divider above so it
+   reads as separate from the reasoning trace. */
+.mob-msg .reasoning .body .metrics {
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px dashed var(--border-subtle);
+    font-size: 10.5px;
+    color: var(--fg-4);
+    letter-spacing: 0.01em;
+    white-space: normal;
+}
+
+.mob-thread-input-wrap {
+    flex: 0 0 auto;
+    padding: 8px 12px calc(8px + env(safe-area-inset-bottom, 0px));
+    border-top: 1px solid var(--border-subtle);
+    background: var(--graphite-900);
+}
+.mob-thread-input {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-default);
+    border-radius: 999px;
+    padding: 6px 6px 6px 14px;
+}
+.mob-thread-input input {
+    flex: 1 1 0;
+    border: 0;
+    background: transparent;
+    outline: none;
+    color: var(--fg-1);
+    /* iOS Safari auto-zooms when a focused field's font-size is
+       below 16px — keep this at 16 to suppress the zoom. */
+    font-size: 16px;
+    font-family: inherit;
+    min-width: 0;
+}
+.mob-thread-send {
+    height: 30px;
+    padding: 0 14px;
+    border-radius: 999px;
+    background: var(--iris-500);
+    border: 0;
+    cursor: pointer;
+    color: #fff;
+    font-weight: 600;
+    font-size: 12.5px;
+    letter-spacing: -0.02em;
+}
+.mob-thread-send:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* On the chat-thread screen we hide the bottom tab bar — the
+   back button takes the user out, and removing the bar gives
+   the message input more room. Same treatment on notes-detail
+   so the soft keyboard has room. */
+.mob-app:has(.mob-screen[data-screen="chat-thread"].is-active)   .mob-tabbar,
+.mob-app:has(.mob-screen[data-screen="notes-detail"].is-active)  .mob-tabbar,
+.mob-app:has(.mob-screen[data-screen="wiki-page"].is-active)     .mob-tabbar,
+.mob-app:has(.mob-screen[data-screen="scheduled-detail"].is-active) .mob-tabbar,
+.mob-app:has(.mob-screen[data-screen="scheduled-new"].is-active) .mob-tabbar { display: none; }
+
+/* ----------------------------------------------------------------
+   Note detail — title input pinned in the header row alongside
+   back/status, full-bleed textarea below. Reuses .mob-thread-head
+   for the chrome so the back button is identical to chat-thread.
+   ---------------------------------------------------------------- */
+
+.mob-note-title-input {
+    flex: 1 1 0;
+    min-width: 0;
+    text-align: center;
+    background: transparent;
+    border: 0;
+    color: var(--fg-1);
+    /* 16px floor avoids iOS Safari's focus-zoom. The note/wiki
+       thread-head used to render this at 13.5px to match the chat
+       title, but inputs need to hit the floor regardless. */
+    font-size: 16px;
+    font-weight: 600;
+    font-family: inherit;
+    outline: none;
+    padding: 0 4px;
+}
+.mob-note-title-input::placeholder { color: var(--fg-4); }
+
+.mob-note-status {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    /* Lightened from --fg-4 so "saved" / "Synced — <actor>" reads
+       against the header surround on phone screens. */
+    color: var(--fg-2);
+    min-width: 48px;
+    text-align: right;
+}
+
+/* Overflow menu — used in both chat-thread and notes-detail
+   headers. Click ⋯ → menu opens beneath the button anchored to
+   its right edge; click anywhere else closes. Single "Delete"
+   item for now; extra rows can stack when we have more actions. */
+.mob-overflow {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+}
+.mob-overflow-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    min-width: 160px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-default);
+    border-radius: 10px;
+    padding: 4px;
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.4);
+    z-index: 50;
+    display: none;
+    flex-direction: column;
+}
+.mob-overflow.is-open .mob-overflow-menu { display: flex; }
+.mob-overflow-item {
+    background: transparent;
+    border: 0;
+    padding: 10px 12px;
+    text-align: left;
+    color: var(--fg-1);
+    font-family: inherit;
+    font-size: 14px;
+    cursor: pointer;
+    border-radius: 6px;
+}
+.mob-overflow-item:hover,
+.mob-overflow-item:active { background: var(--bg-hover, rgba(255, 255, 255, 0.04)); }
+.mob-overflow-item.is-danger { color: #E37A74; }
+.mob-overflow-item.is-danger:hover,
+.mob-overflow-item.is-danger:active { background: rgba(227, 122, 116, 0.10); }
+/* Empty/info row in an overflow menu — used by wiki-page when
+   the caller is a reader and there are no actions to show. */
+.mob-overflow-empty {
+    padding: 10px 12px;
+    color: var(--fg-4);
+    font-size: 12px;
+    font-family: var(--font-mono);
+    letter-spacing: 0.04em;
+    text-align: center;
+}
+.mob-overflow-empty[hidden] { display: none; }
+.mob-overflow-sep {
+    height: 1px;
+    background: var(--border-subtle);
+    margin: 4px 8px;
+}
+
+/* ----------------------------------------------------------------
+   Hide the bottom tab bar on the user-area sub-screens (Account /
+   Memory) — same treatment as chat-thread + notes-detail. The
+   back button is the way out.
+   ---------------------------------------------------------------- */
+.mob-app:has(.mob-screen[data-screen="account"].is-active) .mob-tabbar,
+.mob-app:has(.mob-screen[data-screen="memory"].is-active)  .mob-tabbar { display: none; }
+
+/* ----------------------------------------------------------------
+   Account sub-screen — identity card at top, vault row, sessions
+   list, sign-out button at the bottom. The header row uses the
+   shared .mob-thread-head shell.
+   ---------------------------------------------------------------- */
+.mob-account-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    padding: 28px 16px 22px;
+    border-bottom: 1px solid var(--border-subtle);
+    margin-bottom: 18px;
+}
+.mob-account-avatar {
+    width: 64px;
+    height: 64px;
+    border-radius: 999px;
+    background: var(--iris-soft-bg);
+    border: 1px solid var(--iris-soft-border);
+    color: var(--iris-300);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 26px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    margin-bottom: 14px;
+}
+.mob-account-name {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--fg-1);
+    letter-spacing: -0.02em;
+}
+.mob-account-email {
+    font-size: 13px;
+    color: var(--fg-3);
+    margin-top: 2px;
+    font-family: var(--font-mono);
+}
+.mob-account-role {
+    margin-top: 8px;
+    font-size: 10px;
+    font-family: var(--font-mono);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--fg-4);
+}
+
+.mob-row.mob-row-static { cursor: default; }
+.mob-row.mob-row-static:hover { background: transparent; }
+
+.mob-account-signout {
+    width: 100%;
+    margin: 10px 0 24px;
+    padding: 12px 14px;
+    background: transparent;
+    border: 1px solid rgba(227, 122, 116, 0.30);
+    border-radius: 10px;
+    color: #E37A74;
+    font-family: inherit;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+}
+.mob-account-signout:active { transform: scale(0.99); }
+
+/* ----------------------------------------------------------------
+   Memory sub-screen — store-total stat cells on top, top entities
+   by degree below. Tapping a row opens memory/<name>: the facts
+   the entity's triples were extracted from.
+   ---------------------------------------------------------------- */
+.mob-memory-stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    margin-bottom: 22px;
+}
+.mob-memory-stat {
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: 14px;
+    padding: 14px 10px;
+    text-align: center;
+}
+.mob-memory-stat .num {
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--fg-1);
+    font-variant-numeric: tabular-nums;
+}
+.mob-memory-stat .lbl {
+    margin-top: 3px;
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--fg-4);
+}
+.mob-memory-group-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: 14px;
+    overflow: hidden;
+}
+.mob-memory-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--border-subtle);
+    background: transparent;
+    border-left: 0;
+    border-right: 0;
+    border-top: 0;
+    cursor: pointer;
+    width: 100%;
+    text-align: left;
+    color: inherit;
+    font-family: inherit;
+}
+.mob-memory-row:last-child { border-bottom: 0; }
+.mob-memory-row .glyph {
+    color: var(--slate-300);
+    flex-shrink: 0;
+    width: 13px;
+    height: 13px;
+    display: inline-flex;
+}
+.mob-memory-row .body { flex: 1 1 0; min-width: 0; }
+.mob-memory-row .title {
+    font-size: 13.5px;
+    font-weight: 500;
+    color: var(--fg-1);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.mob-memory-row .meta {
+    font-size: 11px;
+    color: var(--fg-4);
+    margin-top: 2px;
+    font-family: var(--font-mono);
+}
+.mob-memory-row .chev { color: var(--fg-4); display: flex; }
+
+/* Entity-detail fact rows — full-width content (no ellipsis; the
+   fact IS the payload), mono meta line underneath. */
+.mob-memory-fact {
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--border-subtle);
+}
+.mob-memory-fact:last-child { border-bottom: 0; }
+.mob-memory-fact .title {
+    font-size: 13.5px;
+    color: var(--fg-1);
+    line-height: 1.45;
+}
+.mob-memory-fact .meta {
+    font-size: 10.5px;
+    color: var(--fg-4);
+    margin-top: 3px;
+    font-family: var(--font-mono);
+}
+
+/* Toast UI editor host. The element is now a <div> the editor
+   builds into (was a textarea pre-Toast UI). Pin to the area below
+   the title header via flex 1 + min-height: 0 so the canvas grows
+   to fill the screen. */
+.mob-note-body {
+    flex: 1 1 0;
+    min-height: 0;
+    width: 100%;
+    background: var(--bg-canvas);
+    color: var(--fg-1);
+    position: relative;
+    overflow: hidden;
+}
+/* Toast UI's host fills the wrapper. */
+.mob-note-body .toastui-editor-defaultUI {
+    position: absolute;
+    inset: 0;
+    background: var(--bg-canvas);
+    border: none;
+    color: var(--fg-1);
+    display: flex;
+    flex-direction: column;
+}
+/* Drop the toolbar — no icon font available, same as desktop. */
+.mob-note-body .toastui-editor-toolbar,
+.mob-note-body .toastui-editor-defaultUI-toolbar {
+    display: none !important;
+}
+.mob-note-body .toastui-editor-main {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+.mob-note-body .toastui-editor,
+.mob-note-body .toastui-editor-md-container,
+.mob-note-body .toastui-editor-ww-container {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    background: var(--bg-canvas);
+    color: var(--fg-1);
+}
+.mob-note-body .toastui-editor-contents {
+    color: var(--fg-1);
+    font-family: var(--font-sans);
+    /* iOS Safari zooms on focus when a contenteditable's font-size
+       is below 16px. The Toast UI editor is a contenteditable so
+       the same rule applies — bump to 16 to keep the page from
+       jumping when the keyboard opens. */
+    font-size: 16px;
+    line-height: 1.55;
+    padding: 14px 18px calc(18px + env(safe-area-inset-bottom, 0px));
+    min-height: 100%;
+    box-sizing: border-box;
+}
+.mob-note-body .toastui-editor-contents h1,
+.mob-note-body .toastui-editor-contents h2,
+.mob-note-body .toastui-editor-contents h3,
+.mob-note-body .toastui-editor-contents h4,
+.mob-note-body .toastui-editor-contents h5,
+.mob-note-body .toastui-editor-contents h6 {
+    color: var(--fg-1);
+    border-color: var(--border-subtle);
+}
+/* Link styling inside the note/wiki editor.
+   - .wiki-link is the internal [[Page]] chip (styled elsewhere).
+   - Bare anchors and .ext-link cover regular markdown links; both
+     get the info-blue color + underline-on-hover so they read as
+     clickable. The wikilink.js click handler funnels http(s) ones
+     to window.open(_blank), so the cursor:pointer hint isn't a lie. */
+.mob-note-body .toastui-editor-contents a {
+    color: var(--info-soft-fg);
+    cursor: pointer;
+    text-decoration: none;
+}
+.mob-note-body .toastui-editor-contents a:hover,
+.mob-note-body .toastui-editor-contents a:focus {
+    text-decoration: underline;
+}
+.mob-note-body .toastui-editor-contents code,
+.mob-note-body .toastui-editor-contents pre {
+    background: var(--bg-raised);
+    color: var(--fg-1);
+    font-family: var(--font-mono);
+}
+.mob-note-body .toastui-editor-contents blockquote {
+    border-left-color: var(--iris-300);
+    color: var(--fg-2);
+}
+.mob-note-body .toastui-editor-mode-switch {
+    background: var(--bg-surface);
+    border-top: 1px solid var(--border-subtle);
+}
+.mob-note-body .toastui-editor-mode-switch .tab-item {
+    color: var(--fg-3);
+    background: transparent;
+    border: none;
+}
+.mob-note-body .toastui-editor-mode-switch .tab-item.active {
+    color: var(--fg-1);
+    background: var(--bg-raised);
+}
+
+/* ----------------------------------------------------------------
+   Notes list row (slightly slimmer than Home rows: 14px icon, no
+   tile background — the icon is the only visual marker).
+   ---------------------------------------------------------------- */
+
+.mob-note-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 4px;
+    border: 0;
+    border-bottom: 1px solid var(--border-subtle);
+    background: transparent;
+    cursor: pointer;
+    width: 100%;
+    text-align: left;
+    color: inherit;
+}
+.mob-note-row:last-child { border-bottom: 0; }
+.mob-note-row .glyph {
+    width: 14px;
+    height: 14px;
+    color: var(--iris-400);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+.mob-note-row .body { flex: 1 1 0; min-width: 0; }
+.mob-note-row .title {
+    font-size: 13.5px;
+    font-weight: 500;
+    color: var(--fg-1);
+}
+.mob-note-row .meta {
+    font-size: 11px;
+    color: var(--fg-4);
+    margin-top: 2px;
+}
+.mob-note-row .chev { color: var(--fg-4); display: flex; }
+
+/* ----------------------------------------------------------------
+   Wiki book selector — 2-col card grid above the page list. Cards
+   take their visual cues from the (deleted) notes folder grid in
+   the design mocks: name + page count, with the active book lit up
+   in the slate-blue category color so it reads as "you are here"
+   without a separate selected-pill bar.
+   ---------------------------------------------------------------- */
+
+.mob-book-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-bottom: 18px;
+}
+.mob-book-card {
+    padding: 12px 14px;
+    border-radius: 12px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    color: var(--fg-3);
+    cursor: pointer;
+    text-align: left;
+    /* override <button> defaults */
+    font-family: inherit;
+}
+.mob-book-card .name {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 13px;
+    color: var(--fg-1);
+    font-weight: 500;
+    min-width: 0;
+}
+.mob-book-card .name span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.mob-book-card .count {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--fg-4);
+    flex-shrink: 0;
+}
+.mob-book-card.is-active {
+    background: linear-gradient(rgba(78, 106, 173, 0.18), rgba(78, 106, 173, 0.18)), var(--bg-card);
+    border-color: rgba(118, 140, 170, 0.32);
+}
+.mob-book-card.is-active .name { color: var(--slate-300); }
+.mob-book-card.is-active .count { color: var(--slate-300); }
+
+.mob-wiki-row {
+    background: transparent;
+    border: 0;
+    border-bottom: 1px solid var(--border-subtle);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 8px;
+    text-align: left;
+    width: 100%;
+    color: inherit;
+}
+.mob-wiki-row:last-child { border-bottom: 0; }
+.mob-wiki-row .letter {
+    width: 44px;
+    height: 44px;
+    border-radius: 10px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 17px;
+    letter-spacing: -0.025em;
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    color: var(--fg-2);
+}
+.mob-wiki-row .letter.is-iris  { background: var(--iris-soft-bg); border-color: var(--iris-soft-border); color: var(--iris-300); }
+.mob-wiki-row .letter.is-moss  { background: rgba(105, 168, 134, 0.14); border-color: rgba(105, 168, 134, 0.28); color: var(--moss-400); }
+.mob-wiki-row .letter.is-slate { background: rgba(118, 140, 170, 0.14); border-color: rgba(118, 140, 170, 0.26); color: var(--slate-300); }
+.mob-wiki-row .letter.is-sun   { background: rgba(232, 190, 85, 0.12); border-color: rgba(232, 190, 85, 0.24); color: var(--sun-400); }
+.mob-wiki-row .body { flex: 1 1 0; min-width: 0; }
+.mob-wiki-row .title {
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--fg-1);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.mob-wiki-row .meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--fg-4);
+    font-family: var(--font-mono);
+    letter-spacing: 0.02em;
+    margin-top: 2px;
+}
+.mob-wiki-row .meta svg { flex-shrink: 0; }
+.mob-wiki-row .meta span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mob-wiki-row .chev { color: var(--fg-4); display: flex; }
+
+/* ----------------------------------------------------------------
+   Shards cards — pill toggle on the right. The first card in the
+   mockup is highlighted iris (i.e., enabled).
+   ---------------------------------------------------------------- */
+
+.mob-shard-list { display: flex; flex-direction: column; gap: 8px; }
+.mob-shard-card {
+    padding: 14px;
+    border-radius: 14px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    display: flex;
+    gap: 12px;
+    align-items: center;
+}
+.mob-shard-card.is-on {
+    background: var(--iris-soft-bg);
+    border-color: var(--iris-soft-border);
+}
+.mob-shard-card .glyph {
+    width: 34px;
+    height: 34px;
+    border-radius: 9px;
+    flex-shrink: 0;
+    background: var(--graphite-900);
+    border: 1px solid var(--border-subtle);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--fg-2);
+}
+.mob-shard-card.is-on .glyph {
+    background: rgba(106, 76, 224, 0.18);
+    border-color: var(--iris-soft-border);
+    color: var(--iris-300);
+}
+.mob-shard-card.is-sun .glyph {
+    background: rgba(232, 190, 85, 0.10);
+    border-color: rgba(232, 190, 85, 0.22);
+    color: var(--sun-400);
+}
+.mob-shard-card .glyph span {
+    width: 16px;
+    height: 16px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+.mob-shard-card .body { flex: 1 1 0; min-width: 0; }
+.mob-shard-card .title {
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--fg-1);
+}
+.mob-shard-card .desc {
+    font-size: 11.5px;
+    color: var(--fg-3);
+    margin-top: 2px;
+}
+
+/* Read-only status chip on the right of each shard card — replaces
+   the on/off toggle until we wire activate/deactivate from mobile.
+   Two states: ACTIVE (iris) and DISABLED (muted). */
+.mob-shard-status {
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    padding: 4px 8px;
+    border-radius: 999px;
+    background: var(--graphite-800);
+    color: var(--fg-4);
+    border: 1px solid var(--border-subtle);
+}
+.mob-shard-status.is-on {
+    background: var(--iris-soft-bg);
+    color: var(--iris-300);
+    border-color: var(--iris-soft-border);
+}
+
+/* ----------------------------------------------------------------
+   Bottom tab bar — 5 buttons. Active tab gets a colored pill bg
+   behind the icon; the colored icon and label match per-tab.
+   Honors iOS home indicator via env() safe-area-inset-bottom.
+   ---------------------------------------------------------------- */
+
+.mob-tabbar {
+    flex: 0 0 auto;
+    border-top: 1px solid var(--border-subtle);
+    background: rgba(11, 11, 15, 0.82);
+    backdrop-filter: blur(16px);
+    /* The full iOS home-indicator inset (~34pt) leaves a heavy
+       "chin" of blank tab-bar background below the labels. Apple
+       HIG only asks for an 8pt clearance above the indicator —
+       subtract the bulk of the inset so the labels sit nearer the
+       bottom edge. Floors at 4px so non-iOS preview surfaces still
+       get a touch of breathing room. */
+    padding-bottom: max(env(safe-area-inset-bottom, 0px) - 16px, 4px);
+}
+.mob-tabbar-inner {
+    display: flex;
+    height: 50px;
+    align-items: stretch;
+    padding: 4px 6px 0;
+}
+.mob-tab {
+    flex: 1 1 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: 0;
+    cursor: pointer;
+    padding: 0;
+    color: var(--fg-3);
+}
+/* The highlight lozenge — wraps icon + label so the active tint sits
+   behind both (mirrors the desktop sidebar's full-row tint). Content-
+   width, centered, with a rounded-rect background when active. */
+.mob-tab-hl {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    padding: 6px 13px;
+    border-radius: 14px;
+    max-width: 100%;
+    background: transparent;
+    transition: background 200ms var(--ease-out);
+}
+.mob-tab .glyph {
+    width: 20px;
+    height: 20px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--cat-color, var(--fg-3));
+}
+.mob-tab .label {
+    font-size: 10px;
+    letter-spacing: -0.005em;
+    font-weight: 500;
+}
+/* Per-tab category color + active tint — the exact values the desktop
+   left nav uses (app.css .sidebar-cat-*), so the two read as one app. */
+.mob-tab[data-tab="home"]      { --cat-color: var(--graphite-200); --cat-soft: rgba(255, 255, 255, 0.08); }
+.mob-tab[data-tab="chat"]      { --cat-color: var(--moss-500);     --cat-soft: rgba(62, 154, 106, 0.16); }
+.mob-tab[data-tab="notes"]     { --cat-color: var(--iris-500);     --cat-soft: rgba(106, 76, 224, 0.14); }
+.mob-tab[data-tab="wiki"]      { --cat-color: var(--slate-500);    --cat-soft: rgba(78, 106, 173, 0.18); }
+.mob-tab[data-tab="scheduled"] { --cat-color: var(--teal-400);     --cat-soft: rgba(45, 212, 191, 0.14); }
+.mob-tab.is-active { color: var(--fg-1); }
+.mob-tab.is-active .label { font-weight: 600; color: var(--fg-1); }
+.mob-tab.is-active .mob-tab-hl { background: var(--cat-soft); }
+
+/* Inline wiki-links rendered inside the Toast UI editor by
+   wikilink.js. Same shape as the desktop variant in app.css —
+   defined here too because mobile.html doesn't load app.css. */
+.wiki-link {
+    color: var(--iris-300, #B0A2EE);
+    text-decoration: underline;
+    cursor: pointer;
+}
+.wiki-link:active {
+    color: var(--iris-200, #C8BEFF);
+}
+
+/* ----------------------------------------------------------------
+   Pull-to-refresh indicator. Lives at the top of #mob-app, slides
+   into view via transform during a touch drag. mobile.js owns the
+   transform / opacity / label updates; CSS only defines the resting
+   shape + the spin animation.
+   ---------------------------------------------------------------- */
+.mob-ptr {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 56px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    transform: translateY(-100%);
+    transition: transform 220ms ease-out, opacity 220ms ease-out;
+    opacity: 0;
+    pointer-events: none;
+    z-index: 60;
+    background: linear-gradient(180deg, rgba(15,15,20,0.92), rgba(15,15,20,0.0));
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    color: var(--fg-2, #c9c9d4);
+    font: 500 12px/1 "Geist Mono", ui-monospace, monospace;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+/* While the user is actively dragging, mobile.js writes inline
+   transform/opacity each frame; remove the transition so it tracks
+   the finger 1:1. The .is-dragging class toggles this. */
+.mob-ptr.is-dragging {
+    transition: none;
+}
+.mob-ptr-spinner {
+    width: 14px;
+    height: 14px;
+    border: 1.5px solid rgba(255,255,255,0.18);
+    border-top-color: var(--iris-300, #B0A2EE);
+    border-radius: 999px;
+}
+.mob-ptr.is-spinning .mob-ptr-spinner {
+    animation: mob-ptr-spin 0.7s linear infinite;
+}
+@keyframes mob-ptr-spin {
+    to { transform: rotate(360deg); }
+}
+
+/* Mermaid diagram blocks (shared semantics with app.css). */
+.mermaid-block {
+    margin: 12px 0;
+    padding: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 8px;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    font-size: 12px;
+}
+.mermaid-block.is-rendered { white-space: normal; }
+.mermaid-block.is-rendered svg { max-width: 100%; height: auto; }
+.mermaid-block.is-error { border-color: rgba(208, 81, 74, 0.45); }
+
+/* Image resize (shared semantics with app.css). */
+.familiar-img-wrap { position: relative; display: inline-block; max-width: 100%; line-height: 0; }
+.familiar-img-wrap img { width: 100%; height: auto; display: block; }
+.familiar-img-wrap.is-selected { outline: 2px solid #E8853D; outline-offset: 2px; }
+.familiar-img-chips { position: absolute; top: 6px; right: 6px; display: none; gap: 4px; line-height: normal; }
+.familiar-img-wrap.is-selected .familiar-img-chips { display: inline-flex; }
+.familiar-img-chip { border: 1px solid rgba(255,255,255,0.3); background: rgba(0,0,0,0.6); color: #fff; border-radius: 4px; font-size: 11px; padding: 3px 8px; }
+.familiar-img-handle { position: absolute; right: -7px; bottom: -7px; width: 16px; height: 16px; border-radius: 3px; background: #E8853D; border: 2px solid #111; cursor: nwse-resize; display: none; touch-action: none; }
+.familiar-img-wrap.is-selected .familiar-img-handle { display: block; }
+
+/* Hide Toast UI's WYSIWYG code-block language badge + popup — we edit
+   inline; the floating "language ✎" overlay is just noise. */
+.toastui-editor-ww-code-block::after,
+.toastui-editor-ww-code-block-language { display: none !important; }
+
+/* Rebalance Toast UI's lopsided heading margins (big top, ~0 bottom)
+   so body text isn't crowded under each header. */
+.toastui-editor-contents h1 { margin: 24px 0 11px; }
+.toastui-editor-contents h2 { margin: 22px 0 10px; }
+.toastui-editor-contents h3 { margin: 20px 0 8px; }
+.toastui-editor-contents h4,
+.toastui-editor-contents h5,
+.toastui-editor-contents h6 { margin: 16px 0 8px; }
+.toastui-editor-contents > :first-child { margin-top: 0; }
+
+/* Compact pill button (Account → Notifications toggle). */
+.mob-pill {
+    flex-shrink: 0;
+    padding: 8px 16px;
+    border-radius: 999px;
+    border: 1px solid var(--iris-soft-border);
+    background: var(--iris-soft-bg);
+    color: var(--fg-1);
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+}
+.mob-pill:active { transform: scale(0.97); }
+.mob-pill:disabled { opacity: 0.5; cursor: default; }
+.mob-pill[hidden] { display: none; }
+
+/* Maintenance-mode banner — top of the app shell when the big model
+   is offline and a slower fallback answers. Amber/warning accent. */
+.mob-maint-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px;
+    background: linear-gradient(rgba(232, 190, 85, 0.18), rgba(232, 190, 85, 0.18)), var(--graphite-950);
+    border-bottom: 1px solid rgba(232, 190, 85, 0.45);
+    color: var(--fg-1);
+    font-size: 13px;
+}
+.mob-maint-icon { color: #E8BE55; flex: 0 0 auto; }
+
+/* ================================================================
+   SCHEDULED ACTIONS (mobile) — list cards, detail (run-now, prompt
+   edit, past runs), create form. Teal accent matches the desktop
+   scheduled category color.
+   ================================================================ */
+
+.mob-sa-list { display: flex; flex-direction: column; gap: 8px; }
+
+/* List card — tappable row leading to the detail screen. */
+.mob-sa-card {
+    width: 100%;
+    text-align: left;
+    padding: 14px;
+    border-radius: 14px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    cursor: pointer;
+    color: inherit;
+    font-family: inherit;
+}
+.mob-sa-card:active { transform: scale(0.99); }
+.mob-sa-card.is-off { opacity: 0.6; }
+.mob-sa-glyph {
+    width: 36px; height: 36px; border-radius: 9px; flex: 0 0 auto;
+    background: var(--teal-soft-bg); border: 1px solid var(--teal-soft-border);
+    display: flex; align-items: center; justify-content: center; color: var(--teal-300);
+}
+.mob-sa-glyph svg { width: 20px; height: 20px; }
+.mob-sa-card.is-off .mob-sa-glyph {
+    background: var(--graphite-900); border-color: var(--border-subtle); color: var(--fg-4);
+}
+.mob-sa-card .body { flex: 1 1 0; min-width: 0; }
+.mob-sa-card .t { font-size: 14px; font-weight: 600; color: var(--fg-1);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mob-sa-card .m { font-size: 12px; color: var(--fg-3); margin-top: 3px; }
+
+/* Status pill — shared by list cards and run rows. */
+.mob-sa-status {
+    flex: 0 0 auto; font-size: 10px; font-family: var(--font-mono);
+    text-transform: uppercase; letter-spacing: 0.04em; padding: 4px 9px;
+    border-radius: 999px; font-weight: 600;
+}
+.mob-sa-status.ok   { background: rgba(92,181,133,0.15); border: 1px solid rgba(92,181,133,0.30); color: #86d6a8; }
+.mob-sa-status.err  { background: rgba(229,97,107,0.14); border: 1px solid rgba(229,97,107,0.30); color: #f0939a; }
+.mob-sa-status.run  { background: var(--teal-soft-bg); border: 1px solid var(--teal-soft-border); color: var(--teal-300); }
+.mob-sa-status.skip { background: var(--graphite-800); border: 1px solid var(--border-subtle); color: var(--slate-300); }
+.mob-sa-status.off  { background: var(--graphite-800); border: 1px solid var(--border-subtle); color: var(--fg-4); }
+
+/* Detail body needs breathing room below the header (the list screens
+   get padding-top from the shared rule; the detail screen doesn't). */
+.mob-screen[data-screen="scheduled-detail"] > .mob-scroll-pad-h { padding-top: 16px; }
+
+/* Detail — run now */
+.mob-sa-run {
+    width: 100%; padding: 11px 14px; border-radius: 12px;
+    border: 1px solid var(--teal-soft-border); background: var(--teal-soft-bg);
+    color: var(--teal-300); font-family: inherit; font-size: 14px; font-weight: 600;
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    margin: 0 0 16px; cursor: pointer;
+}
+.mob-sa-run:active { transform: scale(0.99); }
+.mob-sa-run-ico {
+    flex: 0 0 16px; width: 16px; height: 16px;
+    display: flex; align-items: center; justify-content: center;
+}
+.mob-sa-run-ico svg { width: 16px; height: 16px; display: block; }
+.mob-sa-run.is-busy { opacity: 0.7; }
+
+.mob-sa-meta { display: flex; gap: 10px; margin-bottom: 18px; }
+.mob-sa-chip {
+    flex: 1 1 0; min-width: 0; background: var(--bg-raised);
+    border: 1px solid var(--border-subtle); border-radius: 12px; padding: 11px 12px;
+}
+.mob-sa-chip .k { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--fg-4); font-family: var(--font-mono); }
+.mob-sa-chip .v { font-size: 13px; color: var(--fg-1); font-weight: 600; margin-top: 4px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Form fields — shared by create form + detail prompt editor */
+.mob-sa-flabel {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--fg-3); font-weight: 600; margin: 14px 2px 8px; display: block;
+}
+.mob-sa-input, .mob-sa-textarea {
+    width: 100%; background: var(--bg-raised); border: 1px solid var(--border-default);
+    border-radius: 12px; padding: 12px 13px; color: var(--fg-1);
+    font-family: inherit; font-size: 14px; line-height: 1.5;
+    -webkit-appearance: none; appearance: none;
+}
+.mob-sa-input:focus, .mob-sa-textarea:focus { outline: none; border-color: var(--teal-soft-border); }
+.mob-sa-textarea { min-height: 110px; resize: vertical; }
+select.mob-sa-input {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%237A7A86' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 13px center; padding-right: 36px;
+}
+
+.mob-sa-presets { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.mob-sa-preset {
+    padding: 6px 12px; border-radius: 999px; border: 1px solid var(--border-default);
+    background: transparent; color: var(--fg-3); font-family: inherit; font-size: 12px; cursor: pointer;
+}
+.mob-sa-preset:active { background: var(--teal-soft-bg); color: var(--teal-300); }
+
+.mob-sa-save-row { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
+.mob-sa-savebtn {
+    padding: 11px 18px; border-radius: 11px; border: 1px solid var(--iris-soft-border);
+    background: var(--iris-soft-bg); color: var(--fg-1); font-family: inherit;
+    font-size: 13.5px; font-weight: 600; cursor: pointer;
+}
+.mob-sa-save-hint { font-size: 12px; color: var(--fg-3); }
+
+.mob-sa-sechead {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg-4);
+    font-weight: 600; font-family: var(--font-mono); margin: 26px 2px 10px;
+}
+
+/* Past-run rows */
+.mob-sa-run-row {
+    display: flex; gap: 11px; align-items: flex-start;
+    padding: 11px 2px; border-bottom: 1px solid var(--border-subtle);
+}
+.mob-sa-run-row .col { flex: 1 1 0; min-width: 0; }
+.mob-sa-run-row .when { font-size: 12.5px; color: var(--fg-2); font-weight: 500; }
+.mob-sa-run-row .sub { font-size: 11px; color: var(--fg-4); margin-top: 3px; font-family: var(--font-mono); }
+.mob-sa-run-row .out { font-size: 11.5px; color: var(--fg-3); margin-top: 5px; line-height: 1.45;
+    overflow-wrap: anywhere; }
+
+/* Info note (create form + account shards) */
+.mob-sa-note {
+    margin-top: 16px; padding: 12px 13px; border-radius: 12px;
+    background: var(--bg-raised); border: 1px dashed var(--border-default);
+    display: flex; gap: 10px; align-items: flex-start;
+}
+/* Fixed-size icon slot — a bare <svg> with CSS width/height stretches
+   inside this flex row on iOS WebKit (it ignores the dimensions), so the
+   icon lives in a locked 16px box, the same pattern the glyph tiles use. */
+.mob-sa-note-ico {
+    flex: 0 0 16px; width: 16px; height: 16px; margin-top: 1px;
+    display: flex; align-items: center; justify-content: center; color: var(--slate-300);
+}
+.mob-sa-note-ico svg { width: 16px; height: 16px; display: block; }
+.mob-sa-note span { font-size: 12px; color: var(--fg-3); line-height: 1.5; }
+.mob-shards-note { margin-top: 10px; }
+
+.mob-sa-form-error {
+    margin-top: 14px; padding: 10px 12px; border-radius: 10px;
+    background: rgba(229,97,107,0.12); border: 1px solid rgba(229,97,107,0.30);
+    color: #f0939a; font-size: 12.5px;
+}
+.mob-sa-submit {
+    width: 100%; margin-top: 16px; padding: 14px; border-radius: 14px;
+    border: 1px solid var(--teal-soft-border); background: var(--teal-soft-bg);
+    color: var(--teal-300); font-family: inherit; font-size: 15px; font-weight: 600; cursor: pointer;
+}
+.mob-sa-submit:active { transform: scale(0.99); }
+.mob-sa-submit:disabled { opacity: 0.5; }
+
+/* ================================================================
+   SHARDS in Account — row with an on/off switch. Amber accent
+   keeps the shard identity color from the rest of the app.
+   ================================================================ */
+.mob-shard-row { gap: 12px; }
+.mob-shard-glyph {
+    width: 32px; height: 32px; border-radius: 9px; flex: 0 0 auto;
+    background: rgba(232,190,85,0.12); border: 1px solid rgba(232,190,85,0.24);
+    display: flex; align-items: center; justify-content: center; color: var(--sun-400);
+}
+.mob-shard-glyph svg { width: 18px; height: 18px; }
+
+.mob-switch {
+    position: relative; width: 46px; height: 27px; border-radius: 999px;
+    background: var(--graphite-700); border: 1px solid var(--border-default);
+    flex: 0 0 auto; cursor: pointer; padding: 0;
+    transition: background 180ms var(--ease-out);
+}
+.mob-switch::after {
+    content: ''; position: absolute; width: 21px; height: 21px; border-radius: 50%;
+    background: #fff; top: 2px; left: 2px; box-shadow: 0 1px 2px rgba(0,0,0,0.4);
+    transition: left 180ms var(--ease-out);
+}
+.mob-switch.is-on { background: var(--sun-500, #C69A27); border-color: var(--sun-400); }
+.mob-switch.is-on::after { left: 21px; }
+.mob-switch:disabled { opacity: 0.6; }

@@ -1,0 +1,9 @@
+# Built binary.
+familiar-workspace
+
+# Operator-local config (workspace.toml.example is the template;
+# the live file usually carries TLS cert paths or hostnames that
+# shouldn't ship in the repo).
+workspace.toml
+
+.DS_Store

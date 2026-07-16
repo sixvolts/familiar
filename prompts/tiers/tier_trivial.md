@@ -1,0 +1,1 @@
+Respond directly and concisely. No tools needed.

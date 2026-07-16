@@ -1,0 +1,18 @@
+[Unit]
+Description=Familiar Sidecar (Qwen3.5-9B Q6_K — router + local inference)
+After=network.target
+
+[Service]
+Type=simple
+User=youruser
+ExecStart=/home/youruser/llama.cpp/build/bin/llama-server \
+    --host 127.0.0.1 --port 8200 \
+    -m /home/youruser/models/sidecar/Qwen3.5-9B-Q6_K.gguf \
+    -ngl 99 -c 8192 \
+    --jinja
+Restart=on-failure
+RestartSec=5
+Environment=HSA_OVERRIDE_GFX_VERSION=9.0.6
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=Familiar Gateway (Go)
+After=familiar-embedder.service familiar-sidecar.service
+
+[Service]
+Type=simple
+User=youruser
+ExecStart=/home/youruser/repos/familiar-engine/familiar-gateway/familiar-gateway --http --verbose
+Restart=on-failure
+RestartSec=5
+Environment=FAMILIAR_HOME=/home/youruser/.familiar
+
+[Install]
+WantedBy=multi-user.target

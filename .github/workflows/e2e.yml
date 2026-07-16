@@ -1,0 +1,128 @@
+# E2E + integration CI (TESTING-PLAN.md §"CI integration").
+#
+# Two jobs, each with its own pgvector-enabled Postgres service:
+#
+#   go-test — the gateway's full `go test ./...` with FAMILIAR_TEST_DSN
+#             set, so the DB-backed integration tests (migrations,
+#             memory store, shards, wiki) actually run instead of
+#             skipping.
+#   e2e     — the Playwright suite. The gateway fixture builds both
+#             binaries, boots them against the service DB, and runs
+#             all flows. Traces/report upload on failure.
+#
+# Advisory-only on first land per the plan: don't mark these as
+# required checks until the suite has proven it isn't flaky.
+#
+# The Postgres image is pgvector/pgvector (NOT plain postgres) —
+# the gateway's memories_base migration runs CREATE EXTENSION vector,
+# which needs the extension .so present in the image.
+
+name: e2e
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FAMILIAR_TEST_DSN: postgres://postgres:test@localhost:5432/postgres?sslmode=disable
+
+jobs:
+  go-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache-dependency-path: familiar-gateway/go.sum
+      - name: gateway unit + integration tests
+        working-directory: familiar-gateway
+        run: go test ./...
+      - name: workspace tests
+        working-directory: familiar-workspace
+        run: go test ./...
+
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache-dependency-path: |
+            familiar-gateway/go.sum
+            familiar-workspace/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tests/e2e/package-lock.json
+
+      - name: npm ci
+        working-directory: tests/e2e
+        run: npm ci
+
+      # Cache the Playwright browser download keyed on the lockfile's
+      # Playwright version — install --with-deps still runs to cover
+      # OS packages, but skips the ~150MB browser fetch on a hit.
+      - name: resolve playwright version
+        id: pw
+        working-directory: tests/e2e
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
+      - name: install chromium
+        working-directory: tests/e2e
+        run: npx playwright install --with-deps chromium
+
+      # Fail fast with a readable compile error; the fixture would
+      # otherwise surface it wrapped in a boot-timeout message.
+      - name: build gateway + workspace
+        run: |
+          (cd familiar-gateway && go build ./...)
+          (cd familiar-workspace && go build ./...)
+
+      - name: playwright test
+        working-directory: tests/e2e
+        run: npm test
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-artifacts
+          path: |
+            tests/e2e/playwright-report/
+            tests/e2e/test-results/
+          retention-days: 7

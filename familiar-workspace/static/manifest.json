@@ -1,0 +1,33 @@
+{
+  "name": "Familiar",
+  "short_name": "Familiar",
+  "description": "Your knowledge workspace",
+  "start_url": "/",
+  "id": "/",
+  "display": "standalone",
+  "display_override": ["standalone"],
+  "orientation": "portrait-primary",
+  "scope": "/",
+  "background_color": "#0b0b0f",
+  "theme_color": "#0b0b0f",
+  "categories": ["productivity", "utilities"],
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

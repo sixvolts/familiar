@@ -1,0 +1,13 @@
+[Unit]
+Description=Nightly Familiar DB backup
+
+[Timer]
+# 03:30 local daily; Persistent catches up a missed run after the box
+# was off, and the randomized delay avoids a thundering herd with other
+# 3am jobs.
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

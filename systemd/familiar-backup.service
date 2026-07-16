@@ -1,0 +1,11 @@
+[Unit]
+Description=Familiar DB backup (pg_dump -Fc)
+After=network.target
+
+[Service]
+Type=oneshot
+User=youruser
+# Set FAMILIAR_DB_DSN here (or rely on ~/.familiar/gateway.toml's
+# local_dsn). Optional: FAMILIAR_BACKUP_DIR, FAMILIAR_BACKUP_RETENTION_DAYS.
+Environment=FAMILIAR_HOME=/home/youruser/.familiar
+ExecStart=/home/youruser/repos/familiar-engine/scripts/backup-db.sh

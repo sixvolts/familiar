@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#0E0E14">
+    <title>Add passkey · Familiar</title>
+    <!-- CROSS-DOMAIN-ENROLLMENT.md: standalone passkey-enrollment
+         landing page. The user is NOT authenticated yet — this
+         page lives outside the SPA shell so it never touches the
+         workspace's auth flow. The single user-facing action is
+         "register a passkey for this domain". -->
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="manifest" href="/manifest.json">
+    <style>
+        :root {
+            --bg-canvas: #0E0E14;
+            --bg-card: #14141C;
+            --fg-1: #ECECEF;
+            --fg-2: #B8B8C2;
+            --fg-3: #7A7A88;
+            --iris-500: #6A4CE0;
+            --iris-400: #8C72E8;
+            --moss-500: #3E9A6A;
+            --err: #E37A74;
+            --border: rgba(255,255,255,0.08);
+            --radius: 12px;
+        }
+        * { box-sizing: border-box; }
+        html, body { height: 100%; margin: 0; }
+        body {
+            background: var(--bg-canvas);
+            color: var(--fg-1);
+            font: 14.5px/1.5 -apple-system, "Geist", system-ui, sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+        }
+        .card {
+            max-width: 420px;
+            width: 100%;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 28px 28px 24px;
+        }
+        .mark {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 20px;
+            color: var(--fg-1);
+        }
+        .mark svg { flex: 0 0 auto; }
+        .mark-name {
+            font-size: 17px;
+            font-weight: 600;
+            letter-spacing: -0.01em;
+        }
+        h1 {
+            font-size: 19px;
+            font-weight: 600;
+            margin: 0 0 6px;
+            letter-spacing: -0.01em;
+        }
+        .subtitle {
+            color: var(--fg-3);
+            margin: 0 0 22px;
+            font-size: 13px;
+        }
+        .row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid var(--border);
+            font-size: 13px;
+        }
+        .row:last-of-type { border-bottom: 0; }
+        .row .lbl { color: var(--fg-3); }
+        .row .val { color: var(--fg-1); font-family: "Geist Mono", ui-monospace, monospace; }
+        button {
+            display: block;
+            width: 100%;
+            margin-top: 18px;
+            padding: 12px 16px;
+            background: var(--iris-500);
+            color: white;
+            border: 0;
+            border-radius: 8px;
+            font: inherit;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background 120ms ease;
+        }
+        button:hover:not(:disabled) { background: var(--iris-400); }
+        button:disabled { opacity: 0.5; cursor: progress; }
+        .status {
+            margin-top: 16px;
+            padding: 10px 12px;
+            border-radius: 8px;
+            font-size: 13px;
+            display: none;
+        }
+        .status.is-info {
+            display: block;
+            background: rgba(106,76,224,0.10);
+            border: 1px solid rgba(106,76,224,0.30);
+            color: var(--fg-1);
+        }
+        .status.is-ok {
+            display: block;
+            background: rgba(62,154,106,0.12);
+            border: 1px solid rgba(62,154,106,0.40);
+            color: var(--fg-1);
+        }
+        .status.is-err {
+            display: block;
+            background: rgba(227,122,116,0.12);
+            border: 1px solid rgba(227,122,116,0.40);
+            color: var(--fg-1);
+        }
+        .footer-link {
+            display: block;
+            margin-top: 18px;
+            text-align: center;
+            color: var(--fg-3);
+            font-size: 12px;
+            text-decoration: none;
+        }
+        .footer-link:hover { color: var(--fg-2); }
+    </style>
+</head>
+<body>
+    <div class="card" id="card">
+        <div class="mark">
+            <svg width="22" height="25" viewBox="78 56 96 110" fill="none">
+                <g transform="translate(-82 0)">
+                    <path d="M 165.41 64.56 L 244.48 64.56 L 233.02 79.97 L 180.48 79.97 L 180.48 100.21 L 218.40 100.21 L 206.94 115.63 L 181.04 115.63 L 181.04 154.56 L 165.41 154.56 Z" fill="#6A4CE0"/>
+                    <circle cx="198.69" cy="146.74" r="7.817" fill="#E8BE55"/>
+                </g>
+            </svg>
+            <span class="mark-name">Familiar</span>
+        </div>
+        <h1>Register a passkey</h1>
+        <p class="subtitle">Use your device's authenticator (Face ID, Touch ID, Windows Hello, or a security key) to add a passkey for this domain.</p>
+
+        <div class="row"><span class="lbl">Domain</span><span class="val" id="domain-cell">…</span></div>
+        <div class="row"><span class="lbl">Account</span><span class="val" id="account-cell">…</span></div>
+
+        <button id="register-btn" type="button" disabled>Register passkey</button>
+
+        <div class="status" id="status"></div>
+
+        <a class="footer-link" id="sign-in-link" href="/" hidden>Continue to sign in →</a>
+    </div>
+
+    <script src="/enroll.js?v=20260623a"></script>
+</body>
+</html>

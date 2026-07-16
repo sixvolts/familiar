@@ -1,0 +1,6774 @@
+[hidden] { display: none !important; }
+
+/*
+ * Familiar Console — design system per DESIGN.md.
+ *
+ * Graphite canvas (#0B0B0F → #22222C) with Iris (#6A4CE0) as the
+ * single signature accent. Geist sans for chrome AND display/brand
+ * (the wordmark + headings are Geist 600, no serif italics), Geist
+ * Mono for structure (eyebrows, code, kbd). Sentence case everywhere
+ * except mono caps eyebrows. Soft radii (10/14/18/6). Hairline borders at
+ * rgba(255,255,255,0.10). One Iris accent per view max — promote
+ * the hero CTA, demote everything else to ghost.
+ */
+
+:root {
+    /* ── Graphite ramp — surfaces + foreground ───────────── */
+    --graphite-950: #0B0B0F;  /* canvas */
+    --graphite-900: #101014;  /* default surface — sidebar, top bar */
+    --graphite-850: #15151B;  /* raised — menus, code blocks, palette */
+    --graphite-800: #1B1B23;  /* card — elevated containers */
+    --graphite-750: #22222C;  /* hover surface */
+    --graphite-700: #2B2B36;  /* active / pressed */
+    --graphite-600: #3A3A48;  /* subtle border in raised contexts */
+    --graphite-500: #52525F;  /* tertiary text — placeholders, comments */
+    --graphite-400: #7A7A86;  /* secondary text — metadata */
+    --graphite-300: #A3A3AD;
+    --graphite-200: #C9C9D1;  /* body text */
+    --graphite-100: #E6E6EB;
+    --graphite-050: #F4F4F7;  /* primary text — headings */
+
+    /* ── Iris ramp — the signature accent ────────────────── */
+    --iris-950:    #120E22;
+    --iris-900:    #1C1636;
+    --iris-600:    #5138B0;  /* pressed primary */
+    --iris-500:    #6A4CE0;  /* default primary, caret, focus ring */
+    --iris-400:    #8A70EC;  /* primary hover */
+    --iris-300:    #AC98F3;  /* selected pill text, keywords */
+    --iris-200:    #CEC2F8;  /* link hover */
+    --iris-100:    #E8E1FB;
+    --iris-050:    #F4F0FE;
+
+    /* ── Supporting ramps ────────────────────────────────── */
+    --slate-500:   #4E6AAD;  /* info — links, info rows */
+    --slate-400:   #7E97D4;
+    --slate-300:   #B0C0E4;
+
+    --sunlamp-500: #C69A27;
+    --sunlamp-400: #E8BE55;  /* mark — pins, highlights, warnings */
+    --sunlamp-300: #F1D284;
+
+    --moss-500:    #3E9A6A;
+    --moss-400:    #5CB585;  /* success */
+
+    --teal-500:    #14B8A6;  /* scheduled actions accent */
+    --teal-400:    #2DD4BF;
+
+    --tangerine-500: #E8853D;  /* diagram tabs */
+    --tangerine-400: #F2A263;
+
+    --ember-500:   #D0514A;  /* danger */
+    --ember-400:   #E37A74;
+
+    /* ── Semantic role tokens (use these in components) ──── */
+    --bg-canvas:    var(--graphite-950);
+    --bg-surface:   var(--graphite-900);
+    --bg-raised:    var(--graphite-850);
+    --bg-card:      var(--graphite-800);
+    --bg-hover:     var(--graphite-750);
+    --bg-active:    var(--graphite-700);
+
+    --fg-1:         var(--graphite-050);  /* primary text */
+    --fg-2:         var(--graphite-200);  /* body text */
+    --fg-3:         var(--graphite-400);  /* secondary text */
+    --fg-4:         var(--graphite-500);  /* tertiary, placeholders */
+
+    --accent:               var(--iris-500);
+    --accent-hover:         var(--iris-400);
+    --accent-press:         var(--iris-600);
+    --accent-soft-fg:       var(--iris-300);
+    --accent-soft-bg:       rgba(106, 76, 224, 0.14);
+    --accent-ring:          rgba(106, 76, 224, 0.35);
+    --selection-bg:         rgba(138, 112, 236, 0.28);
+
+    --info:         var(--slate-500);
+    --info-soft-fg: var(--slate-300);
+    --info-soft-bg: rgba(126, 151, 212, 0.12);
+
+    --mark:         var(--sunlamp-400);
+    --warn-soft-fg: var(--sunlamp-300);
+    --warn-soft-bg: rgba(232, 190, 85, 0.12);
+
+    --success:      var(--moss-400);
+    --danger:       var(--ember-500);
+    --danger-hover: var(--ember-400);
+    --danger-rgb:   208, 81, 74;  /* ember-500 — stop-button pulse ring */
+
+    /* Pixel working-indicator rgb (research card + chat thinking line).
+       Global so the shared .rc-px component resolves everywhere. */
+    --rc-iris: 154, 124, 245;
+
+    --border-subtle:  rgba(255, 255, 255, 0.06);
+    --border-default: rgba(255, 255, 255, 0.10);
+    --border-strong:  rgba(255, 255, 255, 0.16);
+
+    /* ── Radius scale ─────────────────────────────────────── */
+    --radius-xs:   4px;    /* chips, tags, inline code */
+    --radius-sm:   6px;    /* inputs, icon buttons */
+    --radius-md:  10px;    /* standard buttons */
+    --radius-lg:  14px;    /* menus, popovers */
+    --radius-xl:  18px;    /* cards (default) */
+    --radius-2xl: 24px;    /* modals, large cards, command palette */
+    --radius-3xl: 32px;
+    --radius-pill: 999px;
+
+    /* ── Type scale ───────────────────────────────────────── */
+    --font-sans:   "Geist", -apple-system, "Segoe UI", system-ui, sans-serif;
+    --font-mono:   "Geist Mono", "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    --font-serif:  "Instrument Serif", "Iowan Old Style", Georgia, serif;
+
+    --text-2xs: 11px;
+    --text-xs:  12px;
+    --text-sm:  13px;
+    --text-md:  14px;
+    --text-lg:  16px;
+    --text-xl:  18px;
+    --text-2xl: 22px;
+    --text-3xl: 28px;
+    --text-4xl: 36px;
+
+    /* ── Shadows — low, wide, faintly purple-tinted ───────── */
+    --shadow-1: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 2px 6px rgba(8, 6, 18, 0.4);
+    --shadow-2: 0 1px 0 rgba(255, 255, 255, 0.05) inset, 0 6px 18px rgba(8, 6, 18, 0.55);
+    --shadow-3: 0 1px 0 rgba(255, 255, 255, 0.05) inset, 0 18px 48px rgba(8, 6, 18, 0.65);
+    --shadow-glow: 0 0 0 2px var(--accent-ring), 0 12px 48px rgba(106, 76, 224, 0.35);
+
+    /* ── Legacy aliases — old palette names mapped to new ──
+       Existing component CSS still references these; the alias
+       layer lets the redesign land without rewriting every rule.
+       New code should reach for the semantic tokens above. */
+    --abyss:     var(--bg-canvas);
+    --iron:      var(--bg-raised);
+    --charcoal:  var(--bg-card);
+    --graphite:  var(--graphite-600);
+    --ash:       var(--fg-3);
+    --smoke:     var(--fg-2);
+    --white:     var(--fg-1);
+    --gold:      var(--accent);
+    --gold-dark: var(--accent-press);
+    --teal:      var(--info);
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+html, body {
+    background: var(--bg-canvas);
+    color: var(--fg-2);
+    font-family: var(--font-sans);
+    font-weight: 400;
+    font-size: var(--text-md);
+    line-height: 1.5;
+    letter-spacing: -0.01em;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    /* Use 100% instead of 100vh — CSS zoom on <html> adjusts the
+       element's own box, so percentage-based children stay fitted
+       without needing viewport-unit compensation. */
+    height: 100%;
+    overflow: hidden;
+}
+
+/* ── Scrollbars — thin graphite, unobtrusive ─────────────
+   Firefox uses scrollbar-color + scrollbar-width.
+   WebKit (Chrome/Safari) uses ::-webkit-scrollbar pseudo-elements.
+   Thumb is graphite-700 on canvas, lightens on hover. */
+* {
+    scrollbar-width: thin;
+    scrollbar-color: var(--graphite-700) transparent;
+}
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+    background: var(--graphite-700);
+    border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: var(--graphite-600);
+}
+::-webkit-scrollbar-corner { background: transparent; }
+
+::selection {
+    background: var(--selection-bg);
+    color: var(--fg-1);
+}
+
+/* Title bar removed — its F-mark + breadcrumb duplicated the
+   sidebar header. The ⌘K affordance stays in the sidebar's
+   search input; tweaks + sidebar-toggle were no-ops anyway. */
+
+/* ── Conditional rendering ───────────────────────────────
+   .admin-only elements are removed from the layout entirely
+   for user-role sessions. The server enforces the same
+   boundary; CSS hiding is purely UX so the chrome doesn't
+   flash a row that would instantly 403. */
+body[data-role="user"] .admin-only {
+    display: none !important;
+}
+
+/* SHARD-AUTH-SPEC Phase 1: shard sessions arrive with a
+   permission envelope on auth/status. The applyPermissionEnvelope
+   helper writes a few body data-* flags; the rules below hide the
+   chrome that would advertise off-limits surfaces. The backend
+   enforces the same boundary regardless — these rules keep the
+   sidebar/UI from offering panels that would 403 on click. */
+
+/* Scheduled actions are owner-only — every /console/api/actions
+   route refuses shard sessions, so the sidebar row hides for shard
+   principals (mirrors isPanelAccessible). */
+body[data-principal-type="shard"] .sidebar-cat-scheduled {
+    display: none !important;
+}
+
+/* Chat surface fully off — hide the sidebar row + any in-content
+   chat shortcuts that flag themselves with .needs-chat. */
+body[data-can-chat="false"] .sidebar-cat-chat,
+body[data-can-chat="false"] .needs-chat {
+    display: none !important;
+}
+
+/* Shard sessions: the sidebar avatar swaps from initials to the
+   yellow diamond glyph so a kiosk reads as its own identity. Pale-
+   yellow bubble matching the rest of the brand's sun accents. */
+.sidebar-user-avatar.is-shard {
+    background: rgba(232, 190, 85, 0.18);
+    color: #E8BE55;
+    border: 0;
+}
+.sidebar-user-avatar.is-shard svg { display: block; }
+
+/* Tiny logout-only popover for shard sessions clicking the
+   sidebar profile. Mirrors the .mob-overflow-menu pattern used
+   on mobile — same affordance: little contextual menu anchored
+   to the trigger. */
+.shard-user-popover {
+    position: fixed;
+    z-index: 200;
+    min-width: 140px;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    padding: 4px;
+    box-shadow: var(--shadow-3);
+}
+.shard-user-popover button {
+    display: block;
+    width: 100%;
+    background: transparent;
+    color: var(--fg-2);
+    border: 0;
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
+    font: inherit;
+    font-size: 13px;
+    text-align: left;
+    cursor: pointer;
+}
+.shard-user-popover button:hover { background: var(--bg-hover); color: var(--fg-1); }
+.shard-user-popover button.is-danger { color: var(--accent-danger, #e07070); }
+
+/* Shard sessions never manage the surfaces that mutate other users'
+   data — no user management, no shard admin, no profile editing
+   for the owner. Hide those entry points; the backend already
+   refuses them. */
+body[data-principal-type="shard"] .shard-only-hidden {
+    display: none !important;
+}
+
+/* Home panel for a shard session: hide the personal blocks
+   (pinned + today's shards). The owner's pins reference
+   conversations / notes the shard can't necessarily reach, and
+   "Today's shards" is shard-management telemetry the shard isn't
+   supposed to operate on. Recent + open splits stay because
+   they're scoped to surfaces the shard can already see. */
+body[data-principal-type="shard"] #home-block-pinned,
+body[data-principal-type="shard"] #home-block-shards,
+body[data-principal-type="shard"] #home-block-recent {
+    display: none !important;
+}
+
+/* Status bar removed — Sync / Vault / Rules badges were
+   ambient clutter that didn't earn their persistent 28px row.
+   window.familiarStatusBar.setContext() stays as a no-op so
+   existing call sites don't break. */
+
+/* ── Views ────────────────────────────────────────────── */
+
+.view {
+    max-width: 1440px;
+    margin: 0 auto;
+    padding: 56px 40px;
+}
+
+.center-stack {
+    max-width: 720px;
+    margin: 80px auto;
+    display: flex;
+    flex-direction: column;
+    gap: 32px;
+}
+
+/* Phase-4 email-keyed register form. Vertical stack of inputs
+   inside the login/setup views; matches the existing label/body
+   typography so the new fields don't feel bolted on.              */
+.form-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    max-width: 480px;
+}
+
+.form-stack .input,
+.input {
+    background: var(--bg-raised);
+    color: var(--fg-1);
+    border: 1px solid var(--border-default);
+    padding: 10px 12px;
+    font: inherit;
+    font-size: var(--text-md);
+    letter-spacing: -0.01em;
+    border-radius: var(--radius-sm);
+    transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.input::placeholder { color: var(--fg-4); }
+
+.input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-ring);
+}
+
+.form-stack .micro {
+    margin-top: 8px;
+}
+
+/* ── Type scale ────────────────────────────────────────── */
+
+/* Eyebrow — the lone uppercase treatment in the system.
+   Mono, caps-tracked, secondary tone. Used above section titles
+   and as field meta. */
+.label {
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    font-weight: 500;
+    line-height: 1.5;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--fg-3);
+}
+
+.body {
+    font-size: var(--text-md);
+    font-weight: 400;
+    line-height: 1.65;
+    letter-spacing: -0.01em;
+    color: var(--fg-2);
+    max-width: 720px;
+}
+
+.micro {
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    line-height: 1.5;
+    letter-spacing: 0.04em;
+    color: var(--fg-3);
+    text-transform: none;
+}
+
+a {
+    color: var(--accent-soft-fg);
+    text-decoration: none;
+    transition: color 120ms ease;
+}
+a:hover { color: var(--iris-200); }
+
+code {
+    font-family: var(--font-mono);
+    font-size: 0.92em;
+    background: var(--graphite-850);
+    border: 1px solid var(--border-subtle);
+    padding: 1px 6px;
+    border-radius: var(--radius-xs);
+    color: var(--fg-1);
+}
+
+/* ── Buttons ──────────────────────────────────────────── */
+
+.button-row {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 16px;
+    align-items: center;
+}
+
+/* Primary button — Iris accent. One per view, max. */
+.btn-accent {
+    background: var(--accent);
+    color: #FFFFFF;
+    border: 0;
+    border-radius: var(--radius-md);
+    padding: 0 18px;
+    font-family: inherit;
+    font-size: var(--text-sm);
+    font-weight: 500;
+    line-height: 1;
+    letter-spacing: -0.01em;
+    cursor: pointer;
+    height: 40px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: background-color 120ms ease, transform 120ms ease, box-shadow 120ms ease;
+}
+
+.btn-accent:hover { background: var(--accent-hover); }
+.btn-accent:focus-visible {
+    outline: none;
+    background: var(--accent-hover);
+    box-shadow: 0 0 0 2px var(--bg-canvas), 0 0 0 4px var(--accent-ring);
+}
+.btn-accent:active { background: var(--accent-press); transform: scale(0.99); }
+
+.btn-accent:disabled {
+    background: var(--bg-active);
+    color: var(--fg-4);
+    cursor: not-allowed;
+}
+
+/* Ghost — supporting action. Hairline border, surface lifts on hover. */
+.btn-ghost {
+    background: transparent;
+    color: var(--fg-1);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    padding: 0 16px;
+    font-family: inherit;
+    font-size: var(--text-sm);
+    font-weight: 500;
+    line-height: 1;
+    letter-spacing: -0.01em;
+    cursor: pointer;
+    height: 40px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: background-color 120ms ease, border-color 120ms ease, transform 120ms ease;
+}
+
+.btn-ghost:hover {
+    background: var(--bg-hover);
+    border-color: var(--border-strong);
+}
+.btn-ghost:focus-visible {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-ring);
+}
+.btn-ghost:active { background: var(--bg-active); transform: scale(0.99); }
+
+.btn-small {
+    padding: 0 12px;
+    font-size: var(--text-xs);
+    height: 32px;
+}
+
+/* Destructive — only on confirm surfaces. */
+.btn-danger {
+    background: var(--danger) !important;
+    color: #FFFFFF !important;
+    border: 0 !important;
+}
+.btn-danger:hover { background: var(--danger-hover) !important; }
+
+/* Quiet danger for ghost buttons on LIST cards — danger-colored text,
+   tinted hover (the .is-danger idiom from context menus / popovers).
+   The filled .btn-danger stays for detail views, where delete is a
+   lone deliberate action rather than one row among many. */
+.btn-ghost.is-danger { color: var(--ember-400); }
+.btn-ghost.is-danger:hover {
+    background: rgba(208, 81, 74, 0.10);
+    border-color: rgba(208, 81, 74, 0.35);
+}
+
+/* ── Error callout ────────────────────────────────────── */
+
+.error {
+    border: 1px solid rgba(208, 81, 74, 0.35);
+    background: rgba(208, 81, 74, 0.08);
+    padding: 10px 14px;
+    font-size: var(--text-sm);
+    letter-spacing: -0.01em;
+    color: var(--ember-400);
+    border-radius: var(--radius-md);
+    text-transform: none;
+}
+
+/* ── F-mark loader ────────────────────────────────────────
+   The boot + overlay spinner is the brand F-mark: the F sits
+   still in accent, and the yellow dot from the logo pulses —
+   the same dot the mark carries everywhere else in the UI. */
+
+.fmark-loader {
+    width: 46px;
+    height: 53px;
+    margin-bottom: 24px;
+}
+
+.fmark-loader-dot {
+    /* fill-box origin so the scale pulses about the dot's own
+       centre, not the SVG's (0,0). */
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: fmark-pulse 1100ms ease-in-out infinite;
+}
+
+@keyframes fmark-pulse {
+    0%, 100% { opacity: 0.25; transform: scale(0.8); }
+    50%      { opacity: 1;    transform: scale(1.15); }
+}
+
+/* ── App shell (titlebar + sidebar/content + statusbar) ───
+   DESIGN.md. The shell is now titlebar (40px)
+   on top, statusbar (28px) on the bottom, sidebar (240px)
+   left of content in the middle. The sidebar + content are a
+   nested grid so the statusbar can span both columns. */
+
+.view-shell {
+    /* Single-row two-column grid now that both the titlebar AND
+       the statusbar are gone. Sidebar + content fill the entire
+       viewport; scrolling stays inside individual panels via
+       their own overflow:auto. The shell never scrolls. */
+    display: grid;
+    grid-template-columns: var(--sidebar-w, 240px) 1fr;
+    height: 100%;
+}
+.view-shell > .sidebar { /* default placement, col 1 */ }
+.view-shell > .content { /* default placement, col 2 */ }
+
+/* ── Sidebar shell (single rail) ─────────────────────────
+   DESIGN.md. Header row (mark + search), Home row,
+   four colored category rows, flex spacer, user footer. */
+
+.sidebar {
+    /* No right border — the sidebar (bg-surface) and the
+       content area (bg-canvas) are different surfaces, and
+       the color step is enough to define the boundary. The
+       sidebar + the workspace toolbar share bg-surface so
+       they read as one continuous upside-down-L chrome
+       around the workspace. */
+    background: var(--bg-surface);
+    display: flex;
+    flex-direction: column;
+    padding: 0;
+    overflow: hidden;
+    position: relative;  /* anchor for .sidebar-resize handle */
+}
+
+/* Every rail child is rigid chrome (header, Home row, spacer, user
+   bubble) EXCEPT .sidebar-categories, which re-enables shrinking as
+   the designated scroll region. Without this, a long expanded tree
+   squeezes the fixed rows (flex-shrink defaults to 1) before the
+   scroll region absorbs the overflow — the Home row visibly moved. */
+.sidebar > * {
+    flex-shrink: 0;
+}
+
+/* Sidebar header — F mark + "Familiar" wordmark on a single
+   clickable row that lands on Home. No bottom border so the
+   header reads as part of the same continuous bg-surface
+   chrome as the rest of the sidebar. */
+.sidebar-header {
+    display: flex;
+    align-items: center;
+    /* Align with .sidebar-row's text column. Row math:
+       margin-left 6 + padding-left 10 + glyph col 18 + gap 8 = 42.
+       Match here: padding-left 16 + mark col 18 + gap 8 = 42. */
+    gap: 8px;
+    padding: 12px 16px;
+    text-decoration: none;
+    color: var(--fg-1);
+    transition: background 120ms ease;
+}
+.sidebar-header:hover {
+    background: var(--bg-hover);
+}
+.sidebar-mark {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    /* Logo F-mark, sized up ~40% from the old 18×21 so the brand
+       reads at a glance. It no longer shares the 18px glyph column
+       of the rows below — the header is its own larger block. */
+    width: 25px;
+    height: 29px;
+}
+.sidebar-mark svg {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+.sidebar-wordmark {
+    font-family: var(--font-sans);
+    /* ~40% up from --text-md (14px) to track the bigger F-mark. */
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--fg-1);
+    line-height: 1;
+}
+
+/* Common row shape across Home, categories, and user footer.
+   All rows are 26px tall per the density push. The row
+   layout is grid so glyph / label / count / chevron line up
+   regardless of which fields render. */
+.sidebar-row {
+    display: grid;
+    grid-template-columns: 18px 1fr auto auto;
+    column-gap: 8px;
+    align-items: center;
+    padding: 0 10px;
+    height: 26px;
+    margin: 0 6px;
+    border-radius: var(--radius-sm);
+    color: var(--fg-2);
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: -0.005em;
+    text-decoration: none;
+    cursor: pointer;
+    user-select: none;
+    transition: background 120ms ease, color 120ms ease;
+}
+.sidebar-row:hover {
+    background: var(--bg-hover);
+    color: var(--fg-1);
+}
+.sidebar-row .sidebar-glyph {
+    color: var(--fg-3);
+    width: 14px;
+    height: 14px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+.sidebar-row-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.sidebar-row-count {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--fg-4);
+    font-variant-numeric: tabular-nums;
+}
+.sidebar-row-chevron {
+    color: var(--fg-4);
+    font-size: 12px;
+    transition: transform 120ms ease, color 120ms ease;
+    /* Give the chevron a roomier hit-area than the glyph itself
+       so the expand-only click target is reliable; padding sits
+       inside the row's gap so it doesn't push the layout. */
+    padding: 4px 6px;
+    margin: -4px -6px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+}
+.sidebar-row-chevron:hover {
+    color: var(--fg-2);
+    background: var(--bg-hover);
+}
+.sidebar-row.is-expanded .sidebar-row-chevron {
+    transform: rotate(90deg);
+}
+
+/* Home: muted gray, neutral active state — never colored.
+   Per spec, Home is intentionally chromatic-neutral so it
+   doesn't compete with the four category accents. */
+.sidebar-home {
+    margin-top: 8px;
+    margin-bottom: 4px;
+}
+.sidebar-home.is-active {
+    background: var(--bg-card);
+    color: var(--fg-1);
+}
+.sidebar-home.is-active .sidebar-glyph {
+    color: var(--fg-2);
+}
+
+/* Category cluster — small gap above to separate from Home,
+   then four rows each carrying their own accent color. */
+.sidebar-categories {
+    margin-top: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    /* Long expanded trees (a book with 40 pages) must scroll inside
+       the rail, not plow over the spacer + user bubble below. Flex
+       children default to min-height:auto and refuse to shrink —
+       min-height:0 re-enables it, overflow makes the region scroll.
+       The global thin-scrollbar chrome applies; no extra UI. */
+    min-height: 0;
+    flex-shrink: 1; /* the one rail child allowed to give (see .sidebar > *) */
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+/* Once the region is height-constrained, its own flex children
+   (category rows, child lists) would absorb the squeeze first —
+   flex-shrink defaults to 1 — compressing the rows together before
+   overflow ever engages. Rows keep their natural height; the
+   container is the only thing that gives. */
+.sidebar-categories > * {
+    flex-shrink: 0;
+}
+
+/* Category color tokens (DESIGN.md). The colors are
+   already in :root from the design system — these aliases
+   map them to per-category names so the per-category rules
+   below read clearly. */
+/* Category rows carry one extra column for the "+ New" button
+   that sits between the count and the chevron. */
+.sidebar-cat { grid-template-columns: 18px 1fr auto auto auto; }
+.sidebar-cat-notes  { --cat-color: var(--iris-500);  --cat-soft: rgba(106, 76, 224, 0.14); }
+.sidebar-cat-wiki   { --cat-color: var(--slate-500); --cat-soft: rgba(78, 106, 173, 0.18); }
+.sidebar-cat-chat   { --cat-color: var(--moss-500);  --cat-soft: rgba(62, 154, 106, 0.16); }
+.sidebar-cat-shards { --cat-color: var(--sunlamp-500); --cat-soft: rgba(198, 154, 39, 0.18); }
+.sidebar-cat-scheduled { --cat-color: var(--teal-400); --cat-soft: rgba(45, 212, 191, 0.14); }
+
+/* Category rows: glyph in the category color, label + count
+   neutral. Active: soft tint background using the category
+   color at 12-14% alpha — no left bar; the background tint
+   carries the active signal on its own. The active state
+   follows the last-touched category. */
+.sidebar-cat .sidebar-glyph { color: var(--cat-color); }
+.sidebar-cat.is-active {
+    background: var(--cat-soft);
+    color: var(--fg-1);
+}
+.sidebar-cat.is-active .sidebar-glyph {
+    color: var(--cat-color);
+}
+
+/* "+ New …" affordance on each category row — sits just left of
+   the chevron. Light grey at rest; on hover the background picks
+   up the category's --cat-soft tint and the glyph picks up
+   --cat-color, so the affordance reads as "new <this category>". */
+.sidebar-cat-new {
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: 0;
+    border-radius: var(--radius-sm);
+    color: var(--fg-4);
+    font-family: var(--font-sans);
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+    transition: background 120ms ease, color 120ms ease;
+}
+.sidebar-cat-new:hover {
+    background: var(--cat-soft);
+    color: var(--cat-color);
+}
+
+/* Children — single style across all four categories per
+   Indent to 20px so they nest under the parent glyph.
+   Active row: soft tint in the parent's color (no left bar
+   — the bar is reserved for the category itself). */
+.sidebar-children {
+    margin: 2px 0 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    /* Indent so child labels land in the SAME vertical column as
+       the parent row labels (x = 42px). Child math:
+       outer-pad 26 + child margin-left 6 + child padding-left 10 = 42. */
+    padding-left: 26px;
+}
+.sidebar-child {
+    display: grid;
+    /* Caret | title | meta. The caret slot is fixed-width so titles
+       align across rows with and without children (18px matches the
+       enlarged .sidebar-tree-caret). */
+    grid-template-columns: 18px 1fr auto;
+    column-gap: 4px;
+    align-items: center;
+    padding: 0 10px 0 calc(10px + var(--depth, 0) * 14px);
+    height: 24px;
+    margin: 0 6px;
+    border-radius: var(--radius-sm);
+    color: var(--fg-2);
+    font-size: 12.5px;
+    text-decoration: none;
+    cursor: pointer;
+    transition: background 120ms ease, color 120ms ease;
+    /* Truncate long titles to single line with ellipsis */
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    min-width: 0;
+}
+.sidebar-child:hover {
+    background: var(--bg-hover);
+    color: var(--fg-1);
+}
+.sidebar-child.is-active {
+    background: var(--cat-soft);
+    color: var(--fg-1);
+}
+.sidebar-child-meta {
+    display: none;
+}
+
+/* Tree caret on the left of each row. Always rendered so titles
+   line up; only visible (has-children) ones show a glyph. */
+.sidebar-tree-caret {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    color: var(--fg-4);
+    /* Same chevron treatment as .sidebar-row-chevron on the category
+       rows: › glyph, rotates 90° when open. The original ▸/▾ pair
+       read as a dot at row size (user reports 2026-06-12 ×2). */
+    font-size: 13px;
+    line-height: 1;
+    cursor: default;
+    border-radius: var(--radius-sm);
+    transition: transform 120ms ease, color 120ms ease,
+                background 120ms ease;
+}
+.sidebar-tree-caret.is-open {
+    transform: rotate(90deg);
+}
+.sidebar-tree-caret.has-children {
+    cursor: pointer;
+    color: var(--fg-3);
+}
+.sidebar-tree-caret.has-children:hover {
+    color: var(--fg-1);
+    background: var(--bg-hover);
+}
+
+/* Folder section header (chat folders / "projects"). One per
+   folder plus an "Uncategorized" tail. */
+.sidebar-folder-header {
+    display: grid;
+    grid-template-columns: 14px 1fr auto;
+    column-gap: 4px;
+    align-items: center;
+    padding: 0 10px;
+    height: 24px;
+    margin: 4px 6px 2px;
+    border-radius: var(--radius-sm);
+    color: var(--fg-3);
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: -0.005em;
+    cursor: pointer;
+    user-select: none;
+    transition: background 120ms ease, color 120ms ease;
+}
+.sidebar-folder-header:hover {
+    background: var(--bg-hover);
+    color: var(--fg-1);
+}
+.sidebar-folder-caret {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    color: var(--fg-4);
+    font-size: 9px;
+    line-height: 1;
+}
+.sidebar-folder-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.sidebar-folder-count {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--fg-4);
+    font-variant-numeric: tabular-nums;
+}
+.sidebar-folder-uncategorized .sidebar-folder-name {
+    font-style: italic;
+    color: var(--fg-4);
+}
+.sidebar-folder-empty {
+    padding-left: 38px;
+    color: var(--fg-4);
+    font-size: 11px;
+    font-style: italic;
+}
+
+/* Drag-and-drop visuals.
+   .is-dragging — the source row while a drag is in flight.
+   .is-drop-target — a row / folder header / category row that
+   would accept the drop right now. Both are removed by the
+   dragend / dragleave / drop handlers in workspace.js. */
+.sidebar-child.is-dragging,
+.sidebar-folder-header.is-dragging {
+    opacity: 0.55;
+}
+.sidebar-child.is-drop-target,
+.sidebar-folder-header.is-drop-target {
+    background: var(--accent-soft-bg);
+    box-shadow: inset 0 0 0 1px var(--accent);
+    color: var(--fg-1);
+}
+.sidebar-row.sidebar-cat.is-drop-target {
+    background: var(--accent-soft-bg);
+    box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+/* Right-click context menu for sidebar tree rows. Position is set
+   inline by JS (fixed + clamped to viewport). */
+.sidebar-ctxmenu {
+    position: fixed;
+    z-index: 1000;
+    min-width: 180px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    padding: 4px;
+    box-shadow: var(--shadow-2, 0 8px 20px -8px rgba(0,0,0,0.55));
+    display: flex;
+    flex-direction: column;
+    font-family: var(--font-sans);
+}
+.sidebar-ctxmenu-item {
+    background: transparent;
+    border: 0;
+    text-align: left;
+    padding: 6px 10px;
+    border-radius: var(--radius-sm);
+    color: var(--fg-1);
+    font-size: 12.5px;
+    cursor: pointer;
+    transition: background 120ms ease, color 120ms ease;
+}
+.sidebar-ctxmenu-item:hover { background: var(--bg-hover); }
+.sidebar-ctxmenu-item.is-danger { color: var(--danger); }
+.sidebar-ctxmenu-item.is-danger:hover { background: rgba(208, 81, 74, 0.10); }
+.sidebar-ctxmenu-divider {
+    height: 1px;
+    background: var(--border-subtle);
+    margin: 4px 6px;
+}
+
+/* Flex spacer pushes the user footer to the bottom regardless
+   of how many child rows are expanded. */
+.sidebar-spacer {
+    flex: 1 1 auto;
+}
+
+/* User / Config footer (DESIGN.md footer).
+   28px avatar + two-line text (name above, vault below) +
+   chevron. Hairline divider above. Active (panel open):
+   subtle graphite tint, chevron rotated. */
+.sidebar-user {
+    /* A self-contained "bubble" — lighter-grey card surface set off
+       from the rail with margin + a hairline border, rounded
+       corners. The spacer above pins it to the bottom. */
+    display: grid;
+    grid-template-columns: 28px 1fr auto;
+    column-gap: 10px;
+    align-items: center;
+    margin: 8px 10px 14px;
+    padding: 10px 12px;
+    border-radius: var(--radius-md);
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    color: var(--fg-1);
+    text-decoration: none;
+    cursor: pointer;
+    transition: background 120ms ease, border-color 120ms ease;
+}
+.sidebar-user:hover {
+    background: var(--bg-hover);
+    border-color: var(--border-default);
+}
+.sidebar-user.is-active {
+    background: var(--bg-hover);
+    border-color: var(--border-default);
+}
+.sidebar-user.is-active .sidebar-row-chevron {
+    transform: rotate(90deg);
+}
+.sidebar-user-avatar {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--iris-500), #3D2B80);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: #FFFFFF;
+    font-family: var(--font-sans);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+}
+.sidebar-user-text {
+    display: flex;
+    flex-direction: column;
+    line-height: 1.2;
+    overflow: hidden;
+}
+.sidebar-user-name {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--fg-1);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.sidebar-user-vault {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--fg-4);
+    letter-spacing: 0.03em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* ── Sidebar resize handle ───────────────────────────────
+   Hidden by default. JS shows it (one-way) when any sidebar
+   label overflows. Positioned on the right edge of the sidebar,
+   overlapping the boundary between sidebar and content. */
+.sidebar-resize {
+    position: absolute;
+    top: 0;
+    right: -3px;
+    width: 6px;
+    height: 100%;
+    cursor: col-resize;
+    z-index: 20;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+}
+.sidebar-resize.visible {
+    opacity: 1;
+    pointer-events: auto;
+}
+.sidebar-resize::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 3px;
+    height: 28px;
+    border-radius: 2px;
+    background: var(--fg-4);
+    opacity: 0.35;
+    transition: opacity 0.15s ease, background 0.15s ease;
+}
+.sidebar-resize:hover::after,
+.sidebar-resize.dragging::after {
+    opacity: 0.7;
+    background: var(--fg-2);
+}
+
+/* Legacy nav-item compatibility shim — keeps the still-rendered
+   panel-* sections (memory, profile, sessions, etc.) styled
+   reasonably until Phase 3c re-homes them inside the User
+   panel. After 3c lands, this rule can come out. */
+.nav-item {
+    display: block;
+    padding: 8px 12px;
+    color: var(--fg-2);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    text-decoration: none;
+    border-radius: var(--radius-sm);
+    transition: background-color 120ms ease, color 120ms ease;
+}
+.nav-item:hover { color: var(--fg-1); background: var(--bg-hover); }
+.nav-item.is-active { color: var(--accent-soft-fg); background: var(--accent-soft-bg); }
+
+.content {
+    /* Full-bleed by default — every full-mode panel
+       (ws-host / home-host / user-host) handles its own
+       internal padding so there's no wasted gutter between
+       the sidebar and the content. The 40px horizontal +
+       32/56px vertical padding that used to live here
+       created a "bay window" gap on every workspace view.
+       Per-panel padding is the right place for breathing
+       room; .content stays a layout primitive. */
+    padding: 0;
+    overflow: hidden;
+    min-width: 0;
+    min-height: 0;
+    /* Column so the maintenance banner (a sibling above the active
+       panel) takes its own height and the panel flexes into what's
+       left — otherwise the panel's height:100% overflowed the content
+       cell by the banner's height and clipped the chat composer at the
+       bottom. Empty banner host is 0-height, so the no-banner layout is
+       unchanged. */
+    display: flex;
+    flex-direction: column;
+}
+
+/* Top-level panels stretch to fill the content cell so the
+   workspace grid + the chat shell + the notes shell all hit
+   the right edge of the viewport without margin. The single
+   visible panel takes the full height (other top-level panels
+   carry the `hidden` attribute so they don't compete). */
+.content > .panel {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+}
+
+.panel {
+    max-width: none;
+}
+
+/* Legacy secondary panels still rely on a comfortable
+   reading column. They're now nested inside user-content
+   (which provides its own padding) so this rule is a
+   minimal safeguard for any panel rendered outside the
+   user-host. The rule narrows to the single legacy access
+   path so workspace/home/user hosts stay full-bleed. */
+.content > .panel:not(.ws-host):not(.home-host):not(.user-host) {
+    padding: 32px 40px 56px;
+    max-width: 1080px;
+    margin: 0 auto;
+}
+
+/* Neutralise the stacked top-borders the old flat layout used, now
+   that users and memory each live in their own panel. */
+.panel > .users-section,
+.panel > .memory-section {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: 0;
+}
+
+/* ── Dashboard ────────────────────────────────────────── */
+
+/* System Status intro line — sits just under the standard panel
+   header, above the card grid. */
+.dash-intro {
+    margin: -8px 0 24px;
+}
+
+.card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 16px;
+}
+
+.card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-default);
+    padding: 20px;
+    border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-1);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.card:hover {
+    border-color: var(--border-strong);
+    box-shadow: var(--shadow-2);
+}
+
+.card-title {
+    font-size: var(--text-2xl);
+    font-weight: 600;
+    line-height: 1.3;
+    letter-spacing: -0.01em;
+    color: var(--fg-1);
+    text-transform: none;
+}
+
+.card-value {
+    font-size: var(--text-xl);
+    font-weight: 600;
+    color: var(--fg-1);
+    text-transform: none;
+    font-family: var(--font-mono);
+}
+
+.card-meta {
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    font-weight: 500;
+    line-height: 1.5;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--fg-3);
+}
+
+/* ── Dashboard sections ───────────────────────────────── */
+
+.dash-section {
+    margin-top: 32px;
+}
+
+.dash-section .section-header {
+    margin-bottom: 12px;
+}
+
+.dash-skills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 12px 16px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+}
+
+.dash-skills .link-chip {
+    margin: 0;
+    padding: 4px 10px;
+    font-size: var(--text-xs);
+    background: var(--bg-card);
+    border-radius: var(--radius-xs);
+    color: var(--fg-2);
+    border: 1px solid var(--border-subtle);
+    font-family: var(--font-mono);
+}
+
+/* ── Memory browser ───────────────────────────────────── */
+
+.memory-section {
+    margin-top: 32px;
+}
+
+.section-header {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 24px;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+}
+
+.section-title {
+    font-size: var(--text-3xl);
+    font-weight: 600;
+    line-height: 1.15;
+    letter-spacing: -0.02em;
+    color: var(--fg-1);
+    margin-top: 6px;
+    text-transform: none;
+}
+
+/* Section title with the diamond shard glyph in front. The icon
+   sits on the same baseline as the text — width/height in em so
+   it scales with .section-title's font-size — and picks up the
+   sun-yellow accent the rest of the shard surfaces use. */
+.section-title-shards {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4em;
+}
+.section-title-shards svg {
+    width: 0.85em;
+    height: 0.85em;
+    color: #E8BE55;
+    flex-shrink: 0;
+}
+/* Shard-detail title row: same glyph treatment as the panel title, but
+   block-level (not inline-flex) so it sits on its own line under the
+   "← Shards" back link. The title text is a span sibling of the icon. */
+.shard-detail-title-row { display: flex; }
+
+/* Scheduled Actions title — same glyph treatment as the shards title,
+   in the teal the Scheduled surface uses elsewhere (sidebar row). */
+.section-title-scheduled {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4em;
+}
+.section-title-scheduled svg {
+    width: 0.85em;
+    height: 0.85em;
+    color: #2DD4BF;
+    flex-shrink: 0;
+}
+
+/* New/edit action takes over the panel — hide the list view while the
+   detail is open (mirrors #panel-shards.is-editing). */
+#panel-scheduled.is-editing #scheduled-list { display: none; }
+
+.section-meta {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.memory-total {
+    font-family: var(--font-mono);
+    font-size: var(--text-lg);
+    font-weight: 500;
+    color: var(--accent-soft-fg);
+}
+
+.memory-filter {
+    display: grid;
+    grid-template-columns: 2fr minmax(90px, 1fr) minmax(90px, 1fr) minmax(90px, 1fr) auto auto;
+    gap: 12px;
+    align-items: end;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+    padding: 16px;
+    margin-bottom: 16px;
+}
+
+.field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+}
+
+.field .label {
+    line-height: 1.2;
+}
+
+.field input[type="text"],
+.field input[type="number"],
+.field select {
+    background: var(--bg-raised);
+    color: var(--fg-1);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    padding: 6px 10px;
+    font-family: inherit;
+    font-size: var(--text-sm);
+    letter-spacing: -0.01em;
+    height: 36px;
+    outline: 0;
+    transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.field input[type="text"]:focus,
+.field input[type="number"]:focus,
+.field select:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-ring);
+}
+
+.field input[type="text"]::placeholder,
+.field input[type="number"]::placeholder { color: var(--fg-4); }
+
+.field-check {
+    flex-direction: row;
+    align-items: center;
+}
+
+.field-check label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    line-height: 1;
+    color: var(--fg-2);
+    font-size: var(--text-sm);
+    text-transform: none;
+    letter-spacing: -0.01em;
+}
+
+.field-check input[type="checkbox"] {
+    width: 14px;
+    height: 14px;
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+
+.field-actions {
+    display: flex;
+    gap: 8px;
+    flex-direction: row;
+    align-items: center;
+}
+
+/* Admin view-as banner — unmissable when the browser is showing
+   another user's store. Accent-tinted so it can't be mistaken for
+   the normal self view. */
+.memory-viewas {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    background: var(--accent-soft-bg);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-xl);
+    padding: 10px 14px;
+    margin-bottom: 16px;
+}
+.memory-viewas-text { color: var(--fg-1); font-size: var(--text-sm); }
+.memory-viewas-text strong { color: var(--accent-soft-fg); }
+
+/* Kind tabs partition the browser by memory kind (knowledge vs raw
+   conversation chunks vs the per-source slices). Same underline-tab
+   idiom as .user-tabs; flex-wrap because six tabs overflow narrow
+   console widths. */
+.memory-kind-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px;
+    margin-bottom: 16px;
+    border-bottom: 1px solid var(--border-default);
+}
+
+.memory-kind-tab {
+    background: transparent;
+    color: var(--fg-3);
+    border: 0;
+    border-bottom: 2px solid transparent;
+    padding: 10px 14px;
+    font-family: inherit;
+    font-size: var(--text-sm);
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    text-transform: none;
+    cursor: pointer;
+    transition: color 120ms ease, border-color 120ms ease;
+    margin-bottom: -1px;
+    white-space: nowrap;
+}
+
+.memory-kind-tab:hover { color: var(--fg-1); }
+
+.memory-kind-tab.is-active {
+    color: var(--accent-soft-fg);
+    border-bottom-color: var(--accent);
+}
+
+.memory-table-wrap {
+    overflow-x: auto;
+    background: var(--bg-card);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-xl);
+}
+
+.memory-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--text-sm);
+}
+
+.memory-table thead th {
+    background: transparent;
+    color: var(--fg-3);
+    text-align: left;
+    padding: 10px 14px;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    font-weight: 500;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--border-default);
+}
+
+.memory-table tbody td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border-subtle);
+    color: var(--fg-2);
+    vertical-align: top;
+    letter-spacing: -0.01em;
+}
+
+.memory-table tbody tr:last-child td { border-bottom: 0; }
+
+.memory-table tbody tr {
+    cursor: pointer;
+    transition: background-color 120ms ease;
+}
+
+.memory-table tbody tr:hover { background: var(--bg-hover); }
+
+.memory-table tbody tr.is-superseded td { opacity: 0.5; }
+
+/* Entities mode (MEMORY-UI-SPEC Phase B). The index reuses
+   .memory-table; headers double as sort toggles. */
+.memory-entities-bar { margin-bottom: 16px; max-width: 320px; }
+
+.memory-table thead th.me-sort { cursor: pointer; user-select: none; }
+.memory-table thead th.me-sort:hover { color: var(--fg-1); }
+
+/* Fact rows inside the entity detail aside — quiet clickable cards,
+   same shape as the version-history entries. */
+.entity-fact {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: 0;
+    border-bottom: 1px solid var(--border-subtle);
+    padding: 10px 2px;
+    cursor: pointer;
+    color: inherit;
+    font-family: inherit;
+    transition: background-color 120ms ease;
+}
+.entity-fact:hover { background: var(--bg-hover); }
+.entity-fact:last-child { border-bottom: 0; }
+.entity-fact-content {
+    color: var(--fg-1);
+    font-size: var(--text-sm);
+    letter-spacing: -0.01em;
+    margin-bottom: 3px;
+}
+
+/* Phase C curation chrome. */
+
+.entity-merge-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 6px;
+}
+.entity-merge-row .input { flex: 1 1 0; min-width: 0; }
+
+/* Store health strip — quiet stat cells under the browser. */
+.memory-health { margin-top: 24px; }
+.memory-health-cells {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 10px;
+    margin-top: 8px;
+}
+.memory-health-cell {
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-xl);
+    padding: 12px 14px;
+}
+.memory-health-cell .num {
+    color: var(--fg-1);
+    font-size: var(--text-lg);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    margin-bottom: 2px;
+}
+
+/* Supersede-chain rows in the memory detail — badge + content +
+   date; the current row is highlighted, dead links dimmed. */
+.detail-chain { display: flex; flex-direction: column; margin-bottom: 10px; }
+.detail-chain-row {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: 0;
+    border-bottom: 1px solid var(--border-subtle);
+    padding: 8px 2px;
+    cursor: pointer;
+    color: inherit;
+    font-family: inherit;
+    transition: background-color 120ms ease;
+}
+.detail-chain-row:hover { background: var(--bg-hover); }
+.detail-chain-row:last-child { border-bottom: 0; }
+.detail-chain-row.is-dead .detail-chain-content { opacity: 0.55; }
+.detail-chain-row.is-current .detail-chain-content { color: var(--accent-soft-fg); }
+.detail-chain-badge {
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    letter-spacing: 0.1em;
+    color: var(--fg-4);
+    flex-shrink: 0;
+    width: 64px;
+}
+.detail-chain-content {
+    flex: 1 1 0;
+    min-width: 0;
+    color: var(--fg-2);
+    font-size: var(--text-sm);
+    letter-spacing: -0.01em;
+}
+
+/* Inline edge editor in the graph detail sidebar. */
+.graph-edge-edit {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+.graph-edge-edit .input { flex: 1 1 0; min-width: 0; }
+.graph-edge-edit .graph-edge-conf { flex: 0 0 76px; }
+
+.col-content { width: 40%; }
+.col-content .content-cell {
+    color: var(--fg-1);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+.col-scope, .col-source {
+    color: var(--accent-soft-fg);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    text-transform: none;
+    letter-spacing: 0;
+}
+.col-user { color: var(--info-soft-fg); font-size: var(--text-xs); font-family: var(--font-mono); }
+.col-conf { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); color: var(--fg-3); }
+.col-created { color: var(--fg-3); white-space: nowrap; font-size: var(--text-xs); font-family: var(--font-mono); }
+.col-actions { text-align: right; }
+
+.row-empty td {
+    text-align: center;
+    color: var(--fg-3);
+    padding: 28px 16px;
+    font-size: var(--text-sm);
+    letter-spacing: -0.01em;
+    text-transform: none;
+}
+
+.memory-pager {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    margin-top: 16px;
+}
+
+/* ── Detail panel ─────────────────────────────────────── */
+
+.detail-panel {
+    position: fixed;
+    inset: 0;
+    background: rgba(11, 11, 15, 0.65);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    z-index: 100;
+    display: flex;
+    justify-content: flex-end;
+}
+
+.detail-inner {
+    width: min(560px, 100%);
+    height: 100%;
+    background: var(--bg-raised);
+    border-left: 1px solid var(--border-default);
+    padding: 24px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    box-shadow: var(--shadow-3);
+}
+
+.detail-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.detail-id {
+    font-family: var(--font-mono);
+    font-size: var(--text-md);
+    font-weight: 500;
+    color: var(--accent-soft-fg);
+    word-break: break-all;
+    line-height: 1.3;
+    text-transform: none;
+}
+
+.detail-meta {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 6px 14px;
+    font-size: var(--text-xs);
+    letter-spacing: -0.01em;
+}
+
+.detail-meta .k {
+    color: var(--fg-3);
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+}
+.detail-meta .v { color: var(--fg-1); word-break: break-word; }
+
+.detail-content {
+    background: var(--bg-canvas);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: 14px 16px;
+    font-size: var(--text-md);
+    line-height: 1.65;
+    white-space: pre-wrap;
+    color: var(--fg-2);
+    max-height: 40vh;
+    overflow-y: auto;
+}
+
+.detail-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.detail-tags .tag {
+    background: var(--bg-card);
+    color: var(--fg-2);
+    padding: 2px 8px;
+    font-size: var(--text-xs);
+    border-radius: var(--radius-xs);
+    border: 1px solid var(--border-subtle);
+    text-transform: none;
+    letter-spacing: 0;
+    font-family: var(--font-mono);
+}
+
+/* ── Users browser ────────────────────────────────────── */
+
+.users-section {
+    margin-top: 32px;
+}
+
+/* Shard detail rendered inline in panel-shards (not a modal).
+   The form column matches the same readable column width the rest
+   of the panels use; the parent panel scrolls naturally. */
+.shard-detail-inline {
+    display: block;
+    margin-top: 32px;
+}
+.shard-detail-inline .detail-inner {
+    width: 100%;
+    height: auto;
+    background: transparent;
+    border-left: none;
+    padding: 0;
+    box-shadow: none;
+    overflow: visible;
+}
+
+/* When the form is open, hide the shards table view so the form
+   gets the full panel area. The JS toggles .is-editing on the
+   panel-shards root. */
+#panel-shards.is-editing #shards-section { display: none; }
+
+/* Back link sits above the page title — same pattern as a
+   browser-style "← parent" affordance. Styled as a transparent
+   link, not a button, so it reads as navigation. */
+.shard-detail-back {
+    background: transparent;
+    border: 0;
+    padding: 0 0 4px 0;
+    font: 500 12px/1 var(--font-sans, 'Geist', system-ui);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--fg-3);
+    cursor: pointer;
+}
+.shard-detail-back:hover { color: var(--fg-1); }
+.shard-detail-header { margin-bottom: 24px; }
+
+/* Shard form checklists — panels + book-access. Same shape as the
+   tools list above so long names wrap into a readable grid
+   instead of a one-line flex that overflows. Distinct class
+   from .shard-tool-option so submitShardForm's tool-allowlist
+   harvester doesn't pick these up as tool names. */
+.shard-checklist {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 4px;
+    margin: 12px 0 16px;
+    padding: 8px;
+    background: var(--bg-canvas);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+}
+.shard-checklist-option {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    font-size: var(--text-sm);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    color: var(--fg-2);
+    transition: background-color 120ms ease;
+}
+.shard-checklist-option:hover { background: var(--bg-hover); color: var(--fg-1); }
+.shard-checklist-option.is-disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+.shard-checklist-option.is-disabled:hover { background: transparent; }
+
+/* Imported-skill bind rows: option + (conditional) advisory warning
+   when a checked skill requests tools outside the shard allowlist. */
+.shard-skillpack-row { display: flex; flex-direction: column; }
+.shard-skillpack-warn {
+    color: var(--mark);
+    padding: 0 10px 6px 30px;
+}
+
+.user-tabs {
+    display: flex;
+    gap: 2px;
+    margin-bottom: 16px;
+    border-bottom: 1px solid var(--border-default);
+}
+
+.user-tab {
+    background: transparent;
+    color: var(--fg-3);
+    border: 0;
+    border-bottom: 2px solid transparent;
+    padding: 10px 14px;
+    font-family: inherit;
+    font-size: var(--text-sm);
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    text-transform: none;
+    cursor: pointer;
+    transition: color 120ms ease, border-color 120ms ease;
+    margin-bottom: -1px;
+}
+
+.user-tab:hover { color: var(--fg-1); }
+
+.user-tab.is-active {
+    color: var(--accent-soft-fg);
+    border-bottom-color: var(--accent);
+}
+
+.users-table-wrap {
+    overflow-x: auto;
+    background: var(--bg-card);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-xl);
+}
+
+.users-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--text-sm);
+}
+
+.users-table thead th {
+    background: transparent;
+    color: var(--fg-3);
+    text-align: left;
+    padding: 10px 14px;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    font-weight: 500;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--border-default);
+}
+
+.users-table tbody td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border-subtle);
+    color: var(--fg-2);
+    vertical-align: top;
+}
+.users-table tbody tr:last-child td { border-bottom: 0; }
+
+.users-table tbody tr {
+    cursor: pointer;
+    transition: background-color 120ms ease;
+}
+.users-table tbody tr:hover { background: var(--bg-hover); }
+
+.col-name { width: 24%; color: var(--fg-1); font-weight: 500; }
+.col-id { color: var(--fg-3); font-size: var(--text-xs); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.col-status { width: auto; }
+.col-links { color: var(--info-soft-fg); font-size: var(--text-xs); font-family: var(--font-mono); }
+.col-actions { text-align: right; }
+
+.status-pill {
+    display: inline-block;
+    padding: 2px 10px;
+    font-size: var(--text-2xs);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--border-default);
+    color: var(--fg-2);
+    background: var(--bg-canvas);
+}
+
+.status-pill.pending  { color: var(--sunlamp-300); border-color: rgba(232, 190, 85, 0.4); background: var(--warn-soft-bg); }
+.status-pill.approved { color: var(--moss-400); border-color: rgba(92, 181, 133, 0.4); background: rgba(92, 181, 133, 0.08); }
+.status-pill.denied   { color: var(--ember-400); border-color: rgba(208, 81, 74, 0.4); background: rgba(208, 81, 74, 0.08); }
+.status-pill.disabled { color: var(--fg-4); }
+/* Invited-but-not-yet-enrolled flag — sits beside the status pill in the
+   users table so an admin can spot who still needs an enrollment link. */
+.status-pill.no-passkey {
+    margin-left: 6px;
+    color: var(--sunlamp-300);
+    border-color: rgba(232, 190, 85, 0.4);
+    background: var(--warn-soft-bg);
+}
+
+.link-chip {
+    display: inline-block;
+    padding: 1px 8px;
+    margin: 2px 4px 2px 0;
+    background: var(--info-soft-bg);
+    color: var(--info-soft-fg);
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    letter-spacing: 0;
+    text-transform: none;
+    border-radius: var(--radius-xs);
+}
+
+.link-chip .p { color: var(--accent-soft-fg); margin-right: 6px; text-transform: uppercase; letter-spacing: 0.08em; }
+
+.user-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.user-links-label {
+    margin-top: 8px;
+}
+
+.user-links {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.user-links li {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    background: var(--bg-canvas);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: 8px 12px;
+    font-size: var(--text-sm);
+    letter-spacing: -0.01em;
+    text-transform: none;
+}
+
+.user-links .p {
+    color: var(--accent-soft-fg);
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    min-width: 60px;
+}
+
+.user-links .pid {
+    flex: 1;
+    color: var(--fg-2);
+    word-break: break-all;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+}
+
+.user-links button {
+    background: transparent;
+    color: var(--fg-3);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    padding: 3px 10px;
+    font-family: inherit;
+    font-size: var(--text-2xs);
+    letter-spacing: -0.01em;
+    text-transform: none;
+    cursor: pointer;
+    transition: color 120ms ease, border-color 120ms ease;
+}
+
+.user-links button:hover {
+    color: var(--ember-400);
+    border-color: rgba(208, 81, 74, 0.5);
+}
+
+.user-link-form {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.user-link-form .link-fields {
+    display: grid;
+    grid-template-columns: 1fr 2fr;
+    gap: 8px;
+}
+
+.user-link-form input[type="text"],
+.user-link-form select {
+    background: var(--bg-raised);
+    color: var(--fg-1);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
+    font-family: inherit;
+    font-size: var(--text-sm);
+    letter-spacing: -0.01em;
+    text-transform: none;
+    outline: 0;
+    height: 32px;
+    transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.user-link-form input[type="text"]:focus,
+.user-link-form select:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-ring);
+}
+
+.user-link-form button {
+    align-self: flex-start;
+}
+
+/* ── Responsive ───────────────────────────────────────── */
+
+@media (max-width: 768px) {
+    .nav { padding: 0 16px; }
+    .nav-center { display: none; }
+    .view { padding: 40px 24px; }
+    .view-shell {
+        /* Narrow window: keep the two-column shell with a slimmer
+           rail. The old single-column + horizontal-rail treatment
+           predates the rail redesign — it un-clamped the sidebar's
+           height, so the categories scroll region (and every
+           flex-shrink fix above it) silently stopped working below
+           769px. The rail must stay a height-clamped column. */
+        grid-template-columns: 200px 1fr;
+    }
+    .nav-item {
+        padding: 8px 14px;
+        white-space: nowrap;
+    }
+    .content { padding: 20px 16px; }
+    .center-stack { margin: 32px auto; }
+    .card { padding: 16px; }
+}
+
+@media (max-width: 425px) {
+    .btn-accent, .btn-ghost { width: 100%; }
+    .button-row { flex-direction: column; align-items: stretch; }
+}
+
+/* ── Toast notifications ──────────────────────────────── */
+
+.toast-container {
+    position: fixed;
+    top: 24px;
+    right: 24px;
+    z-index: 200;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    pointer-events: none;
+}
+
+.toast {
+    pointer-events: auto;
+    padding: 10px 14px;
+    font-size: var(--text-sm);
+    letter-spacing: -0.01em;
+    text-transform: none;
+    animation: toastIn 200ms ease-out;
+    min-width: 240px;
+    max-width: 420px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border-default);
+    background: var(--bg-card);
+    box-shadow: var(--shadow-2);
+    color: var(--fg-2);
+}
+
+/* Variant tints layer OVER the opaque card so toasts stay readable
+   (not see-through) against whatever's behind them. */
+.toast.toast-success {
+    color: var(--moss-400);
+    border-color: rgba(92, 181, 133, 0.4);
+    background: linear-gradient(rgba(92, 181, 133, 0.10), rgba(92, 181, 133, 0.10)), var(--bg-card);
+}
+
+.toast.toast-error {
+    color: var(--ember-400);
+    border-color: rgba(208, 81, 74, 0.4);
+    background: linear-gradient(rgba(208, 81, 74, 0.10), rgba(208, 81, 74, 0.10)), var(--bg-card);
+}
+
+.toast.toast-info {
+    color: var(--info-soft-fg);
+    border-color: rgba(126, 151, 212, 0.4);
+    background: linear-gradient(rgba(126, 151, 212, 0.12), rgba(126, 151, 212, 0.12)), var(--bg-card);
+}
+
+.toast.toast-out {
+    animation: toastOut 200ms ease-in forwards;
+}
+
+@keyframes toastIn {
+    from { opacity: 0; transform: translateX(40px); }
+    to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes toastOut {
+    from { opacity: 1; transform: translateX(0); }
+    to { opacity: 0; transform: translateX(40px); }
+}
+
+/* ── Loading overlay ─────────────────────────────────── */
+
+.loading-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 50;
+}
+
+.loading-overlay .fmark-loader {
+    width: 30px;
+    height: 35px;
+    margin-bottom: 0;
+}
+
+.is-loading {
+    position: relative;
+    min-height: 80px;
+}
+
+/* ── Health status dots ──────────────────────────────── */
+
+.health-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    margin-right: 8px;
+    vertical-align: middle;
+}
+
+.health-dot {
+    border-radius: 999px;
+}
+.health-dot.healthy  { background: var(--moss-400); }
+.health-dot.warning  { background: var(--mark); }
+.health-dot.critical { background: var(--danger); }
+
+.card-status-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+/* ── Version history ─────────────────────────────────── */
+
+.version-history {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    margin-top: 8px;
+}
+
+.version-entry {
+    display: grid;
+    grid-template-columns: 40px 1fr;
+    gap: 0 12px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border-subtle);
+    font-size: var(--text-xs);
+    letter-spacing: -0.01em;
+}
+
+.version-entry:last-child {
+    border-bottom: 0;
+}
+
+.version-num {
+    color: var(--accent-soft-fg);
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+}
+
+.version-meta {
+    display: flex;
+    gap: 10px;
+    color: var(--fg-3);
+    font-family: var(--font-mono);
+    letter-spacing: 0;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+}
+
+.version-type {
+    color: var(--info-soft-fg);
+}
+
+.version-content {
+    color: var(--fg-2);
+    font-size: var(--text-xs);
+    line-height: 1.5;
+    white-space: pre-wrap;
+    max-height: 80px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* ── Memory edit mode ────────────────────────────────── */
+
+.detail-content-edit {
+    background: var(--bg-canvas);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-sm);
+    padding: 14px 16px;
+    font-family: inherit;
+    font-size: var(--text-md);
+    line-height: 1.65;
+    color: var(--fg-1);
+    width: 100%;
+    min-height: 140px;
+    resize: vertical;
+    outline: 0;
+    box-shadow: 0 0 0 2px var(--accent-ring);
+}
+
+.detail-edit-actions {
+    display: flex;
+    gap: 8px;
+}
+
+/* ── Relationship triples in detail ──────────────────── */
+
+.detail-triples {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.detail-triple {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    letter-spacing: 0;
+    text-transform: none;
+    color: var(--fg-2);
+    padding: 6px 10px;
+    background: var(--bg-canvas);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+}
+
+.detail-triple .triple-pred {
+    color: var(--info-soft-fg);
+    margin: 0 6px;
+}
+
+/* ── Keyboard shortcut hint ──────────────────────────── */
+
+.kbd-hint {
+    display: inline-block;
+    padding: 1px 6px;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    color: var(--fg-3);
+    border: 1px solid var(--border-default);
+    border-bottom-width: 2px;
+    border-radius: var(--radius-xs);
+    margin-left: 8px;
+    vertical-align: middle;
+    letter-spacing: 0;
+    text-transform: none;
+}
+
+/* ── View-as-user link ───────────────────────────────── */
+
+.view-as-link {
+    color: var(--info-soft-fg);
+    font-size: var(--text-xs);
+    letter-spacing: -0.01em;
+    text-transform: none;
+    cursor: pointer;
+    text-decoration: none;
+    transition: color 120ms ease;
+}
+
+.view-as-link:hover { color: var(--iris-200); }
+
+@media (max-width: 960px) {
+    .memory-filter {
+        grid-template-columns: 1fr 1fr;
+    }
+    .section-title { font-size: var(--text-2xl); }
+}
+
+/* ── Shards panel ──────────────────────────────────────── */
+
+.shards-blurb {
+    margin: 8px 0 24px;
+    color: var(--fg-2);
+    max-width: 720px;
+    line-height: 1.65;
+}
+
+.shards-blurb code {
+    color: var(--accent-soft-fg);
+    background: var(--graphite-850);
+    padding: 1px 6px;
+    border-radius: var(--radius-xs);
+    font-size: 0.92em;
+    font-family: var(--font-mono);
+    border: 1px solid var(--border-subtle);
+}
+
+.shard-section-label {
+    margin-top: 24px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border-default);
+}
+
+.shard-form-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+
+.shard-form-actions {
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border-default);
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+/* ── Shard create/edit form — sectioned layout ───────────────────────
+   Replaces the old flat field stack (which read as a generated form
+   dump). Each fieldset is a titled card; rarely-touched tuning fields
+   live in a collapsible Advanced block so the common path stays short. */
+.shard-form { gap: 0; } /* sections own their spacing (override .user-link-form) */
+
+.shard-section {
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-lg);
+    background: var(--bg-card);
+    margin: 0 0 14px;
+    padding: 18px 20px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    min-width: 0;
+}
+.shard-section-head { display: flex; flex-direction: column; gap: 3px; }
+.shard-section-title {
+    margin: 0;
+    font-size: var(--text-base);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--fg-1);
+    text-transform: none;
+}
+.shard-section-sub {
+    margin: 0;
+    font-size: var(--text-xs);
+    line-height: 1.45;
+    color: var(--fg-3);
+}
+
+/* Segmented radio choices (persistence / visibility) — readable pills
+   instead of bare inline radios. */
+.shard-radios { display: flex; flex-wrap: wrap; gap: 8px; }
+.shard-radio {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 7px 12px;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    background: var(--bg-raised);
+    color: var(--fg-2);
+    font-size: var(--text-sm);
+    cursor: pointer;
+    transition: border-color 120ms ease, background-color 120ms ease, color 120ms ease;
+}
+.shard-radio input { accent-color: var(--accent); cursor: pointer; margin: 0; }
+.shard-radio:hover { border-color: var(--border-strong); color: var(--fg-1); }
+.shard-radio:has(input:checked) {
+    border-color: var(--accent);
+    background: var(--accent-soft-bg);
+    color: var(--fg-1);
+}
+
+/* Advanced model settings — collapsed by default. */
+.shard-advanced { border-top: 1px solid var(--border-subtle); padding-top: 14px; }
+.shard-advanced > summary {
+    cursor: pointer;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--text-xs);
+    font-weight: 500;
+    letter-spacing: 0.02em;
+    color: var(--fg-3);
+}
+.shard-advanced > summary::-webkit-details-marker { display: none; }
+.shard-advanced > summary::before {
+    content: "▸";
+    font-size: 10px;
+    transition: transform 120ms ease;
+}
+.shard-advanced[open] > summary::before { transform: rotate(90deg); }
+.shard-advanced > summary:hover { color: var(--fg-1); }
+.shard-advanced-body {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    margin-top: 14px;
+}
+
+/* System-prompt (and any shard-form) textarea. */
+.shard-form textarea {
+    width: 100%;
+    background: var(--bg-raised);
+    color: var(--fg-1);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    line-height: 1.5;
+    resize: vertical;
+    outline: 0;
+    transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+.shard-form textarea:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-ring);
+}
+
+.shard-tools {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 4px;
+    margin: 12px 0 16px;
+    padding: 8px;
+    background: var(--bg-canvas);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+}
+
+.shard-tool-option {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    font-size: var(--text-sm);
+    font-family: var(--font-mono);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    color: var(--fg-2);
+    transition: background-color 120ms ease;
+}
+
+.shard-tool-option:hover { background: var(--bg-hover); color: var(--fg-1); }
+.shard-tool-option.is-disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+.shard-tool-option.is-disabled:hover { background: transparent; }
+
+.shard-tool-write-badge {
+    color: var(--mark);
+    font-size: var(--text-2xs);
+    font-family: var(--font-mono);
+    letter-spacing: 0.06em;
+}
+
+.shard-schema {
+    margin: 8px 0;
+}
+
+.shard-schema summary {
+    cursor: pointer;
+    padding: 8px 0;
+    color: var(--fg-3);
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+}
+
+.shard-schema textarea {
+    width: 100%;
+    background: var(--bg-raised);
+    color: var(--fg-1);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    margin-top: 8px;
+}
+
+.shard-tokens-section {
+    margin-top: 24px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border-default);
+}
+
+/* Token reveal modal. The plaintext value uses mono font so the
+   operator can read it clearly before copying. Accent-tinted border
+   marks it as a one-shot moment of attention without resorting to a
+   colored background fill (per design system). */
+
+.token-modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(11, 11, 15, 0.65);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+}
+
+.token-modal[hidden] { display: none; }
+
+.token-modal-card {
+    background: var(--bg-raised);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-2xl);
+    padding: 28px;
+    max-width: 560px;
+    width: 100%;
+    box-shadow: var(--shadow-glow);
+}
+
+.token-modal-card .card-title {
+    margin: 6px 0 12px;
+    color: var(--fg-1);
+}
+
+.token-modal-value-row {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    margin: 16px 0 20px;
+    padding: 10px 12px;
+    background: var(--bg-canvas);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+}
+
+.token-modal-value {
+    flex: 1;
+    color: var(--fg-1);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    word-break: break-all;
+    user-select: all;
+}
+
+/* ── Skills catalog ──────────────────────────────────────── */
+
+.skills-blurb {
+    margin: 16px 0 24px;
+    color: var(--fg-3);
+    max-width: 720px;
+    font-size: var(--text-sm);
+}
+
+.skills-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 16px;
+}
+
+.skill-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-card);
+    padding: 18px 22px;
+    box-shadow: var(--shadow-1);
+    transition: box-shadow 0.16s ease, border-color 0.16s ease;
+}
+
+.skill-card.is-disabled { opacity: 0.55; }
+
+/* Imported-skills library header sits below the native catalog list
+   on the same panel — needs breathing room above it. */
+.skillpacks-header { margin-top: 40px; }
+
+/* Import-approval modal: the dry-run preview block. The body excerpt
+   is untrusted remote markdown shown as plain text — capped height so
+   a long skill body doesn't push the approve button off-screen. */
+.skillpack-import-preview {
+    margin: 16px 0 4px;
+    padding: 14px 16px;
+    background: var(--bg-canvas);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+}
+.skillpack-import-body {
+    margin: 10px 0 0;
+    max-height: 200px;
+    overflow: auto;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--fg-2);
+    white-space: pre-wrap;
+}
+
+/* Non-expanding skill cards (My skills + the imported library) share
+   the catalog card's markup but not its click-to-expand behavior —
+   strip the pointer + hover-accent affordance. */
+.skill-header.is-static { cursor: default; }
+.skill-header.is-static:hover .skill-name { color: var(--fg-1); }
+
+/* My-skills card footer: chat opt-in state on the left, actions on
+   the right. Wraps on narrow widths. */
+.skill-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border-subtle);
+}
+.skill-footer .button-row { margin: 0; }
+
+/* Skill editor / import pages (USER-SKILLS-SPEC Phase C) — full-page
+   sub-views inside #panel-skills, same list→detail pattern as shards
+   and scheduled: .is-editing on the panel root swaps the home list
+   for the open view. Fields need their own vertical rhythm here:
+   .field has no inter-field margin (forms elsewhere get it from their
+   grid rows), and the hint text otherwise runs into the next label. */
+#panel-skills.is-editing #skills-home { display: none; }
+#panel-system-skills.is-editing #system-skills-home { display: none; }
+.skill-editor-form { max-width: 760px; }
+.skill-editor-form .field { margin-bottom: 16px; }
+.skill-editor-body {
+    width: 100%;
+    min-height: 260px;
+    resize: vertical;
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    line-height: 1.5;
+    white-space: pre-wrap;
+}
+
+.skill-card:hover {
+    border-color: var(--border-default);
+    box-shadow: var(--shadow-2);
+}
+
+.skill-header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.skill-header:hover .skill-name { color: var(--accent); }
+
+.skill-name {
+    font-family: var(--font-sans);
+    font-weight: 600;
+    font-size: var(--text-base);
+    letter-spacing: -0.01em;
+    flex: 1;
+    color: var(--fg-1);
+    transition: color 0.12s ease;
+}
+
+.skill-meta {
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--fg-4);
+}
+
+.skill-chevron {
+    color: var(--fg-4);
+    font-size: 14px;
+    width: 1.2em;
+    text-align: center;
+}
+
+.skill-description {
+    margin: 12px 0 0;
+    color: var(--fg-3);
+    font-size: var(--text-sm);
+    line-height: 1.55;
+}
+
+.skill-tools-list {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border-subtle);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.skill-tool-row {
+    padding: 10px 12px;
+    background: var(--bg-canvas);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-input);
+}
+
+.skill-tool-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.skill-tool-header:hover .skill-tool-name { color: var(--accent); }
+
+.skill-tool-name {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--fg-2);
+    flex: 1;
+    background: transparent;
+    padding: 0;
+    transition: color 0.12s ease;
+}
+
+.skill-tool-description {
+    margin: 6px 0 0;
+    color: var(--fg-3);
+    font-size: var(--text-xs);
+    line-height: 1.5;
+}
+
+.skill-tool-schema {
+    margin-top: 10px;
+    padding: 10px 12px;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-input);
+    overflow-x: auto;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    color: var(--fg-2);
+    white-space: pre;
+}
+
+/* ── Memory graph ────────────────────────────────────────── */
+
+.graph-toolbar {
+    margin: 16px 0 12px;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    position: relative;
+    flex-wrap: wrap;
+}
+
+.graph-toolbar .input {
+    flex: 1;
+    min-width: 240px;
+    max-width: 480px;
+}
+
+.graph-banner {
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent-soft-fg);
+    background: var(--accent-soft-bg);
+    padding: 4px 10px;
+    border-radius: var(--radius-pill);
+}
+
+/* ── Profile editor ──────────────────────────────────────── */
+
+.profile-editor {
+    margin-top: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.profile-textarea {
+    width: 100%;
+    min-height: 420px;
+    background: var(--bg-raised);
+    color: var(--fg-1);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-input);
+    padding: 14px 16px;
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    line-height: 1.55;
+    resize: vertical;
+    transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.profile-textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-ring);
+}
+
+/* Assistant-personality editor — a short free-text box; the
+   raw-JSON editor's 420px min-height is overkill for prose. Sits
+   in its own bordered section above the working-context editor. */
+.profile-user-prompt {
+    margin-top: 28px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border-subtle);
+}
+
+.profile-user-prompt .body {
+    margin: 8px 0 12px;
+    color: var(--fg-3);
+    max-width: 640px;
+}
+
+.profile-user-prompt .profile-textarea {
+    min-height: 140px;
+}
+
+.profile-user-prompt .button-row {
+    margin-top: 12px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+/* Read-only system-prompt viewer on the profile page. Collapsed
+   <details>; only revealed when the admin enabled user visibility. */
+.profile-system-prompt {
+    margin-top: 28px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border-subtle);
+}
+
+.profile-system-prompt > summary {
+    cursor: pointer;
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--fg-2);
+}
+
+.profile-system-prompt .body {
+    margin: 8px 0 12px;
+    color: var(--fg-3);
+    max-width: 640px;
+}
+
+.profile-system-prompt-text {
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: var(--bg-raised);
+    color: var(--fg-2);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-input);
+    padding: 14px 16px;
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    line-height: 1.55;
+    max-height: 480px;
+    overflow-y: auto;
+    margin: 0;
+}
+
+/* Admin system-prompt panel — the "users may view" toggle row. */
+.system-prompt-toggle {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: var(--text-sm);
+    color: var(--fg-2);
+    cursor: pointer;
+}
+
+.system-prompt-toggle input {
+    flex-shrink: 0;
+}
+
+.profile-keys {
+    margin-top: 40px;
+    padding-top: 28px;
+    border-top: 1px solid var(--border-subtle);
+}
+
+.profile-keys .body {
+    margin: 8px 0 16px;
+    color: var(--fg-3);
+    max-width: 640px;
+}
+
+.graph-search-results {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    max-width: 480px;
+    z-index: 50;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-popover);
+    box-shadow: var(--shadow-2);
+    max-height: 280px;
+    overflow-y: auto;
+    padding: 4px;
+}
+
+.graph-search-row {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 8px 10px;
+    background: transparent;
+    color: var(--fg-2);
+    border: none;
+    border-radius: var(--radius-input);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    cursor: pointer;
+    transition: background 0.12s ease, color 0.12s ease;
+}
+.graph-search-row:hover {
+    background: var(--bg-hover);
+    color: var(--accent);
+}
+
+.graph-layout {
+    display: grid;
+    grid-template-columns: 1fr 320px;
+    gap: 16px;
+    margin-top: 12px;
+    min-height: 600px;
+}
+
+.graph-canvas {
+    background: var(--bg-canvas);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-card);
+    height: 70vh;
+    min-height: 480px;
+    position: relative;
+    overflow: hidden;
+}
+
+.graph-loading {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--fg-3);
+    text-align: center;
+    padding: 24px;
+    font-size: var(--text-sm);
+}
+
+.graph-detail {
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-card);
+    padding: 18px 20px;
+    height: fit-content;
+    max-height: 70vh;
+    overflow-y: auto;
+    box-shadow: var(--shadow-1);
+}
+
+.graph-detail-body {
+    margin-top: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.graph-detail-triple {
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    color: var(--fg-2);
+    line-height: 1.6;
+    word-break: break-word;
+}
+
+.graph-detail-triple code {
+    color: var(--accent-soft-fg);
+    background: transparent;
+    padding: 0;
+    font-family: inherit;
+}
+
+.graph-detail-pred {
+    color: var(--fg-4);
+    margin: 0 6px;
+}
+
+.graph-detail-section {
+    margin-top: 8px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border-subtle);
+}
+
+.graph-detail-fact {
+    background: var(--bg-canvas);
+    padding: 10px 12px;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-input);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.graph-detail-rel-row {
+    padding: 6px 8px;
+    border-radius: var(--radius-sm);
+    font-size: var(--text-xs);
+    transition: background 0.12s ease;
+}
+.graph-detail-rel-row:hover {
+    background: var(--bg-hover);
+}
+.graph-detail-rel-row code {
+    color: var(--fg-1);
+}
+
+@media (max-width: 1100px) {
+    .graph-layout { grid-template-columns: 1fr; }
+    .graph-detail { max-height: none; }
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   Dashboard (FAMILIAR-DASHBOARD-SPEC Phase G)
+   ══════════════════════════════════════════════════════════════════ */
+
+.dash-header {
+    margin-bottom: 16px;
+}
+
+.dash-hero-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-card);
+    padding: 28px 32px 32px;
+    box-shadow: var(--shadow-1);
+    margin-bottom: 16px;
+}
+.dash-hero-card .label {
+    margin-bottom: 10px;
+}
+.dash-hero-title {
+    font-family: var(--font-sans);
+    font-weight: 600;
+    font-size: 44px;
+    line-height: 1.05;
+    color: var(--fg-1);
+    letter-spacing: -0.03em;
+    margin: 0 0 8px;
+}
+.dash-hero-sub {
+    font-size: var(--text-base);
+    color: var(--fg-2);
+    margin: 0;
+    max-width: 720px;
+    line-height: 1.5;
+}
+
+.dash-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 16px;
+}
+
+.dash-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-card);
+    padding: 20px 22px;
+    box-shadow: var(--shadow-1);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-height: 160px;
+    transition: box-shadow 0.16s ease, border-color 0.16s ease;
+}
+.dash-card:hover {
+    border-color: var(--border-default);
+    box-shadow: var(--shadow-2);
+}
+
+.dash-card-full {
+    grid-column: 1 / -1;
+}
+
+.dash-card .label {
+    margin: 0;
+}
+
+.dash-card-title {
+    font-family: var(--font-sans);
+    font-weight: 600;
+    font-size: var(--text-lg);
+    letter-spacing: -0.01em;
+    color: var(--fg-1);
+    margin: 0;
+}
+
+.dash-card-value {
+    font-family: var(--font-mono);
+    font-size: 32px;
+    font-weight: 500;
+    color: var(--fg-1);
+    margin: 0;
+    letter-spacing: -0.01em;
+}
+
+.dash-card-meta {
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--fg-4);
+    margin: 0;
+}
+
+.dash-card-link {
+    margin-top: auto;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--accent-soft-fg);
+    text-decoration: none;
+    align-self: flex-start;
+    transition: color 0.12s ease;
+}
+.dash-card-link:hover {
+    color: var(--accent);
+}
+
+.dash-card-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+}
+
+/* ── Memory stats trio ──────────────────────────────────────── */
+
+.dash-stat-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+}
+.dash-stat {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.dash-stat-num {
+    font-family: var(--font-mono);
+    font-size: 24px;
+    font-weight: 500;
+    color: var(--fg-1);
+    letter-spacing: -0.01em;
+}
+.dash-stat-label {
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--fg-4);
+}
+
+/* ── Entity breakdown bars ──────────────────────────────────── */
+
+.dash-breakdown {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.dash-breakdown-row {
+    display: grid;
+    grid-template-columns: 90px 1fr 48px;
+    gap: 10px;
+    align-items: center;
+}
+.dash-breakdown-label {
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--fg-3);
+}
+.dash-breakdown-bar {
+    height: 6px;
+    background: var(--bg-canvas);
+    border-radius: var(--radius-pill);
+    overflow: hidden;
+    position: relative;
+}
+.dash-breakdown-fill {
+    display: block;
+    height: 100%;
+    background: var(--accent);
+    border-radius: var(--radius-pill);
+    transition: width 0.24s ease;
+}
+.dash-breakdown-num {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--fg-2);
+    text-align: right;
+}
+
+/* ── Recent lists (sessions / writes) ────────────────────────── */
+
+.dash-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+.dash-list-row {
+    background: var(--bg-canvas);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-input);
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.dash-list-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8px;
+}
+.dash-list-tag {
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent-soft-fg);
+    background: var(--accent-soft-bg);
+    padding: 2px 8px;
+    border-radius: var(--radius-pill);
+}
+.dash-list-ago {
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    color: var(--fg-4);
+}
+.dash-list-body {
+    font-size: var(--text-sm);
+    color: var(--fg-2);
+    line-height: 1.45;
+    /* Keep list rows to two lines of prose so the card doesn't
+       grow unbounded when a single fact is very long. */
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+.dash-list-sub {
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    color: var(--fg-4);
+    letter-spacing: 0.04em;
+}
+
+/* ── Empty states ───────────────────────────────────────────── */
+
+.dash-empty {
+    font-size: var(--text-sm);
+    color: var(--fg-3);
+    line-height: 1.5;
+    padding: 8px 0;
+}
+
+/* ── Sparkline ──────────────────────────────────────────────── */
+
+.dash-sparkline-wrap {
+    display: block;
+    width: 100%;
+}
+.dash-sparkline {
+    display: block;
+    width: 100%;
+    height: 80px;
+    overflow: visible;
+}
+.dash-sparkline-line {
+    fill: none;
+    stroke-width: 1.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    vector-effect: non-scaling-stroke;
+}
+.dash-sparkline-facts {
+    stroke: var(--accent);
+}
+.dash-sparkline-ents {
+    stroke: var(--info);
+    opacity: 0.55;
+}
+.dash-sparkline-dot {
+    fill: var(--accent);
+    stroke: var(--bg-card);
+    stroke-width: 1;
+}
+
+/* ── Graph preview ──────────────────────────────────────────── */
+
+.dash-graph-preview {
+    position: relative;
+    height: 280px;
+    background: var(--bg-canvas);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-card);
+    overflow: hidden;
+    cursor: pointer;
+}
+.dash-graph-preview:hover {
+    border-color: var(--border-default);
+}
+.dash-graph-preview .graph-loading {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* ── Responsive ─────────────────────────────────────────────── */
+
+@media (max-width: 900px) {
+    .dash-grid { grid-template-columns: 1fr; }
+    .dash-hero-title { font-size: 36px; }
+}
+
+@media (max-width: 560px) {
+    .dash-stat-grid { grid-template-columns: 1fr 1fr; }
+    .dash-breakdown-row { grid-template-columns: 72px 1fr 40px; }
+    .dash-hero-title { font-size: 28px; }
+    .dash-hero-card { padding: 22px 20px 24px; }
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   Workspace layout engine (FAMILIAR-WORKSPACE-SPEC Phase 1b)
+
+   Panel grid uses CSS Grid with named template areas. The 8 layouts
+   pin `--col-1-fr` / `--col-2-fr` / `--row-1-fr` / `--row-2-fr` as
+   fractional units; resize handles in workspace.js update those
+   custom properties and the grid recomputes track sizes on the
+   next paint. Areas not used by a layout collapse to 0 size, so the
+   resize handles (rc, rr) are present in the DOM but invisible
+   when the layout doesn't include them.
+   ══════════════════════════════════════════════════════════════════ */
+
+/* sidebar-section / sidebar-divider / nav-primary deleted —
+   superseded by the DESIGN.md single-rail sidebar
+   (see sidebar-row + sidebar-cat-* rules earlier in this file). */
+
+/* The workspace panel host fills the content area without the usual
+   panel max-width, since the grid wants every available pixel. */
+.ws-host {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    max-width: none;
+    padding: 0;
+}
+
+/* Toolbar — layout picker on the right. No bottom border;
+   the bg-surface (toolbar) → bg-canvas (grid) color step
+   is the visual separator. The toolbar reads as the top
+   bar of the L-shaped chrome with the sidebar. */
+.ws-toolbar {
+    display: flex;
+    align-items: center;
+    padding: 6px 16px;
+    background: var(--graphite-950);
+    flex: 0 0 auto;
+}
+.ws-toolbar-spacer { flex: 1 1 auto; }
+.ws-toolbar-right {
+    display: flex;
+    align-items: center;
+    gap: 0;
+}
+.ws-toolbar-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+.ws-toolbar-left .label {
+    margin: 0;
+}
+.ws-layout-name {
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    color: var(--fg-3);
+    letter-spacing: 0.04em;
+}
+.ws-layout-picker {
+    /* Per DESIGN.md: ghost icon buttons, no chrome.
+       The bordered rectangle that used to wrap them is gone. */
+    display: flex;
+    gap: 2px;
+    background: transparent;
+    padding: 0;
+    border: 0;
+}
+.ws-layout-btn {
+    width: 26px;
+    height: 26px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: 0;
+    border-radius: 4px;
+    color: var(--fg-3);
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    transition: background 0.12s ease, color 0.12s ease;
+}
+.ws-layout-btn:hover { background: var(--bg-hover); color: var(--fg-1); }
+.ws-layout-btn.is-active {
+    background: var(--accent-soft-bg);
+    color: var(--accent-soft-fg);
+}
+/* Zoom picker — sits next to the layout picker in ws-toolbar.
+   Uses the same ws-layout-btn class for consistent sizing.
+   A left border provides a subtle separator. */
+.ws-zoom-picker {
+    display: flex;
+    gap: 2px;
+    margin-left: 6px;
+    padding-left: 8px;
+    border-left: 1px solid var(--border-default);
+}
+
+/* The grid container. Each layout class redefines grid-template-*
+   to position panels by area name (pA, pB, pC, pD) plus the two
+   resize handles (rc = column resize, rr = row resize). Track
+   fractions come from CSS custom properties so the JS resize
+   logic can update them without touching the rule. */
+.ws-grid {
+    flex: 1 1 auto;
+    display: grid;
+    --col-1-fr: 0.5fr;
+    --col-2-fr: 0.5fr;
+    --row-1-fr: 0.5fr;
+    --row-2-fr: 0.5fr;
+    /* Resize handles render as a 5px gap between panels. The
+       grid background (bg-canvas) shows through, so the gap
+       reads as "the canvas between two surfaces" rather than
+       a chrome bar. Panel borders are gone (see .ws-panel
+       below) so the visible divider IS just this 5px. */
+    --resize-thickness: 5px;
+    background: var(--bg-canvas);
+    overflow: hidden;
+    position: relative;
+}
+
+/* Layout: single. One panel, no handles. */
+.ws-grid-single {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr;
+    grid-template-areas: "pA";
+}
+.ws-grid-single .ws-resize-col,
+.ws-grid-single .ws-resize-row { display: none; }
+
+/* Layout: split-2x1 — two side-by-side panels with a vertical
+   resize handle between them. */
+.ws-grid-split-2x1 {
+    grid-template-columns: var(--col-1-fr) var(--resize-thickness) var(--col-2-fr);
+    grid-template-rows: 1fr;
+    grid-template-areas: "pA rc pB";
+}
+.ws-grid-split-2x1 .ws-resize-row { display: none; }
+
+/* Layout: split-1x2 — two stacked panels, horizontal handle.
+   Conceptually "side-by-side rotated 90°" — full-width top
+   space, full-width bottom space. */
+.ws-grid-split-1x2 {
+    grid-template-columns: 1fr;
+    grid-template-rows: var(--row-1-fr) var(--resize-thickness) var(--row-2-fr);
+    grid-template-areas:
+        "pA"
+        "rr"
+        "pB";
+}
+.ws-grid-split-1x2 .ws-resize-col { display: none; }
+
+/* Layout: t-top — A spans full width on top, B + C split bottom. */
+.ws-grid-t-top {
+    grid-template-columns: var(--col-1-fr) var(--resize-thickness) var(--col-2-fr);
+    grid-template-rows: var(--row-1-fr) var(--resize-thickness) var(--row-2-fr);
+    grid-template-areas:
+        "pA pA pA"
+        "rr rr rr"
+        "pB rc pC";
+}
+
+/* Layouts dropped: stacked-1x2 (replaced by split-1x2 above
+   with a working horizontal divider), quad (2×2), t-bottom,
+   t-left, t-right. The minimal set — single / split-2x1 /
+   split-1x2 / t-top — covers every productivity layout we
+   actually use. The dropped configs can come back later if
+   someone misses them; for now they were churn. */
+
+/* The panel container — tab bar on top, content below.
+   No border: the 5px resize handle (bg-canvas showing
+   through the grid) is the only visible divider between
+   panels. Borders compounded with the handle to read as a
+   ~7px chrome bar; without them the gap reads cleanly as
+   5px of canvas. */
+.ws-panel {
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-surface);
+    overflow: hidden;
+    min-width: 0; /* prevent grid item overflow on long content */
+    min-height: 0;
+}
+.ws-panel.is-active {
+    /* Active panel: very subtle inset highlight via box-shadow
+       so the user can tell which panel is in focus without a
+       chrome border. */
+    box-shadow: inset 0 1px 0 0 var(--border-default);
+}
+
+/* Tab bar — flat strip at the top of each pane (DESIGN.md
+   ). The strip itself is graphite-950 (matches canvas above);
+   active tabs match graphite-900 (matches doc body). 32px tall,
+   bottom border the standard subtle hairline. Horizontal scroll
+   if tabs overflow ~8. */
+.ws-tab-bar {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    padding: 0;
+    height: 32px;
+    background: var(--graphite-950);
+    border-bottom: 2px solid var(--border-default);
+    flex: 0 0 auto;
+    overflow: hidden;
+}
+/* The scrollable strip lives inside the bar and owns horizontal
+   overflow. Native scrollbar is hidden — we surface chevrons
+   instead so the bar stays the same height as a non-overflowing
+   one and tabs aren't covered by the OS scrollbar gutter. */
+.ws-tab-strip {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    align-items: stretch;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none; /* Firefox */
+}
+.ws-tab-strip::-webkit-scrollbar { display: none; } /* WebKit */
+
+/* Chevron scroll buttons. Hidden until the bar's JS toggles
+   .has-overflow on the wrapping bar; .is-disabled fades them at
+   the strip edges. Same ghost-icon-button treatment as .ws-tab-add. */
+.ws-tab-scroll {
+    display: none;
+    flex: 0 0 auto;
+    background: transparent;
+    border: 0;
+    color: var(--fg-3);
+    width: 22px;
+    height: 32px;
+    font-size: 16px;
+    line-height: 1;
+    padding: 0;
+    cursor: pointer;
+    transition: background 120ms ease, color 120ms ease, opacity 120ms ease;
+}
+.ws-tab-bar.has-overflow .ws-tab-scroll {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+.ws-tab-scroll:hover { background: var(--bg-hover); color: var(--fg-1); }
+.ws-tab-scroll.is-disabled {
+    opacity: 0.3;
+    pointer-events: none;
+}
+
+/* A tab is a flat rectangle: no rounded corners, no chrome.
+   The only colored element is the 2px top stripe in the
+   category color (per DESIGN.md). The stripe
+   ships via a ::before pseudo so the data-category attribute
+   selectors below can drive the color without touching JS. */
+.ws-tab {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 0;
+    padding: 0 14px;
+    /* Long-press opens the tab menu on touch — keep iOS from
+       fighting it with text selection / the system callout. */
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+    height: 32px;
+    background: var(--graphite-950);
+    border: 0;
+    border-right: 1px solid var(--border-subtle);
+    border-radius: 0;
+    font-family: var(--font-sans);
+    font-size: 12.5px;
+    font-weight: 500;
+    letter-spacing: -0.005em;
+    color: var(--fg-3);
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+    transition: background 0.12s ease, color 0.12s ease;
+}
+.ws-tab::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: var(--cat-color, var(--fg-4));
+    opacity: 0.35;
+    transition: opacity 120ms ease;
+}
+.ws-tab.is-active {
+    background: var(--graphite-900);
+    color: var(--fg-1);
+}
+.ws-tab.is-active::before {
+    opacity: 1;
+}
+.ws-tab:hover:not(.is-active) {
+    color: var(--fg-2);
+}
+
+/* Per-category stripe color. Same tokens as the sidebar
+   categories so the visual signal stays consistent. */
+.ws-tab[data-category="notes"]  { --cat-color: var(--iris-500); }
+.ws-tab[data-category="wiki"]   { --cat-color: var(--slate-500); }
+.ws-tab[data-category="chat"]   { --cat-color: var(--moss-500); }
+.ws-tab[data-category="shards"] { --cat-color: var(--sunlamp-500); }
+.ws-tab[data-category="diagram"] { --cat-color: var(--tangerine-500); }
+
+.ws-tab-label {
+    line-height: 1;
+    /* Cap is set per-strip by setupTabBarOverflow(); it shrinks
+       toward 8ch as the bar fills, then chevrons take over. */
+    max-width: var(--ws-tab-label-max, 20ch);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Dirty + close share the same trailing slot. Default state:
+   dirty dot (sun) shows when set, × hidden. On hover the dot
+   hides and × shows. The slot is fixed-width so the label
+   doesn't shift between states. */
+.ws-tab-trail {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 12px;
+    height: 12px;
+    margin-left: 8px;
+    position: relative;
+}
+.ws-tab-dirty {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--sunlamp-400);
+    display: inline-block;
+}
+.ws-tab-close {
+    color: var(--fg-4);
+    font-size: 14px;
+    line-height: 1;
+    width: 14px;
+    height: 14px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-pill);
+    position: absolute;
+    inset: -1px;
+    opacity: 0;
+    transition: opacity 120ms ease, color 120ms ease;
+}
+.ws-tab:hover .ws-tab-close { opacity: 1; }
+.ws-tab:hover .ws-tab-dirty { display: none; }
+.ws-tab-close:hover { color: var(--fg-1); }
+
+/* New-tab + ghost action buttons live on the right of the tab
+   bar with no border or fill until hover (per DESIGN.md: ghost icon
+   buttons, no chrome). */
+.ws-tab-add {
+    background: transparent;
+    border: 0;
+    color: var(--fg-4);
+    font-size: 14px;
+    line-height: 1;
+    width: 32px;
+    height: 32px;
+    cursor: pointer;
+    transition: background 120ms ease, color 120ms ease;
+}
+.ws-tab-add:hover { background: var(--bg-hover); color: var(--fg-1); }
+
+/* ── Tab drag-and-drop indicators ──────────────────────── */
+.ws-tab.is-dragging { opacity: 0.4; }
+.ws-tab-drop-before {
+    box-shadow: inset 2px 0 0 0 var(--accent);
+}
+.ws-tab-drop-after {
+    box-shadow: inset -2px 0 0 0 var(--accent);
+}
+.ws-tab-bar-drop-target {
+    background: rgba(106, 76, 224, 0.08);
+}
+
+/* Panel content area — fills remaining vertical space. */
+.ws-panel-content {
+    flex: 1 1 auto;
+    overflow: auto;
+    min-height: 0;
+    background: var(--bg-canvas);
+}
+
+/* Resize handles — invisible track that's draggable. The visible
+   line itself is just the panel borders touching across the gap;
+   we don't need extra paint inside the handle. Cursor changes
+   communicate the drag affordance. */
+.ws-resize {
+    /* Grey separator starts at the tab bar's border zone (30px).
+       The tab bar is 32px border-box with a 2px border-bottom,
+       so content is 0-30px (labels live here, transparent) and
+       border is 30-32px (grey here creates the grid intersection).
+       Below the tab bar: solid grey separator between panels. */
+    background: linear-gradient(
+        to bottom,
+        transparent 30px,
+        var(--border-default) 30px
+    );
+    transition: background 0.12s ease;
+}
+.ws-resize:hover {
+    background: linear-gradient(
+        to bottom,
+        transparent 30px,
+        var(--graphite-600) 30px
+    );
+}
+.ws-resize:active {
+    background: linear-gradient(
+        to bottom,
+        transparent 30px,
+        var(--accent) 30px
+    );
+}
+.ws-resize-col {
+    cursor: col-resize;
+    grid-area: rc;
+}
+.ws-resize-row {
+    cursor: row-resize;
+    grid-area: rr;
+}
+
+/* Placeholder shown when a tab has no registered surface renderer.
+   Phase 1b ships with all surfaces in this state. Phase 1c+ replace
+   per-surface. */
+.ws-placeholder {
+    padding: 32px 28px;
+    max-width: 640px;
+    color: var(--fg-2);
+}
+.ws-placeholder-title {
+    font-family: var(--font-sans);
+    font-weight: 600;
+    font-size: var(--text-2xl);
+    color: var(--fg-1);
+    margin: 0 0 12px;
+    letter-spacing: -0.01em;
+}
+.ws-placeholder-body {
+    font-size: var(--text-md);
+    color: var(--fg-3);
+    line-height: 1.6;
+    margin: 0;
+}
+.ws-empty {
+    padding: 32px 28px;
+    color: var(--fg-3);
+    font-size: var(--text-sm);
+    line-height: 1.6;
+}
+.ws-error {
+    padding: 16px;
+    color: var(--danger);
+    background: rgba(208, 81, 74, 0.08);
+    border: 1px solid rgba(208, 81, 74, 0.25);
+    border-radius: var(--radius-sm);
+    margin: 12px;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   Chat surface (FAMILIAR-WORKSPACE-SPEC Phase 1c)
+
+   Two-pane shell rendered into a workspace tab's content area.
+   Conversations on the left, message stream + input on the right.
+   ══════════════════════════════════════════════════════════════════ */
+
+.chat-shell {
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    height: 100%;
+    background: var(--bg-canvas);
+    color: var(--fg-1);
+}
+
+/* ── Left: conversation list ───────────────────────────── */
+
+.chat-left {
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-surface);
+    border-right: 1px solid var(--border-subtle);
+    min-height: 0;
+}
+.chat-left-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border-subtle);
+}
+.chat-new-btn {
+    background: transparent;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    padding: 4px 8px;
+    color: var(--fg-2);
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    cursor: pointer;
+    transition: background 0.12s ease, color 0.12s ease;
+}
+.chat-new-btn:hover {
+    background: var(--bg-hover);
+    color: var(--fg-1);
+}
+
+.chat-conv-list {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    padding: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.chat-conv-row {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 8px 10px;
+    background: transparent;
+    border: 0;
+    border-radius: var(--radius-sm);
+    text-align: left;
+    cursor: pointer;
+    color: var(--fg-2);
+    transition: background 0.12s ease;
+}
+.chat-conv-row:hover { background: var(--bg-hover); }
+.chat-conv-row.is-active {
+    background: var(--accent-soft-bg);
+    color: var(--accent-soft-fg);
+}
+.chat-conv-row-title {
+    font-size: var(--text-sm);
+    line-height: 1.3;
+    color: var(--fg-1);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.chat-conv-row.is-active .chat-conv-row-title {
+    color: var(--accent-soft-fg);
+}
+.chat-conv-row-meta {
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    color: var(--fg-4);
+    letter-spacing: 0.04em;
+}
+.chat-conv-empty,
+.chat-conv-error {
+    padding: 12px;
+    color: var(--fg-3);
+    font-size: var(--text-2xs);
+    line-height: 1.5;
+}
+.chat-conv-error {
+    color: var(--danger);
+}
+
+/* ── Right: message stream + input ─────────────────────── */
+
+.chat-right {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+}
+.chat-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 14px;
+    height: 32px;
+    border-bottom: 2px solid var(--border-default);
+    /* Moss/green tint matching sidebar .sidebar-cat-chat --cat-soft */
+    background: linear-gradient(rgba(62, 154, 106, 0.16), rgba(62, 154, 106, 0.16)), var(--graphite-950);
+    flex: 0 0 auto;
+}
+.chat-conv-title {
+    background: transparent;
+    border: 0;
+    font-family: var(--font-sans);
+    font-weight: 500;
+    font-size: 12.5px;
+    color: var(--fg-1);
+    letter-spacing: -0.005em;
+    line-height: 1;
+    padding: 0;
+    margin: 0;
+    flex: 1 1 auto;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.chat-conv-title:focus { outline: none; }
+.chat-model-badge {
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent-soft-fg);
+    background: var(--accent-soft-bg);
+    padding: 2px 8px;
+    border-radius: var(--radius-pill);
+}
+
+.chat-messages {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    padding: 24px 32px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+}
+.chat-empty {
+    color: var(--fg-3);
+    font-size: var(--text-sm);
+    text-align: center;
+    padding: 80px 0;
+}
+.chat-error {
+    background: rgba(208, 81, 74, 0.08);
+    border: 1px solid rgba(208, 81, 74, 0.25);
+    color: var(--danger);
+    padding: 10px 14px;
+    border-radius: var(--radius-sm);
+    font-size: var(--text-sm);
+}
+/* Shown on load when a conversation's last turn is an unanswered
+   prompt (a reply interrupted by a mid-stream reload/crash). */
+.chat-interrupted-note {
+    color: var(--fg-2);
+    font-size: var(--text-sm);
+    font-style: italic;
+    padding: 8px 14px;
+    opacity: 0.85;
+}
+
+/* ── Message bubbles ───────────────────────────────────── */
+
+.chat-msg {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    /* Cap width at the readable 760px on wide panels, but keep a
+       10% gap against the opposite edge on narrower ones so the
+       back-and-forth reads at a glance. */
+    max-width: min(760px, 90%);
+}
+/* Familiar hugs the left edge (default flex behaviour, but spelled
+   out for clarity); user messages hug the right with the head +
+   body right-aligned to match. */
+.chat-msg-assistant {
+    align-self: flex-start;
+    align-items: flex-start;
+}
+.chat-msg-user {
+    align-self: flex-end;
+    /* The block as a whole hugs the right edge (align-self),
+       but inside the block we line the name + body up on the
+       same LEFT edge so the eyebrow doesn't float over to the
+       far right of the block while the wrapped text starts on
+       the left. */
+    align-items: flex-start;
+    text-align: left;
+}
+.chat-msg-head {
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--fg-4);
+}
+.chat-msg-body {
+    font-size: var(--text-md);
+    line-height: 1.65;
+    color: var(--fg-2);
+}
+.chat-msg-body > :first-child { margin-top: 0; }
+.chat-msg-body > :last-child { margin-bottom: 0; }
+.chat-msg-body p { margin: 0 0 12px; }
+.chat-msg-body h1, .chat-msg-body h2, .chat-msg-body h3,
+.chat-msg-body h4, .chat-msg-body h5, .chat-msg-body h6 {
+    font-family: var(--font-sans);
+    font-weight: 600;
+    color: var(--fg-1);
+    margin: 16px 0 8px;
+    line-height: 1.3;
+}
+.chat-msg-body h1 { font-size: var(--text-2xl); }
+.chat-msg-body h2 { font-size: var(--text-xl); }
+.chat-msg-body h3 { font-size: var(--text-lg); }
+.chat-msg-body code:not(.hljs) {
+    background: var(--bg-raised);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-xs);
+    padding: 1px 5px;
+    font-family: var(--font-mono);
+    font-size: 0.92em;
+}
+.chat-msg-body pre {
+    margin: 12px 0;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: 12px 14px;
+    overflow-x: auto;
+}
+.chat-msg-body pre code,
+.chat-msg-body pre code.hljs {
+    background: transparent;
+    border: 0;
+    padding: 0;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    line-height: 1.55;
+}
+.chat-msg-body ul, .chat-msg-body ol {
+    margin: 0 0 12px;
+    padding-left: 22px;
+}
+.chat-msg-body li { margin: 2px 0; }
+.chat-msg-body blockquote {
+    margin: 0 0 12px;
+    padding: 0 0 0 14px;
+    border-left: 2px solid var(--border-default);
+    color: var(--fg-3);
+}
+.chat-msg-body a {
+    color: var(--info-soft-fg);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+}
+.chat-msg-body a:hover {
+    color: var(--iris-200);
+    border-bottom-color: currentColor;
+}
+.chat-md-fallback {
+    /* Fallback when markdown deps fail to load. */
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: 12px 14px;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+}
+
+.chat-msg-user .chat-msg-head { color: var(--moss-400); }
+.chat-msg-assistant .chat-msg-head {
+    font-family: var(--font-sans);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--fg-1);
+}
+.chat-msg-system .chat-msg-head { color: var(--fg-4); }
+.chat-msg-tool .chat-msg-head { color: var(--mark); }
+
+/* Working signal: the pixel indicator rides the thinking line while the
+   model reasons, then drops when answer tokens stream (chat.js removes
+   it) — the streaming text carries the motion. Replaces the old blinking
+   body caret. The .rc-px pixel component is shared with the research
+   card; here it just needs spacing after the label. */
+.chat-think-px { margin-left: 8px; vertical-align: -1px; }
+
+/* Send button becomes a small red-octagon Stop while a turn generates
+   (chat.js swaps the content + class); clicking it aborts the stream. */
+.chat-send-btn.chat-send-stop {
+    background: transparent;
+    padding: 0;
+    width: 40px;
+    display: grid;
+    place-items: center;
+    transition: background-color 120ms ease;
+}
+.chat-send-btn.chat-send-stop:hover { background: rgba(var(--danger-rgb), 0.12); }
+.chat-stop-oct {
+    width: 22px;
+    height: 22px;
+    background: var(--danger);
+    clip-path: polygon(30% 0, 70% 0, 100% 30%, 100% 70%, 70% 100%, 30% 100%, 0 70%, 0 30%);
+    box-shadow: 0 0 0 0 rgba(var(--danger-rgb), 0.35);
+    animation: chat-stop-pulse 1.7s ease-in-out infinite;
+}
+.chat-send-btn.chat-send-stop:hover .chat-stop-oct { background: var(--danger-hover); }
+@keyframes chat-stop-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(var(--danger-rgb), 0.35); }
+    50% { box-shadow: 0 0 0 5px rgba(var(--danger-rgb), 0); }
+}
+@media (prefers-reduced-motion: reduce) { .chat-stop-oct { animation: none; } }
+
+.chat-msg-tools {
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    color: var(--info-soft-fg);
+    background: var(--info-soft-bg);
+    padding: 4px 10px;
+    border-radius: var(--radius-pill);
+    align-self: flex-start;
+}
+
+/* ── Research-in-progress card (RESEARCH-SKILL-SPEC §6.7) ─
+   Persistent status card pinned just above the composer while an
+   autonomous deep-research run is live. Moss-tinted to echo the
+   chat header; rebuilt from polled server state each tick. */
+.chat-research-card {
+    /* Inset from the chat panel's edges (~15% narrower, centred) so the
+       card reads as a distinct panel with breathing room, not edge-to-edge. */
+    margin: 10px 7.5% 6px;
+    border: 1px solid var(--iris-600, #5a3fce);
+    border-radius: var(--radius-lg);
+    background: linear-gradient(180deg, rgba(106, 76, 224, 0.10), rgba(106, 76, 224, 0.03)), var(--bg-card);
+    box-shadow: 0 0 0 1px rgba(106, 76, 224, 0.10), 0 10px 30px rgba(8, 4, 22, 0.45), 0 0 30px -10px var(--accent-ring);
+    color: var(--fg-2);
+    font-size: var(--text-sm);
+    line-height: 1.4;
+    flex: 0 0 auto;
+    overflow: hidden;
+    position: relative;
+    /* Clickable: (re)opens the live evidence view in the right pane. */
+    cursor: pointer;
+    transition: border-color 0.12s ease, box-shadow 0.12s ease;
+    /* rgb triples the pixel indicator uses for opacity math */
+    --rc-iris: 154, 124, 245;
+    --rc-moss: 92, 181, 133;
+    --rc-amber: 224, 164, 76;
+}
+.chat-research-card:hover {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px rgba(106, 76, 224, 0.18), 0 10px 30px rgba(8, 4, 22, 0.5), 0 0 34px -8px var(--accent-ring);
+}
+.chat-research-card:focus-visible { outline: 2px solid var(--accent-hover); outline-offset: 1px; }
+.chat-research-card[hidden] { display: none; }
+
+/* Layout classes are scoped under the card (short generic names like
+   .rc-m/.rc-k/.rc-t would otherwise be global-collision bait); the pixel
+   indicator below stays global so it can be reused. */
+.chat-research-card .rc-head { display: flex; align-items: center; gap: 11px; padding: 12px 14px; }
+.chat-research-card .rc-title { min-width: 0; flex: 1 1 auto; }
+.chat-research-card .rc-t { color: var(--fg-1); font-weight: 600; display: flex; gap: 6px; align-items: baseline; }
+.chat-research-card .rc-topic { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-research-card .rc-s { color: var(--fg-3); font-size: var(--text-xs); margin-top: 2px; }
+
+/* Stop button on the card header — cancels the run. */
+.chat-research-card .rc-stop {
+    flex: 0 0 auto; background: transparent; border: 0; cursor: pointer;
+    padding: 4px; margin: -4px -2px -4px 6px; border-radius: var(--radius-sm);
+    display: grid; place-items: center;
+}
+.chat-research-card .rc-stop:hover { background: rgba(var(--danger-rgb), 0.12); }
+.chat-research-card .rc-stop:focus-visible { outline: 2px solid var(--danger); outline-offset: 1px; }
+.chat-research-card .rc-stop .chat-stop-oct { width: 18px; height: 18px; }
+
+/* Cap the roster so an 8-area run can't crush the messages pane; rows
+   past ~5 scroll within the card. */
+.chat-research-card .rc-roster { padding: 2px 6px 4px; max-height: 216px; overflow-y: auto; overscroll-behavior: contain; }
+.chat-research-card .rc-row { display: flex; align-items: center; gap: 12px; padding: 8px; }
+.chat-research-card .rc-row + .rc-row { border-top: 1px solid var(--border-subtle); }
+.chat-research-card .rc-slot { width: 15px; display: flex; justify-content: center; flex: 0 0 auto; }
+.chat-research-card .rc-label { flex: 1 1 auto; min-width: 0; color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-research-card .rc-row.rc-done .rc-label { color: var(--fg-3); }
+.chat-research-card .rc-row.rc-queued .rc-label { color: var(--fg-4); }
+.chat-research-card .rc-wstate { font-size: var(--text-xs); color: var(--fg-4); font-family: var(--font-mono, ui-monospace, monospace); flex: 0 0 auto; }
+.chat-research-card .rc-row.rc-active .rc-wstate { color: var(--accent-soft-fg); }
+.chat-research-card .rc-row.rc-done .rc-wstate { color: var(--moss-300, #82cfa4); }
+.chat-research-card .rc-row.rc-failed .rc-wstate { color: var(--warn, #e0a44c); }
+
+.chat-research-card .rc-meta {
+    display: flex; align-items: center; gap: 15px; flex-wrap: wrap;
+    padding: 10px 14px; border-top: 1px solid var(--border-subtle);
+    font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--text-xs); color: var(--fg-3);
+    font-variant-numeric: tabular-nums;
+}
+.chat-research-card .rc-m { display: flex; align-items: baseline; gap: 5px; }
+.chat-research-card .rc-k { color: var(--fg-4); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; }
+.chat-research-card .rc-m b { color: var(--accent-soft-fg); font-weight: 600; }
+.chat-research-card .rc-m-moss b { color: var(--moss-300, #82cfa4); }
+
+/* Pixel indicator: three columns 1·2·3 tall, bottom-aligned, even x/y
+   gaps. A brightness pulse marches left → right for the active state. */
+.rc-px { display: inline-flex; align-items: flex-end; gap: 3px; --pc: var(--rc-iris); }
+.rc-c { display: flex; flex-direction: column; gap: 3px; }
+.rc-c i { display: block; width: 3px; height: 3px; border-radius: 1px; background: rgba(var(--pc), 0.26); }
+.rc-px-anim .rc-c i { animation: rc-pxpulse 1.35s ease-in-out infinite; }
+.rc-px-anim .rc-c1 i { animation-delay: 0s; }
+.rc-px-anim .rc-c2 i { animation-delay: 0.16s; }
+.rc-px-anim .rc-c3 i { animation-delay: 0.32s; }
+@keyframes rc-pxpulse {
+    0%, 42%, 100% { background: rgba(var(--pc), 0.26); box-shadow: none; }
+    13% { background: rgba(var(--pc), 1); box-shadow: 0 0 6px rgba(var(--pc), 0.85); }
+}
+.rc-px-moss { --pc: var(--rc-moss); }
+.rc-px-amber { --pc: var(--rc-amber); }
+.rc-px-dim .rc-c i { background: rgba(var(--pc), 0.14); }   /* queued */
+.rc-px-fill .rc-c i { background: rgba(var(--pc), 0.9); }   /* done — solid green */
+
+@media (prefers-reduced-motion: reduce) {
+    .rc-px-anim .rc-c i { animation: none; }
+    .rc-px-anim .rc-c i { background: rgba(var(--pc), 0.6); }
+}
+
+/* Splash mode hides the chat chrome; keep the card out too. */
+.chat-shell.is-splash .chat-right > .chat-research-card { display: none; }
+
+/* ── Input ─────────────────────────────────────────────── */
+
+.chat-input-wrap {
+    /* Tight, equal padding so the input row reads as one
+       unit, not a "form" with chrome around it. The textarea
+       and the send button share a 40px baseline; the wrap's
+       align-items: end keeps the button glued to the bottom
+       of the textarea as it grows on multi-line input. */
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 8px;
+    padding: 12px 14px;
+    border-top: 1px solid var(--border-subtle);
+    background: var(--bg-surface);
+    flex: 0 0 auto;
+    align-items: end;
+}
+.chat-input {
+    box-sizing: border-box;
+    width: 100%;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    padding: 9px 12px;
+    color: var(--fg-1);
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+    line-height: 1.4;
+    resize: none;
+    /* Single-line height matches the send button so an empty
+       input + button form a clean 40px row. autosizeInput()
+       in chat.js grows from here up to the max. */
+    height: 40px;
+    min-height: 40px;
+    max-height: 160px;
+    overflow-y: auto;
+    transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+.chat-input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-ring);
+}
+.chat-send-btn {
+    /* Match the input's resting height precisely. align-self:
+       end pins it to the bottom edge of the grid cell so the
+       button rides the textarea as it grows multi-line. */
+    height: 40px;
+    align-self: end;
+}
+
+/* ── Responsive ───────────────────────────────────────── */
+
+@media (max-width: 720px) {
+    /* Inside a panel that's narrower than 720px, collapse the
+       conversation list to a thin sidebar. Real mobile support is
+       a Phase 6 polish concern. */
+    .chat-shell { grid-template-columns: 56px 1fr; }
+    .chat-conv-row-title { display: none; }
+    .chat-conv-row-meta { display: none; }
+    .chat-new-btn { font-size: 10px; padding: 4px 6px; }
+    .chat-left-head .label { display: none; }
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   Notes surface (FAMILIAR-WORKSPACE-SPEC Phase 2b)
+
+   Two-pane shell with file tree on the left and a textarea + live
+   preview editor on the right. Editor mode toggles between edit-
+   only / split / preview-only via the ◐ button in the meta row.
+   ══════════════════════════════════════════════════════════════════ */
+
+.notes-shell {
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    /* Explicit single-row track at 1fr — without it the implicit
+       row defaults to `auto` (content-sized), which collapses
+       through the flex chain and leaves the editor canvas at 0
+       height. */
+    grid-template-rows: 1fr;
+    height: 100%;
+    min-height: 0;
+    background: var(--bg-canvas);
+    color: var(--fg-1);
+}
+
+/* ── Left rail ─────────────────────────────────────────── */
+
+.notes-left {
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-surface);
+    border-right: 1px solid var(--border-subtle);
+    min-height: 0;
+}
+.notes-left-head {
+    display: flex;
+    gap: 6px;
+    padding: 10px 10px 8px;
+    border-bottom: 1px solid var(--border-subtle);
+    align-items: center;
+}
+.notes-search-wrap {
+    flex: 1 1 auto;
+    display: flex;
+}
+.notes-search {
+    flex: 1 1 auto;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    padding: 4px 8px;
+    color: var(--fg-1);
+    font-family: var(--font-sans);
+    font-size: var(--text-xs);
+}
+.notes-search:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+.notes-tree {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    padding: 6px;
+}
+.notes-folder-group {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-bottom: 8px;
+}
+.notes-folder-name {
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--fg-4);
+    padding: 6px 10px 2px;
+}
+.notes-row {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 6px 10px;
+    background: transparent;
+    border: 0;
+    border-radius: var(--radius-sm);
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.12s ease;
+}
+.notes-row:hover { background: var(--bg-hover); }
+.notes-row.is-active {
+    background: var(--accent-soft-bg);
+}
+.notes-row-title {
+    font-size: var(--text-sm);
+    color: var(--fg-1);
+    line-height: 1.3;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.notes-row-title.is-pinned::before {
+    content: "📌 ";
+    margin-right: 2px;
+    /* The pin emoji is the only emoji in chrome — DESIGN.md
+       allows it for the "unsaved" / "pinned" exception class.
+       Could swap for an SVG mark if we want zero-emoji chrome. */
+}
+.notes-row.is-active .notes-row-title { color: var(--accent-soft-fg); }
+.notes-row-snippet {
+    font-size: var(--text-2xs);
+    color: var(--fg-4);
+    line-height: 1.4;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* ── Right rail ────────────────────────────────────────── */
+
+.notes-right {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    /* Containing block for the absolutely-positioned editor /
+       splash / empty children below — pinning them to the area
+       below the header bypasses the flex-chain percentage-height
+       collapse that was making Toast UI render at half height. */
+    position: relative;
+}
+.notes-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 14px;
+    height: 32px;
+    /* Iris/purple tint matching sidebar .sidebar-cat-notes --cat-soft */
+    background: linear-gradient(rgba(106, 76, 224, 0.14), rgba(106, 76, 224, 0.14)), var(--graphite-950);
+    border-bottom: 2px solid var(--border-default);
+    flex: 0 0 auto;
+}
+/* Wiki reuses the notes-right layout, but the title bar takes the
+   slate/blue category color (--slate-500 #4E6AAD) so users can tell
+   a wiki tab apart from a notes tab at a glance. The .is-wiki
+   modifier is set in wiki.js when it builds the header. */
+.notes-header.is-wiki {
+    background: linear-gradient(rgba(78, 106, 173, 0.18), rgba(78, 106, 173, 0.18)), var(--graphite-950);
+}
+.notes-title {
+    background: transparent;
+    border: 0;
+    font-family: var(--font-sans);
+    font-weight: 500;
+    font-size: 12.5px;
+    color: var(--fg-1);
+    letter-spacing: -0.005em;
+    line-height: 1;
+    /* Reset browser input padding so text aligns with tab labels */
+    padding: 0;
+    margin: 0;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+.notes-title:focus { outline: none; }
+.notes-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    color: var(--fg-4);
+    flex: 0 0 auto;
+}
+.notes-saved {
+    /* Lightened from --fg-4 so "Saved" and "Synced — <actor>"
+       read against the title-bar surround. Still well below body
+       text so it doesn't compete with the title. */
+    color: var(--fg-2);
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+}
+/* Back chevron — appears in the page header when the user
+   reached the current page by following a [[link]]. Styled like
+   the overflow button (same line-weight, same hover) so it reads
+   as part of the page chrome rather than a foreign affordance. */
+.notes-back {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    color: var(--fg-3);
+    padding: 4px 6px;
+    margin-right: 2px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    transition: background 0.12s ease, color 0.12s ease;
+}
+.notes-back:hover {
+    background: var(--bg-hover);
+    color: var(--fg-1);
+    border-color: var(--border-subtle);
+}
+.notes-back svg { display: block; }
+
+/* Globe indicator next to the title — visible when the note is
+   publicly shared. Tooltip is "Page shared publicly"; clicking does
+   nothing (the actions live in the overflow menu). */
+.notes-share-indicator {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--moss-400);
+    cursor: default;
+}
+.notes-share-indicator[hidden] { display: none; }
+.notes-share-indicator svg { display: block; }
+
+/* Overflow menu ("⋯" button + dropdown) */
+.notes-overflow {
+    position: relative;
+}
+.notes-overflow-btn {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    color: var(--fg-4);
+    font-size: 16px;
+    line-height: 1;
+    padding: 2px 6px;
+    cursor: pointer;
+    transition: background 0.12s ease, color 0.12s ease;
+}
+.notes-overflow-btn:hover {
+    background: var(--bg-hover);
+    color: var(--fg-1);
+    border-color: var(--border-subtle);
+}
+.notes-overflow-menu {
+    display: none;
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: 4px;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: 4px 0;
+    min-width: 140px;
+    z-index: 100;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+.notes-overflow.is-open .notes-overflow-menu {
+    display: block;
+}
+.notes-overflow-item {
+    display: block;
+    width: 100%;
+    background: transparent;
+    border: 0;
+    color: var(--fg-2);
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+    padding: 6px 14px;
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.1s ease;
+}
+.notes-overflow-item:hover {
+    background: var(--bg-hover);
+}
+.notes-overflow-item.danger {
+    color: var(--danger);
+}
+.notes-overflow-item.danger:hover {
+    background: rgba(208, 81, 74, 0.1);
+}
+
+/* ── Editor (Toast UI) ─────────────────────────────────── */
+
+/* Pin the editor / splash / empty hosts to the area below the
+   32px header. .notes-right is position: relative so these absolute
+   positions resolve against it. This sidesteps the flex-chain
+   percentage-height issue that left Toast UI's canvas at 0 or
+   half height despite our flex sizing. */
+.notes-editor,
+.notes-no-selection,
+.notes-splash-host {
+    position: absolute;
+    top: 32px;
+    left: 0;
+    right: 0;
+    bottom: 0;
+}
+/* Wiki's splash element (.notes-empty.wiki-splash-host) is shown
+   only when the header is also hidden, so pin it to the full
+   right rail. */
+.notes-empty.wiki-splash-host {
+    position: absolute;
+    inset: 0;
+}
+
+/* Live-research read-only view (RESEARCH-SKILL-SPEC §6.7). Fills the
+   right rail — is-splash hides the left rail — with a moss banner
+   marking it non-editable and a scrolling markdown body. */
+.wiki-research-host {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-canvas);
+    z-index: 1;
+}
+.wiki-research-host[hidden] { display: none; }
+.wiki-research-banner {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--border-default);
+    background: linear-gradient(rgba(62, 154, 106, 0.10), rgba(62, 154, 106, 0.10)), var(--bg-raised);
+    color: var(--fg-2);
+    font-size: var(--text-sm);
+}
+.wiki-research-badge {
+    flex: 0 0 auto;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    color: var(--moss-400);
+}
+.wiki-research-topic {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--fg-3);
+}
+.wiki-research-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 20px 24px;
+}
+.wiki-research-body > .chat-msg-body {
+    max-width: 760px;
+}
+.wiki-research-loading {
+    color: var(--fg-3);
+    font-style: italic;
+}
+.notes-editor {
+    overflow: hidden;
+    background: var(--bg-canvas);
+    display: flex;
+    flex-direction: column;
+}
+/* Toast UI host — flex-grow to fill, leaving room for the
+   page-links footer when one's present. */
+.notes-editor > .notes-editor-host {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+/* Page links footer — sits below the editor, shows outbound +
+   inbound links for the current page. flex: 0 0 auto so it
+   takes only as much vertical space as it needs (capped by
+   max-height + internal scroll). Hidden when the page has no
+   links in either direction. */
+.notes-page-links {
+    flex: 0 0 auto;
+    max-height: 220px;
+    overflow-y: auto;
+    background: var(--bg-surface);
+    border-top: 1px solid var(--border-subtle);
+    padding: 8px 14px 12px;
+    font-size: var(--text-sm);
+    color: var(--fg-2);
+}
+.notes-page-links[hidden] { display: none; }
+.notes-page-links-section {
+    margin-top: 6px;
+}
+.notes-page-links-section:first-child { margin-top: 0; }
+.notes-page-links-eyebrow {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--fg-4);
+    margin-bottom: 4px;
+}
+.notes-page-link-row {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 3px 0;
+    cursor: pointer;
+    color: var(--fg-1);
+    line-height: 1.4;
+}
+.notes-page-link-row:hover .notes-page-link-title {
+    text-decoration: underline;
+    color: var(--iris-300);
+}
+.notes-page-link-title {
+    font-weight: 500;
+}
+.notes-page-link-book {
+    font-size: 11px;
+    color: var(--fg-4);
+    font-family: var(--font-mono);
+}
+.notes-page-link-row.is-broken {
+    color: var(--danger);
+    cursor: default;
+}
+.notes-page-link-row.is-broken:hover .notes-page-link-title {
+    text-decoration: none;
+    color: var(--danger);
+}
+.notes-page-link-row.is-broken .notes-page-link-title::after {
+    content: " (not yet)";
+    color: var(--fg-4);
+    font-weight: 400;
+    font-size: 11px;
+}
+
+/* Inline wiki-links rendered inside the editor by wikilink.js.
+   Each surface's links match its icon color, hover to the other's:
+   notes (purple iris) ↔ wiki (blue slate).
+   Uses .toastui-editor-contents prefix to outrank Toast UI's
+   built-in a:hover { color: #1f70de } rule. */
+.toastui-editor-contents a.wiki-link,
+.wiki-link {
+    color: var(--iris-300);
+    text-decoration: underline;
+    cursor: pointer;
+}
+.toastui-editor-contents a.wiki-link:hover,
+.wiki-link:hover {
+    color: var(--slate-400, #6B8DD4);
+}
+/* Wiki surface: blue default, purple hover. */
+.wiki-shell .toastui-editor-contents a.wiki-link,
+.wiki-shell .wiki-link {
+    color: var(--slate-400, #6B8DD4);
+}
+.wiki-shell .toastui-editor-contents a.wiki-link:hover,
+.wiki-shell .wiki-link:hover {
+    color: var(--iris-300);
+}
+/* Cross-book indicator — yellow dot matching the F-mark accent. */
+.wiki-link-dot {
+    color: #E8BE55;
+    margin-right: 3px;
+    font-weight: bold;
+    text-decoration: none;
+    display: inline-block;
+}
+
+/* Editor mode toggle — our own bar replacing Toast UI's built-in
+   mode switch. Sits at the bottom of the editor container. */
+.wiki-mode-bar {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0;
+    padding: 4px 8px;
+    background: var(--bg-surface);
+    border-top: 1px solid var(--border-default);
+}
+.wiki-mode-btn {
+    font-family: var(--font-sans);
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--fg-3);
+    background: none;
+    border: none;
+    padding: 4px 10px;
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    transition: color 0.12s ease;
+}
+.wiki-mode-btn:hover { color: var(--fg-1); }
+.wiki-mode-btn.active {
+    color: var(--fg-1);
+    font-weight: 500;
+    background: var(--bg-hover);
+}
+/* Mobile editor variant — Toast UI scopes its own rules; mirror
+   the desktop styling so the link looks the same on phone. */
+.mob-note-body .wiki-link {
+    color: var(--iris-300);
+}
+.notes-editor .toastui-editor-defaultUI {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+}
+
+/* Graphite-tone the entire editor chrome. The dark theme stylesheet
+   already swaps most colors; we override a handful of tokens to land
+   on the iris/graphite palette used elsewhere in the app. */
+.notes-editor .toastui-editor-defaultUI {
+    border: none;
+    background: var(--bg-canvas);
+    color: var(--fg-1);
+    font-family: var(--font-sans);
+}
+/* Hide the toolbar entirely — toolbarItems: [] in JS leaves an
+   empty bar still occupying space, so kill it in CSS too. */
+.notes-editor .toastui-editor-toolbar,
+.notes-editor .toastui-editor-defaultUI-toolbar {
+    display: none !important;
+}
+/* Editor "main" wrapper holds the WYSIWYG + markdown panes; it
+   sits between the toolbar (now hidden) and the mode switch. Make
+   it grow so the canvas actually has height. */
+.notes-editor .toastui-editor-main {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+.notes-editor .toastui-editor-mode-switch {
+    background: var(--bg-surface);
+    border-top: 1px solid var(--border-subtle);
+}
+.notes-editor .toastui-editor-mode-switch .tab-item {
+    color: var(--fg-3);
+    background: transparent;
+    border: none;
+}
+.notes-editor .toastui-editor-mode-switch .tab-item.active {
+    color: var(--fg-1);
+    background: var(--bg-raised);
+}
+/* Editor canvas (WYSIWYG + markdown view). flex sizing so the
+   pane actually fills the main area; without it Toast UI's
+   internal default of height: auto collapses the canvas to 0. */
+.notes-editor .toastui-editor,
+.notes-editor .toastui-editor-md-container,
+.notes-editor .toastui-editor-ww-container {
+    background: var(--bg-canvas);
+    color: var(--fg-1);
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+}
+.notes-editor .toastui-editor-contents {
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+    line-height: 1.65;
+    color: var(--fg-1);
+    padding: 24px 28px;
+    min-height: 100%;
+    box-sizing: border-box;
+}
+.notes-editor .toastui-editor-contents h1,
+.notes-editor .toastui-editor-contents h2,
+.notes-editor .toastui-editor-contents h3,
+.notes-editor .toastui-editor-contents h4,
+.notes-editor .toastui-editor-contents h5,
+.notes-editor .toastui-editor-contents h6 {
+    color: var(--fg-1);
+    border-color: var(--border-subtle);
+}
+/* Rebalance Toast UI's default heading margins. Its defaults are
+   lopsided — big top, near-zero bottom (h3 is 18px/2px, h5/h6 even
+   go NEGATIVE at 9px/-4px) — so body text crowds right under each
+   header (user report 2026-06-14). Give every level real breathing
+   room below while keeping a clear gap above for section breaks. */
+.notes-editor .toastui-editor-contents h1 { margin: 28px 0 12px; }
+.notes-editor .toastui-editor-contents h2 { margin: 26px 0 11px; }
+.notes-editor .toastui-editor-contents h3 { margin: 22px 0 9px; }
+.notes-editor .toastui-editor-contents h4,
+.notes-editor .toastui-editor-contents h5,
+.notes-editor .toastui-editor-contents h6 { margin: 18px 0 8px; }
+/* No top gap on the very first block so the note doesn't start with
+   a chunk of dead space above its opening header. */
+.notes-editor .toastui-editor-contents > :first-child { margin-top: 0; }
+/* All anchors in the note/wiki editor — wiki-links carry their own
+   chip styling further down. Regular markdown links + .ext-link
+   (set by wikilink.js's custom renderer for http(s) destinations)
+   pick up the info-blue color, cursor:pointer, and underline-on-
+   hover so they read as clickable. wikilink.js's wireClickHandler
+   intercepts http(s) clicks and reopens via window.open(_blank). */
+.notes-editor .toastui-editor-contents a {
+    color: var(--info-soft-fg);
+    cursor: pointer;
+    text-decoration: none;
+}
+.notes-editor .toastui-editor-contents a:hover,
+.notes-editor .toastui-editor-contents a:focus {
+    text-decoration: underline;
+}
+.notes-editor .toastui-editor-contents code,
+.notes-editor .toastui-editor-contents pre {
+    background: var(--bg-raised);
+    color: var(--fg-1);
+    font-family: var(--font-mono);
+}
+
+/* Toast UI WYSIWYG code blocks ship a floating "language ✎" badge
+   (the ::after pseudo) that opens a language-edit popup. Our editors
+   edit code inline and hide the toolbar, so the badge is just an
+   overlay obscuring the block's top-right corner — hide it and its
+   popup everywhere Toast UI renders (user report 2026-06-14). */
+.toastui-editor-ww-code-block::after,
+.toastui-editor-ww-code-block-language {
+    display: none !important;
+}
+.notes-editor .toastui-editor-contents blockquote {
+    border-left-color: var(--iris-300);
+    color: var(--fg-2);
+}
+/* Markdown source pane (CodeMirror under the hood) */
+.notes-editor .toastui-editor-md-container .CodeMirror {
+    background: var(--bg-canvas);
+    color: var(--fg-1);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    line-height: 1.65;
+}
+.notes-editor .toastui-editor-md-container .CodeMirror-cursor {
+    border-left-color: var(--fg-1);
+}
+
+.notes-no-selection {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: 1 1 auto;
+    color: var(--fg-3);
+    font-size: var(--text-sm);
+    padding: 80px 20px;
+}
+
+/* ── Responsive ───────────────────────────────────────── */
+
+@media (max-width: 720px) {
+    .notes-shell { grid-template-columns: 56px 1fr; }
+    .notes-row-title,
+    .notes-row-snippet,
+    .notes-search { display: none; }
+    .notes-folder-name { display: none; }
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   Home surface (DESIGN.md)
+
+   Replaces the workspace when mode === 'home'. Type-led, no
+   wallpaper, no hero illustration. Layout: greeting strip on top,
+   quick-capture below it, then a 2x2 grid of blocks (Pinned,
+   Recent, Today's shards, Open splits).
+   ══════════════════════════════════════════════════════════════════ */
+
+.home-host {
+    overflow-y: auto;
+    padding: 36px 48px 80px;
+}
+.home-content {
+    /* Scale the whole launchpad down ~20% — at full size the
+       720px quadrant grid + greeting + padding overflowed the
+       viewport. zoom reflows (unlike transform) so the scroll
+       container sizes to the shrunk content. */
+    zoom: 0.8;
+    max-width: 1280px;
+    margin: 0 auto;
+}
+
+/* Greeting — large display line; the name is set in italic serif. */
+.home-greet { margin-bottom: 4px; }
+.home-greeting-line {
+    font-family: var(--font-sans);
+    font-weight: 600;
+    font-size: 48px;
+    line-height: 1.05;
+    letter-spacing: -0.035em;
+    color: var(--fg-1);
+    margin: 0;
+}
+
+/* 2×2 quadrant grid: Pinned · Quad — Recent · Weather. */
+.home-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 16px;
+    margin-top: 32px;
+    min-height: 720px;
+}
+.home-slot { min-width: 0; min-height: 0; }
+
+/* Card primitive — Pinned / Recent / Weather all share this. */
+.home-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-xl);
+    padding: 20px;
+    box-shadow: var(--shadow-1);
+    position: relative;
+    overflow: hidden;
+}
+.home-card.fill {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+}
+.home-card-hd {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 14px;
+    flex: none;
+}
+.home-card-hd h3 {
+    font: 600 20px/1 var(--font-sans);
+    letter-spacing: -0.02em;
+    color: var(--fg-1);
+    margin: 0;
+}
+.home-card-ico { flex: none; }
+
+/* Rec list — shared row layout for Pinned + Recent. */
+.home-rec-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+}
+.home-rec-item {
+    display: grid;
+    grid-template-columns: 18px 1fr auto;
+    align-items: center;
+    gap: 12px;
+    padding: 9px 12px;
+    border-radius: var(--radius-md);
+    background: var(--bg-raised);
+    border: 1px solid var(--border-subtle);
+    cursor: pointer;
+    text-align: left;
+    color: var(--fg-1);
+    font-family: inherit;
+    width: 100%;
+    transition: background 120ms ease, border-color 120ms ease;
+}
+.home-rec-item:hover {
+    background: var(--bg-hover);
+    border-color: var(--border-default);
+}
+.home-rec-ico { flex: none; }
+.home-rec-title {
+    font-size: 17px;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    color: var(--fg-1);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.home-rec-ago {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--fg-4);
+    white-space: nowrap;
+}
+.home-empty {
+    color: var(--fg-3);
+    font-size: 15px;
+    line-height: 1.5;
+    padding: 8px 4px;
+}
+
+/* Quad — search bar spans the top, four action cards in a 2×2. */
+.home-quad {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: auto 1fr 1fr;
+    gap: 12px;
+}
+.home-quad-search {
+    grid-column: 1 / -1;
+    align-self: start;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    height: 56px;
+    padding: 0 18px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-xl);
+    cursor: text;
+    transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+.home-quad-search:hover { border-color: var(--border-strong); }
+.home-quad-search:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-ring);
+}
+.home-quad-search input {
+    flex: 1;
+    min-width: 0;
+    background: transparent;
+    border: 0;
+    outline: 0;
+    color: var(--fg-1);
+    font: 400 17px var(--font-sans);
+    letter-spacing: -0.01em;
+}
+.home-quad-search input::placeholder { color: var(--fg-4); }
+
+/* Action cards — each carries its own accent via --ac-* vars. */
+.home-action-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    height: 100%;
+    min-height: 0;
+    padding: 14px 12px;
+    background: var(--ac-bg);
+    border: 1px solid var(--ac-border);
+    border-radius: var(--radius-lg);
+    cursor: pointer;
+    font-family: inherit;
+    transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
+}
+.home-action-card:hover {
+    background: var(--ac-bg-hover);
+    border-color: var(--ac-border-hover);
+    transform: translateY(-1px);
+}
+.home-action-card:active { transform: translateY(0); }
+.home-ac-icon { color: var(--ac-fg); display: flex; }
+.home-ac-label {
+    font: 600 17px/1.15 var(--font-sans);
+    letter-spacing: -0.015em;
+    color: var(--fg-1);
+    text-align: center;
+}
+.home-action-card.notes {
+    --ac-bg: rgba(106,76,224,0.06);
+    --ac-bg-hover: rgba(106,76,224,0.14);
+    --ac-border: rgba(138,112,236,0.45);
+    --ac-border-hover: var(--iris-400);
+    --ac-fg: var(--iris-400);
+}
+.home-action-card.chats {
+    --ac-bg: rgba(62,154,106,0.05);
+    --ac-bg-hover: rgba(62,154,106,0.12);
+    --ac-border: rgba(92,181,133,0.40);
+    --ac-border-hover: var(--moss-400);
+    --ac-fg: var(--moss-400);
+}
+.home-action-card.scheduled {
+    /* Bright teal, matching the sidebar Scheduled row — the old
+       white treatment read as Home-neutral instead of a feature. */
+    --ac-bg: rgba(45, 212, 191, 0.05);
+    --ac-bg-hover: rgba(45, 212, 191, 0.12);
+    --ac-border: rgba(45, 212, 191, 0.40);
+    --ac-border-hover: var(--teal-400);
+    --ac-fg: var(--teal-400);
+}
+.home-action-card.shard {
+    --ac-bg: rgba(232,190,85,0.05);
+    --ac-bg-hover: rgba(232,190,85,0.12);
+    --ac-border: rgba(232,190,85,0.40);
+    --ac-border-hover: var(--sunlamp-400);
+    --ac-fg: var(--sunlamp-400);
+}
+
+/* Weather card. */
+.home-wx { padding: 0; }
+.home-wx-body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 22px;
+}
+.home-wx-top { display: flex; align-items: flex-start; gap: 18px; }
+.home-wx-icon {
+    width: 64px; height: 64px; flex: none;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+    display: flex; align-items: center; justify-content: center;
+}
+.home-wx-temp {
+    font: 300 60px/1 var(--font-sans);
+    letter-spacing: -0.04em;
+    color: var(--fg-1);
+    font-variant-numeric: tabular-nums;
+    display: flex; align-items: flex-start;
+}
+.home-wx-temp .deg { font-size: 28px; color: var(--fg-3); margin-top: 4px; }
+.home-wx-cond { display: flex; flex-direction: column; margin-left: auto; text-align: right; }
+.home-wx-cond .label { color: var(--fg-1); font-size: 18px; font-weight: 500; }
+.home-wx-cond .sub { color: var(--fg-3); font-size: 14px; margin-top: 2px; font-family: var(--font-mono); }
+.home-wx-cond .hilo {
+    display: flex; gap: 10px; margin-top: 10px;
+    font-family: var(--font-mono); font-size: 13px;
+    justify-content: flex-end;
+}
+.home-wx-cond .hilo .hi { color: var(--sunlamp-400); }
+.home-wx-cond .hilo .lo { color: var(--slate-400); }
+.home-wx-desc {
+    margin: 0;
+    color: var(--fg-2);
+    font: 400 16px/1.5 var(--font-sans);
+}
+.home-wx-hourly {
+    display: grid;
+    grid-template-columns: repeat(8, 1fr);
+    gap: 4px;
+    margin-top: auto;
+    padding-top: 16px;
+    border-top: 1px solid var(--border-subtle);
+}
+.home-wx-hour {
+    display: flex; flex-direction: column; align-items: center;
+    gap: 6px; padding: 6px 4px;
+}
+.home-wx-hour .t { font-family: var(--font-mono); font-size: 12px; color: var(--fg-4); }
+.home-wx-hour .v { font-family: var(--font-mono); font-size: 14px; color: var(--fg-2); }
+.home-wx-hour.now .t { color: var(--iris-300); }
+.home-wx-hour.now .v { color: var(--fg-1); font-weight: 500; }
+
+/* Weather "share your location" prompt. */
+.home-wx-prompt {
+    flex: 1;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 14px;
+    padding: 28px;
+    text-align: center;
+}
+.home-wx-prompt p {
+    margin: 0;
+    color: var(--fg-3);
+    font-size: 15px;
+    line-height: 1.5;
+    max-width: 280px;
+}
+.home-wx-prompt button {
+    padding: 8px 16px;
+    background: var(--accent);
+    color: #FFFFFF;
+    border: 0;
+    border-radius: var(--radius-md);
+    font: 500 15px var(--font-sans);
+    cursor: pointer;
+}
+.home-wx-prompt button:hover { background: var(--accent-hover); }
+
+/* Responsive — collapse the quadrant grid on narrow viewports. */
+@media (max-width: 1100px) {
+    .home-host { padding: 28px 24px 64px; }
+    .home-grid {
+        grid-template-columns: 1fr;
+        grid-template-rows: none;
+        min-height: 0;
+    }
+    .home-greeting-line { font-size: 38px; }
+}
+@media (max-width: 640px) {
+    .home-quad { grid-template-columns: 1fr; grid-template-rows: auto; }
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   User / Config panel (DESIGN.md)
+
+   Replaces the workspace when mode === 'user'. Two-pane layout:
+   grouped sub-nav left column, active section content right.
+   Sub-section is one of the existing panel-* elements relocated
+   into user-content-host on first click.
+   ══════════════════════════════════════════════════════════════════ */
+
+.user-host {
+    display: grid;
+    grid-template-columns: 200px 1fr;
+    height: 100%;
+    max-width: none;
+    padding: 0;
+    background: var(--bg-canvas);
+}
+
+.user-subnav {
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-surface);
+    border-right: 1px solid var(--border-subtle);
+    padding: 16px 8px 12px;
+    overflow-y: auto;
+    min-height: 0;
+}
+.user-subnav-group {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    margin-bottom: 16px;
+}
+.user-subnav-eyebrow {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--fg-4);
+    padding: 4px 12px 6px;
+}
+.user-subnav-row {
+    display: block;
+    padding: 0 12px;
+    height: 26px;
+    line-height: 26px;
+    margin: 0 4px;
+    border-radius: var(--radius-sm);
+    color: var(--fg-2);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    text-decoration: none;
+    cursor: pointer;
+    transition: background 120ms ease, color 120ms ease;
+}
+.user-subnav-row:hover {
+    background: var(--bg-hover);
+    color: var(--fg-1);
+}
+.user-subnav-row.is-active {
+    background: var(--bg-card);
+    color: var(--fg-1);
+}
+
+.user-subnav-spacer {
+    flex: 1 1 auto;
+}
+
+.user-subnav-signout {
+    display: block;
+    padding: 8px 12px;
+    margin: 0 4px;
+    border-top: 1px solid var(--border-subtle);
+    padding-top: 12px;
+    color: var(--fg-3);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    text-decoration: none;
+    cursor: pointer;
+    transition: color 120ms ease;
+}
+.user-subnav-signout:hover {
+    color: var(--danger);
+}
+
+.user-content {
+    overflow: auto;
+    background: var(--bg-canvas);
+    padding: 32px 40px 56px;
+    min-height: 0;
+}
+.user-content-empty {
+    color: var(--fg-3);
+    font-size: var(--text-sm);
+    padding: 80px 0;
+    text-align: center;
+}
+
+/* Relocated panel-* sections — when one is JS-moved into
+   user-content-host, override the .panel rule's max-width
+   constraint so the inner section fills the right pane
+   cleanly. The original panel rules have max-width: 1080px
+   centered; inside the user panel that's still fine, but
+   we drop the auto-margin so the content hugs the left of
+   the user-content area. */
+.user-content > .panel {
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+    max-width: none;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   Sidebar children + in-panel left-rail removal
+   (DESIGN.md's "no internal sub-sidebar" rule)
+   ══════════════════════════════════════════════════════════════════ */
+
+/* Children container — already has base rules higher up in the
+   file (.sidebar-children, .sidebar-child). Below: states unique
+   to Phase 3e — loading placeholder, empty hint, + New button. */
+.sidebar-children-loading,
+.sidebar-children-empty {
+    padding: 4px 14px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--fg-4);
+    letter-spacing: 0.04em;
+}
+/* (The legacy bottom-of-list "+ New …" button was replaced by the
+   .sidebar-cat-new affordance next to the category-row chevron.) */
+
+/* Hide the in-panel left rails. The chat surface's conversation
+   list and the notes surface's file tree both move into the
+   sidebar's category children per DESIGN.md:
+   "no internal sub-sidebar with `Search notes…` and `New`."
+   The DOM construction stays in chat.js / notes.js for now;
+   this rule just removes them from the view. Phase 6 polish
+   strips the construction code itself. */
+.chat-shell { grid-template-columns: 1fr; }
+.chat-left  { display: none; }
+
+.notes-shell { grid-template-columns: 1fr; }
+.notes-left  { display: none; }
+
+/* Responsive overrides also collapse the previously two-column
+   layout — at <720px both surfaces were already showing thin
+   left rails, but with the rails gone entirely the right side
+   just fills the panel. */
+@media (max-width: 720px) {
+    .chat-shell  { grid-template-columns: 1fr; }
+    .notes-shell { grid-template-columns: 1fr; }
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   Chat thinking / reasoning panel — collapsible inline trace
+
+   Shows the model's extended-thinking tokens (reasoning_content
+   in the SSE delta) plus the gateway's pipeline status updates
+   ("Searching memories…" etc., emitted through the same channel).
+   Critical for debugging Familiar's pipeline. Renders as a
+   <details> element so the user can expand/collapse without JS.
+   ══════════════════════════════════════════════════════════════════ */
+
+.chat-msg-thinking {
+    border-left: 2px solid var(--info);
+    padding-left: 10px;
+    margin-bottom: 6px;
+    color: var(--fg-3);
+}
+.chat-msg-thinking-summary {
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    letter-spacing: 0.06em;
+    color: var(--info-soft-fg);
+    user-select: none;
+    list-style: none;
+    padding: 2px 0;
+    transition: color 120ms ease;
+}
+.chat-msg-thinking-summary::-webkit-details-marker {
+    /* Suppress the default disclosure triangle; the summary
+       text carries its own ▸ glyph when collapsed via the auto-
+       generated label, plus :open inverts to ▾. */
+    display: none;
+}
+.chat-msg-thinking-summary:hover {
+    color: var(--iris-300);
+}
+.chat-msg-thinking[open] .chat-msg-thinking-summary {
+    color: var(--fg-2);
+}
+.chat-msg-thinking-body {
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    line-height: 1.55;
+    color: var(--fg-3);
+    background: var(--bg-raised);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    margin: 6px 0 0;
+    max-height: 360px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+/* Debug metrics tucked at the bottom of the thinking body — only
+   surfaces when the user expands the panel. Dim, fine-print
+   monospace separated by a hairline so it doesn't read as part
+   of the reasoning trace. */
+.chat-msg-thinking-metrics {
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px dashed var(--border-subtle);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--fg-4);
+    letter-spacing: 0.01em;
+    white-space: normal;
+}
+/* While the bubble is still streaming the thinking auto-opens
+   to make the work visible — no extra rule needed since the JS
+   sets `open` initially. The pulse caret + opacity changes are
+   on the bubble itself. */
+
+/* ── Wiki surface (BOOKS-WIKI-ARCHITECTURE Phase 1b) ────────────
+   Shares .notes-* shell classes with Notes; only the book-picker
+   and page-list-header bits are wiki-specific. */
+
+.wiki-left-head {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 8px;
+    align-items: center;
+}
+.wiki-book-select {
+    background: var(--bg-card);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    color: var(--fg-1);
+    font-family: inherit;
+    font-size: var(--text-sm);
+    padding: 6px 8px;
+    height: 30px;
+    outline: none;
+    min-width: 0;
+}
+.wiki-book-select:hover { border-color: var(--border-strong); }
+.wiki-book-select:focus { border-color: var(--accent); }
+.wiki-book-select:disabled {
+    color: var(--fg-4);
+    cursor: not-allowed;
+}
+
+.wiki-pages-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 12px 8px;
+    border-top: 1px solid var(--border-subtle);
+}
+.wiki-pages-eyebrow {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--fg-4);
+}
+.wiki-new-page-btn {
+    background: transparent;
+    border: 1px solid var(--border-default);
+    color: var(--fg-2);
+    width: 22px;
+    height: 22px;
+    border-radius: var(--radius-sm);
+    font-family: inherit;
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0;
+}
+.wiki-new-page-btn:hover:not(:disabled) {
+    background: var(--bg-hover);
+    color: var(--fg-1);
+}
+.wiki-new-page-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+/* ── Wiki splash views ─────────────────────────────────────────
+   Two splash levels share the same shell:
+     wiki-splash → "+ New book" tile + list of books
+     book-splash → "+ New page" tile + list of pages
+   Splash views hide the left rail (.notes-left) so the
+   navigation hub gets full panel width. */
+.wiki-shell.is-splash {
+    grid-template-columns: 1fr;
+}
+.wiki-shell.is-splash .notes-left { display: none; }
+
+/* Notes + chat surfaces use the same pattern. Their splash hosts
+   sit alongside the editor / messages chrome and stay hidden in
+   normal mode; .is-splash on the shell flips visibility and hides
+   the left rail so the landing page gets the full panel width.
+   !important defends against any cascade race that left the
+   splash painting on top of the editor. */
+.notes-splash-host,
+.chat-splash-host { display: none !important; }
+.notes-shell.is-splash {
+    grid-template-columns: 1fr;
+}
+.notes-shell.is-splash .notes-left,
+.notes-shell.is-splash .notes-right > .notes-header,
+.notes-shell.is-splash .notes-right > .notes-editor,
+.notes-shell.is-splash .notes-right > .notes-no-selection {
+    display: none;
+}
+.notes-shell.is-splash .notes-splash-host {
+    display: flex !important;
+    /* Header is hidden in splash mode, so the splash fills the
+       full right rail (override the top: 32px from the editor-mode
+       absolute pin). */
+    top: 0;
+}
+
+.chat-shell.is-splash {
+    grid-template-columns: 1fr;
+}
+.chat-shell.is-splash .chat-left,
+.chat-shell.is-splash .chat-right > .chat-header,
+.chat-shell.is-splash .chat-right > .chat-messages,
+.chat-shell.is-splash .chat-right > .chat-input-wrap {
+    display: none;
+}
+.chat-shell.is-splash .chat-splash-host { display: flex !important; }
+
+.wiki-splash-host {
+    display: flex;
+    flex-direction: column;
+    padding: 32px 36px 40px;
+    overflow-y: auto;
+    height: 100%;
+    box-sizing: border-box;
+    align-items: stretch;
+    text-align: left;
+}
+.wiki-splash-head {
+    margin-bottom: 22px;
+}
+/* Title row holds the heading on the left and the owner-only
+   overflow ⋯ on the right. Baseline alignment keeps the dots from
+   floating mid-air against a 32px title. */
+.wiki-splash-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+}
+.wiki-splash-overflow {
+    flex: 0 0 auto;
+}
+.wiki-splash-eyebrow {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--fg-4);
+    margin-bottom: 6px;
+}
+.wiki-splash-title {
+    margin: 0;
+    font-family: var(--font-sans);
+    font-size: 32px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    color: var(--fg-1);
+    line-height: 1.05;
+}
+.wiki-splash-subtitle {
+    margin-top: 6px;
+    font-size: var(--text-sm);
+    color: var(--fg-3);
+    max-width: 560px;
+    line-height: 1.45;
+}
+
+.wiki-splash-grid {
+    display: grid;
+    grid-template-columns: minmax(220px, 280px) 1fr;
+    gap: 24px;
+    align-items: start;
+}
+.wiki-splash-tile-col {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+.wiki-splash-list-col {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.wiki-splash-list-label {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--fg-4);
+    padding: 0 4px 4px;
+}
+.wiki-splash-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.wiki-splash-row {
+    display: grid;
+    grid-template-columns: 28px 1fr auto;
+    gap: 12px;
+    align-items: center;
+    padding: 10px 12px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    color: var(--fg-1);
+    font-family: inherit;
+    text-align: left;
+    transition: background 120ms ease, border-color 120ms ease;
+}
+.wiki-splash-row:hover {
+    background: var(--bg-card);
+    border-color: var(--border-default);
+}
+.wiki-splash-row-glyph {
+    color: var(--slate-300);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+.wiki-splash-row-body { min-width: 0; }
+.wiki-splash-row-title {
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--fg-1);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.wiki-splash-row-desc {
+    font-size: 11.5px;
+    color: var(--fg-4);
+    margin-top: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.wiki-splash-row-meta {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--fg-4);
+}
+.wiki-splash-empty {
+    color: var(--fg-3);
+    font-size: var(--text-sm);
+    padding: 20px 12px;
+    text-align: center;
+}
+
+@media (max-width: 720px) {
+    .wiki-splash-grid {
+        grid-template-columns: 1fr;
+    }
+}
+.wiki-empty-tile {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 18px 16px 16px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md, 10px);
+    cursor: pointer;
+    color: var(--fg-1);
+    font-family: inherit;
+    transition: background 120ms ease, border-color 120ms ease,
+                transform 120ms ease;
+}
+.wiki-empty-tile:hover:not(:disabled) {
+    background: var(--bg-hover, var(--bg-raised));
+    border-color: var(--border-strong);
+}
+.wiki-empty-tile:active:not(:disabled) { transform: scale(0.99); }
+.wiki-empty-tile:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+.wiki-empty-tile.is-iris {
+    background: rgba(106, 76, 224, 0.10);
+    border-color: rgba(106, 76, 224, 0.32);
+}
+.wiki-empty-tile.is-iris:hover {
+    background: rgba(106, 76, 224, 0.16);
+    border-color: rgba(106, 76, 224, 0.45);
+}
+/* Surface category variants — match the sidebar / tab top-stripe
+   colors so the New tile signals which surface you're on.
+     is-slate   → wiki   (--slate-500: #4E6AAD)
+     is-moss    → chat   (--moss-500:  #3E9A6A)
+     is-sunlamp → shards (--sunlamp-500: #C69A27) */
+.wiki-empty-tile.is-slate {
+    background: rgba(78, 106, 173, 0.10);
+    border-color: rgba(78, 106, 173, 0.32);
+}
+.wiki-empty-tile.is-slate:hover {
+    background: rgba(78, 106, 173, 0.16);
+    border-color: rgba(78, 106, 173, 0.45);
+}
+.wiki-empty-tile.is-slate .wiki-empty-tile-glyph { color: var(--slate-300); }
+
+.wiki-empty-tile.is-moss {
+    background: rgba(62, 154, 106, 0.10);
+    border-color: rgba(62, 154, 106, 0.32);
+}
+.wiki-empty-tile.is-moss:hover {
+    background: rgba(62, 154, 106, 0.16);
+    border-color: rgba(62, 154, 106, 0.45);
+}
+.wiki-empty-tile.is-moss .wiki-empty-tile-glyph { color: var(--moss-400); }
+
+.wiki-empty-tile.is-sunlamp {
+    background: rgba(198, 154, 39, 0.10);
+    border-color: rgba(198, 154, 39, 0.32);
+}
+.wiki-empty-tile.is-sunlamp:hover {
+    background: rgba(198, 154, 39, 0.16);
+    border-color: rgba(198, 154, 39, 0.45);
+}
+.wiki-empty-tile.is-sunlamp .wiki-empty-tile-glyph { color: var(--sunlamp-300); }
+.wiki-empty-tile-glyph {
+    width: 38px;
+    height: 38px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--fg-2);
+    margin-bottom: 4px;
+}
+.wiki-empty-tile.is-iris .wiki-empty-tile-glyph { color: var(--iris-300); }
+.wiki-empty-tile-title {
+    font-size: var(--text-md);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--fg-1);
+}
+.wiki-empty-tile-meta {
+    font-size: 11.5px;
+    color: var(--fg-4);
+    font-family: var(--font-mono);
+    letter-spacing: 0.02em;
+}
+
+/* Splash rework (2026-06-12): the "+ New" control is a square-ish
+   chip — icon over label, hugging its content — sized between the
+   old full-column tile (too big) and an ordinary small button (too
+   anonymous). The left column's space goes to the pinned list
+   below it. */
+.wiki-empty-tile.is-compact {
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 16px 20px 13px;
+    align-self: flex-start;
+    min-width: 96px;
+}
+.wiki-empty-tile.is-compact .wiki-empty-tile-glyph {
+    width: 24px;
+    height: 24px;
+    margin-bottom: 0;
+}
+.wiki-empty-tile.is-compact .wiki-empty-tile-glyph svg {
+    width: 22px;
+    height: 22px;
+}
+.wiki-empty-tile.is-compact .wiki-empty-tile-title {
+    font-size: var(--text-sm);
+}
+
+/* Dense variant for the splash recents column. */
+.wiki-splash-list.is-dense { gap: 1px; }
+.wiki-splash-list.is-dense .wiki-splash-row {
+    padding: 5px 10px;
+    grid-template-columns: 22px 1fr auto;
+    gap: 10px;
+}
+.wiki-splash-list.is-dense .wiki-splash-row-desc { margin-top: 0; }
+
+/* ── Wiki members modal ────────────────────────────────────────
+   Owner-only "Manage users" panel for books. Same backdrop
+   treatment as token-modal so the moment-of-attention chrome
+   stays consistent. */
+.wiki-members-modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(11, 11, 15, 0.65);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+}
+.wiki-members-modal[hidden] { display: none; }
+.wiki-members-card {
+    background: var(--bg-raised);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-2xl, 24px);
+    padding: 24px 24px 20px;
+    max-width: 560px;
+    width: 100%;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 32px 64px -16px rgba(0,0,0,0.5);
+}
+.wiki-members-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 16px;
+}
+.wiki-members-head .card-title {
+    margin: 4px 0 0;
+    color: var(--fg-1);
+    font-size: var(--text-lg);
+}
+.wiki-members-body {
+    overflow-y: auto;
+    flex: 1 1 auto;
+    margin-bottom: 16px;
+    border-top: 1px solid var(--border-subtle);
+    border-bottom: 1px solid var(--border-subtle);
+}
+.wiki-members-loading,
+.wiki-members-empty {
+    color: var(--fg-3);
+    font-size: var(--text-sm);
+    padding: 18px 4px;
+    text-align: center;
+}
+
+.wiki-members-row {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    gap: 10px;
+    align-items: center;
+    padding: 10px 4px;
+    border-bottom: 1px solid var(--border-subtle);
+}
+.wiki-members-row:last-child { border-bottom: 0; }
+.wiki-members-id {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    color: var(--fg-1);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.wiki-members-id-meta {
+    display: block;
+    font-family: var(--font-sans);
+    font-size: 10.5px;
+    color: var(--fg-4);
+    margin-top: 2px;
+}
+.wiki-members-role {
+    background: var(--bg-card);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    color: var(--fg-1);
+    font-family: inherit;
+    font-size: var(--text-sm);
+    padding: 4px 6px;
+    height: 28px;
+}
+.wiki-members-remove {
+    background: transparent;
+    border: 1px solid var(--border-default);
+    color: var(--fg-3);
+    border-radius: var(--radius-sm);
+    height: 28px;
+    width: 28px;
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+}
+.wiki-members-remove:hover:not(:disabled) {
+    color: #E37A74;
+    border-color: rgba(227, 122, 116, 0.4);
+}
+.wiki-members-remove:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+.wiki-members-add {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.wiki-members-add-row {
+    display: grid;
+    grid-template-columns: 1fr 130px auto;
+    gap: 8px;
+}
+.wiki-members-add-hint {
+    font-size: 11px;
+    color: var(--fg-4);
+}
+.wiki-members-typeahead {
+    position: relative;
+    min-width: 0;
+}
+.wiki-members-suggestions {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    max-height: 220px;
+    overflow-y: auto;
+    background: var(--bg-card);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    box-shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.5);
+    z-index: 10;
+    padding: 4px;
+}
+.wiki-members-suggestions[hidden] { display: none; }
+.wiki-members-suggestion {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 8px;
+    padding: 8px 10px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    background: transparent;
+    border: 0;
+    color: var(--fg-1);
+    font-family: inherit;
+    text-align: left;
+    width: 100%;
+}
+.wiki-members-suggestion:hover,
+.wiki-members-suggestion.is-active {
+    background: var(--bg-hover);
+}
+.wiki-members-suggestion-main {
+    font-size: var(--text-sm);
+    color: var(--fg-1);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.wiki-members-suggestion-meta {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--fg-4);
+}
+.wiki-members-suggestion-empty {
+    padding: 10px;
+    color: var(--fg-4);
+    font-size: var(--text-sm);
+    text-align: center;
+}
+.wiki-members-error {
+    margin-top: 4px;
+    padding: 8px 10px;
+    font-size: 12.5px;
+    color: #E37A74;
+    background: rgba(227, 122, 116, 0.08);
+    border: 1px solid rgba(227, 122, 116, 0.24);
+    border-radius: var(--radius-sm);
+}
+.wiki-members-error[hidden] { display: none; }
+
+
+/* ----------------------------------------------------------------
+   Wiki sync-conflict banner. Sits between the page header and the
+   editor surface; surfaces when the background poller or a 409
+   from PATCH detects the remote moved while the editor was dirty.
+   Same color family as the wiki page chrome (slate-500) so it
+   reads as a wiki signal, not a generic error.
+   ---------------------------------------------------------------- */
+.wiki-sync-banner-host { flex: 0 0 auto; }
+.wiki-sync-banner-host:empty { display: none; }
+.wiki-sync-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 14px;
+    background: linear-gradient(rgba(78, 106, 173, 0.16), rgba(78, 106, 173, 0.16)), var(--graphite-950);
+    border-bottom: 1px solid rgba(78, 106, 173, 0.4);
+    color: var(--fg-1);
+    font-size: var(--text-sm);
+}
+.wiki-sync-banner-msg { flex: 1 1 auto; }
+.wiki-sync-banner-actions { display: flex; gap: 8px; flex: 0 0 auto; }
+.wiki-sync-banner-btn {
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    background: transparent;
+    color: var(--fg-1);
+    padding: 4px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    font: inherit;
+}
+.wiki-sync-banner-btn:hover {
+    background: rgba(255, 255, 255, 0.06);
+    border-color: rgba(255, 255, 255, 0.3);
+}
+.wiki-sync-banner-btn-primary {
+    background: var(--slate-500);
+    border-color: var(--slate-500);
+}
+.wiki-sync-banner-btn-primary:hover {
+    background: var(--slate-400);
+    border-color: var(--slate-400);
+}
+
+/* ----------------------------------------------------------------
+   Maintenance-mode banner. Spans the top of the content column when
+   the big model is offline / drained and a slower fallback answers.
+   Amber (mark/warning) accent so it reads as "degraded, not broken".
+   ---------------------------------------------------------------- */
+.maintenance-banner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 16px;
+    background: linear-gradient(rgba(232, 190, 85, 0.16), rgba(232, 190, 85, 0.16)), var(--graphite-950);
+    border-bottom: 1px solid rgba(232, 190, 85, 0.45);
+    color: var(--fg-1);
+    font-size: var(--text-sm);
+}
+.maintenance-banner-icon { color: var(--sunlamp-400); flex: 0 0 auto; }
+.maintenance-banner-msg { flex: 1 1 auto; }
+
+/* Maintenance-mode admin control (System Status panel). */
+.maint-control { display: flex; flex-direction: column; gap: 12px; }
+.maint-desc { color: var(--fg-2); font-size: var(--text-sm); margin: 0; max-width: 60ch; }
+.maint-state { display: flex; align-items: center; gap: 8px; font-size: var(--text-sm); color: var(--fg-1); }
+.maint-row { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
+.maint-field { display: flex; flex-direction: column; gap: 4px; }
+.maint-field-label { font-size: var(--text-xs); color: var(--fg-2); text-transform: uppercase; letter-spacing: 0.04em; }
+.maint-select {
+    background: var(--graphite-900);
+    color: var(--fg-1);
+    border: 1px solid var(--border, rgba(255,255,255,0.16));
+    border-radius: 6px;
+    padding: 7px 10px;
+    font: inherit;
+    min-width: 16rem;
+}
+
+/* ----------------------------------------------------------------
+   Profile-panel passkey-by-RP list + enrollment-link surface
+   (CROSS-DOMAIN-ENROLLMENT.md). Sits inside the existing
+   .profile-keys section. Visual language matches the wiki sync
+   banner — slate accents on the primary action so the user reads
+   it as a system surface, not a chat-style highlight.
+   ---------------------------------------------------------------- */
+.profile-keys-rps {
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border-default, rgba(255,255,255,0.08));
+}
+.profile-keys-rps .label {
+    margin-bottom: 8px;
+}
+.rp-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.rp-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 12px;
+    background: rgba(255,255,255,0.02);
+    border: 1px solid var(--border-default, rgba(255,255,255,0.06));
+    border-radius: 6px;
+}
+.rp-row-left { display: flex; flex-direction: column; min-width: 0; }
+.rp-row-name {
+    font-size: 13px;
+    color: var(--fg-1);
+    font-weight: 500;
+}
+.rp-row-id {
+    font-size: 11px;
+    color: var(--fg-3);
+    font-family: "Geist Mono", ui-monospace, monospace;
+}
+.rp-row-badge {
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+.rp-row-badge-ok {
+    background: rgba(62,154,106,0.14);
+    color: #8FD3AC;
+    border: 1px solid rgba(62,154,106,0.30);
+}
+
+.profile-enroll-link {
+    margin-top: 14px;
+    padding: 12px 14px;
+    background: linear-gradient(rgba(78, 106, 173, 0.10), rgba(78, 106, 173, 0.10)), var(--bg-card, #14141C);
+    border: 1px solid rgba(78, 106, 173, 0.35);
+    border-radius: 8px;
+}
+.profile-enroll-link-msg {
+    font-size: 13px;
+    color: var(--fg-1);
+    margin-bottom: 8px;
+}
+.profile-enroll-link-url {
+    width: 100%;
+    padding: 8px 10px;
+    background: rgba(0,0,0,0.30);
+    color: var(--fg-1);
+    border: 1px solid var(--border-default, rgba(255,255,255,0.10));
+    border-radius: 6px;
+    font: 12px/1.4 "Geist Mono", ui-monospace, monospace;
+    margin-bottom: 8px;
+}
+
+/* Admin user-detail enrollment-link generator. Same visual language
+   as the profile-keys enrollment-link surface so the two flows feel
+   like one feature. */
+.user-enroll-label { margin-top: 16px; }
+.user-enroll .link-fields { gap: 8px; }
+.user-enroll-result {
+    margin-top: 10px;
+    padding: 12px 14px;
+    background: linear-gradient(rgba(78, 106, 173, 0.10), rgba(78, 106, 173, 0.10)), var(--bg-card, #14141C);
+    border: 1px solid rgba(78, 106, 173, 0.35);
+    border-radius: 8px;
+}
+.user-enroll-msg {
+    font-size: 13px;
+    color: var(--fg-1);
+    margin-bottom: 8px;
+}
+.user-enroll-url {
+    width: 100%;
+    padding: 8px 10px;
+    background: rgba(0,0,0,0.30);
+    color: var(--fg-1);
+    border: 1px solid var(--border-default, rgba(255,255,255,0.10));
+    border-radius: 6px;
+    font: 12px/1.4 "Geist Mono", ui-monospace, monospace;
+    margin-bottom: 8px;
+}
+
+/* Registered-credential list (CROSS-DOMAIN-ENROLLMENT.md
+   management UI). Sits inside .profile-keys above the per-RP
+   rollout summary. Type chip colors mirror the design system's
+   category accents: moss for passkeys (platform = native, trusted
+   path), sunlamp for security keys (cross-platform = hardware
+   move), neutral for unknown / legacy rows. */
+.profile-keys-creds {
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border-default, rgba(255,255,255,0.08));
+}
+.profile-keys-creds .label { margin-bottom: 8px; }
+.cred-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.cred-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px;
+    background: rgba(255,255,255,0.02);
+    border: 1px solid var(--border-default, rgba(255,255,255,0.06));
+    border-radius: 6px;
+}
+.cred-main { flex: 1 1 auto; min-width: 0; }
+.cred-title {
+    font-size: 13px;
+    color: var(--fg-1);
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.cred-meta {
+    font-size: 11px;
+    color: var(--fg-3);
+    font-family: "Geist Mono", ui-monospace, monospace;
+}
+.cred-chip {
+    flex: 0 0 auto;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    font-weight: 500;
+    white-space: nowrap;
+    border: 1px solid transparent;
+}
+.cred-chip-platform {
+    background: rgba(62,154,106,0.14);
+    color: #8FD3AC;
+    border-color: rgba(62,154,106,0.30);
+}
+.cred-chip-cross-platform {
+    background: rgba(232,190,85,0.14);
+    color: #E8BE55;
+    border-color: rgba(232,190,85,0.35);
+}
+.cred-chip-unknown {
+    background: rgba(255,255,255,0.04);
+    color: var(--fg-2, #B8B8C2);
+    border-color: rgba(255,255,255,0.10);
+}
+.cred-remove { flex: 0 0 auto; }
+
+/* ----------------------------------------------------------------
+   Admin Users panel — Invite form. Surfaces inline above the table
+   when the operator clicks "+ Invite". Result block reuses the
+   slate-accented surface that the cross-domain enrollment link
+   uses on the profile-keys section so the two flows feel like one
+   feature.
+   ---------------------------------------------------------------- */
+.users-invite-form {
+    margin: 10px 0 14px;
+    padding: 12px 14px;
+    background: rgba(255,255,255,0.02);
+    border: 1px solid var(--border-default, rgba(255,255,255,0.08));
+    border-radius: 8px;
+}
+.users-invite-fields {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+.users-invite-input {
+    padding: 6px 10px;
+    background: rgba(0,0,0,0.30);
+    color: var(--fg-1, #ECECEF);
+    border: 1px solid var(--border-default, rgba(255,255,255,0.10));
+    border-radius: 6px;
+    font: inherit;
+    font-size: 13px;
+}
+.users-invite-input[type="email"],
+.users-invite-input[type="text"] { min-width: 200px; flex: 1 1 200px; }
+.users-invite-input:focus {
+    outline: none;
+    border-color: var(--iris-500, #6A4CE0);
+}
+.users-invite-result {
+    margin-top: 12px;
+    padding: 10px 12px;
+    background: linear-gradient(rgba(78, 106, 173, 0.10), rgba(78, 106, 173, 0.10)), var(--bg-card, #14141C);
+    border: 1px solid rgba(78, 106, 173, 0.35);
+    border-radius: 6px;
+}
+.users-invite-msg {
+    font-size: 13px;
+    color: var(--fg-1, #ECECEF);
+    margin-bottom: 8px;
+}
+.users-invite-url {
+    width: 100%;
+    padding: 8px 10px;
+    background: rgba(0,0,0,0.30);
+    color: var(--fg-1, #ECECEF);
+    border: 1px solid var(--border-default, rgba(255,255,255,0.10));
+    border-radius: 6px;
+    font: 12px/1.4 "Geist Mono", ui-monospace, monospace;
+    margin-bottom: 8px;
+}
+
+/* ----------------------------------------------------------------
+   Profile-panel display-name editor. Inline above the working-
+   context textarea so the user can rename themselves without
+   bouncing through admin tooling.
+   ---------------------------------------------------------------- */
+.profile-display-name {
+    margin-bottom: 14px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border-default, rgba(255,255,255,0.06));
+}
+.profile-display-name-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-top: 6px;
+}
+.profile-display-name-input {
+    flex: 1 1 auto;
+    padding: 6px 10px;
+    background: rgba(0,0,0,0.30);
+    color: var(--fg-1, #ECECEF);
+    border: 1px solid var(--border-default, rgba(255,255,255,0.10));
+    border-radius: 6px;
+    font: inherit;
+    font-size: 13px;
+}
+.profile-display-name-input:focus {
+    outline: none;
+    border-color: var(--iris-500, #6A4CE0);
+}
+
+/* ═══ Scheduled actions panel (SCHEDULED-ACTIONS-SPEC) ══════════════
+   The form rides the shared .user-link-form/.field system; this block
+   covers what that system doesn't: textarea + number chrome, the
+   status dots in both tables, the webhook URL box, and the
+   click-to-expand run-detail rows. Tokens only — no new colors. */
+
+.action-form {
+    max-width: 760px;
+}
+
+.action-form textarea,
+.action-form input[type="number"] {
+    background: var(--bg-raised);
+    color: var(--fg-1);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
+    font-family: inherit;
+    font-size: var(--text-sm);
+    letter-spacing: -0.01em;
+    outline: 0;
+    transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.action-form input[type="number"] {
+    height: 36px;
+}
+
+.action-form textarea {
+    resize: vertical;
+    min-height: 88px;
+    line-height: 1.5;
+}
+
+.action-form textarea:focus,
+.action-form input[type="number"]:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-ring);
+}
+
+.action-form textarea::placeholder { color: var(--fg-4); }
+
+.action-cron-preset {
+    color: var(--accent);
+    text-decoration: none;
+}
+.action-cron-preset:hover { text-decoration: underline; }
+
+.action-detail-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.action-webhook-box {
+    background: var(--bg-raised);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    font-family: var(--font-mono);
+    word-break: break-all;
+    user-select: all;
+}
+
+/* Status dot + label, shared by the list's State / Last run cells
+   and the run-history Status cell. */
+.action-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    white-space: nowrap;
+}
+.action-status::before {
+    content: "";
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--fg-4);
+    flex: none;
+}
+.action-status.is-ok::before      { background: var(--success); }
+.action-status.is-error::before   { background: var(--danger); }
+.action-status.is-quiet::before   { background: var(--warn-soft-fg); }
+.action-status.is-off::before     { background: var(--fg-4); }
+.action-status.is-running::before { background: var(--accent); }
+
+.action-runs-section {
+    margin-top: 28px;
+}
+
+#action-runs-rows tr[data-expandable] { cursor: pointer; }
+
+.action-run-detail td {
+    background: var(--bg-raised);
+}
+
+.action-run-detail pre {
+    white-space: pre-wrap;
+    max-height: 320px;
+    overflow: auto;
+    margin: 0;
+    padding: 12px 14px;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    line-height: 1.55;
+    color: var(--fg-2);
+}
+
+@media (max-width: 760px) {
+    #action-trigger-cron.shard-form-row,
+    #action-target-page.shard-form-row {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* ═══ Shard chat (SKILL-PACKAGES-SPEC Phase 1) ══════════════════════
+   The chip marks a conversation as shard-bound so the answering
+   brain is never ambiguous; the section label groups shards in the
+   chat models menu. */
+
+.chat-shard-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex: none;
+    padding: 3px 10px;
+    border: 1px solid var(--accent);
+    border-radius: 999px;
+    color: var(--accent);
+    background: var(--accent-ring);
+    font-size: var(--text-xs);
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+}
+
+/* ── Mermaid diagram blocks (MEDIA-DIAGRAMS Phase 0) ──────────────
+   ```mermaid fences render inline in markdown previews. The error
+   state shows the raw source quietly — mid-typing syntax errors are
+   normal, not alarming. */
+.mermaid-block {
+    margin: 12px 0;
+    padding: 14px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    overflow-x: auto;
+    white-space: pre-wrap;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--fg-3);
+}
+.mermaid-block.is-rendered {
+    white-space: normal;
+    display: flex;
+    justify-content: center;
+    color: inherit;
+}
+.mermaid-block.is-rendered svg {
+    max-width: 100%;
+    height: auto;
+}
+.mermaid-block.is-error {
+    border-color: rgba(208, 81, 74, 0.45);
+}
+
+
+/* ── Diagram tab (MEDIA-DIAGRAMS Phase 0b) ────────────────────────
+   Mermaid-live-editor-style split inside one workspace tab: source
+   left, live render right. Inline blocks in Rich Text are read-only
+   (.is-ww) and advertise click-to-edit. */
+.diagram-shell {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+}
+.diagram-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border-subtle);
+}
+.diagram-crumb {
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--fg-1);
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.diagram-status { color: var(--tangerine-400); }
+.diagram-split {
+    flex: 1;
+    display: grid;
+    grid-template-columns: minmax(220px, 38%) 1fr;
+    min-height: 0;
+}
+.diagram-source {
+    border: 0;
+    border-right: 1px solid var(--border-subtle);
+    background: var(--bg-canvas);
+    color: var(--fg-1);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    line-height: 1.5;
+    padding: 14px;
+    resize: none;
+    outline: none;
+}
+.diagram-preview {
+    overflow: auto;
+    padding: 18px;
+}
+.diagram-preview .mermaid-block { margin: 0; }
+
+.mermaid-block.is-ww {
+    cursor: pointer;
+    transition: border-color 120ms ease;
+}
+.mermaid-block.is-ww:hover {
+    border-color: var(--tangerine-500);
+}
+
+/* ── Image resize (MEDIA-DIAGRAMS Phase 1b) ───────────────────────
+   Click an image in Rich Text → outline + corner handle + preset
+   chips. Width persists as a #w=NN URL fragment (percent). */
+.familiar-img-wrap {
+    position: relative;
+    display: inline-block;
+    max-width: 100%;
+    line-height: 0;
+}
+.familiar-img-wrap img {
+    width: 100%;
+    height: auto;
+    display: block;
+}
+.familiar-img-wrap.is-selected {
+    outline: 2px solid var(--tangerine-500);
+    outline-offset: 2px;
+}
+.familiar-img-chips {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    display: none;
+    gap: 4px;
+    line-height: normal;
+}
+.familiar-img-wrap.is-selected .familiar-img-chips { display: inline-flex; }
+.familiar-img-chip {
+    border: 1px solid var(--border-strong);
+    background: var(--bg-raised);
+    color: var(--fg-1);
+    border-radius: var(--radius-sm);
+    font-size: 11px;
+    padding: 3px 8px;
+    cursor: pointer;
+}
+.familiar-img-chip:hover { border-color: var(--tangerine-500); }
+.familiar-img-handle {
+    position: absolute;
+    right: -7px;
+    bottom: -7px;
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+    background: var(--tangerine-500);
+    border: 2px solid var(--bg-canvas);
+    cursor: nwse-resize;
+    display: none;
+    touch-action: none;
+}
+.familiar-img-wrap.is-selected .familiar-img-handle { display: block; }
+
+/* Fragment widths in the markdown preview render as inline style;
+   keep previews from overflowing regardless. */
+.toastui-editor-md-preview img { max-width: 100%; }

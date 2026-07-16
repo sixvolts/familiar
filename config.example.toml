@@ -1,0 +1,512 @@
+# Familiar Gateway — Example Configuration
+#
+# Copy to ~/.familiar/gateway.toml and edit for your deployment.
+# The gateway auto-discovers this path; override with --config <path>.
+#
+# Environment variable substitution is NOT supported in TOML values.
+# Secrets (API keys, bot tokens) go inline; move to the vault once
+# you have one set up.
+#
+# ─── Minimum viable config ──────────────────────────────────────────
+# To get a working single-user install, you need:
+#   1. [adapter.http]     HTTP listener — the API + admin console
+#   2. [[identity.seed]]  at least one owner mapping
+#   3. [[models]]         at least one backend
+#   4. [system_prompt]    path to your prompt file
+# Everything else is optional and can be added as you grow.
+#
+# Memory and the sleep/consolidation cycle run in-process inside the
+# gateway against pgvector — there is no separate engine to run.
+
+# Sleep / consolidation cycle.
+#
+# Background SQL pass that resolves semantic conflicts in pgvector,
+# promotes facts that surfaced in 2+ sessions to user scope, and
+# decays/archives stale session facts. Defaults: every 30 min, 0.92
+# cosine similarity threshold, 30-day stale window, 90-day archive
+# window.
+#
+# [sleep]
+# enabled              = true
+# interval_secs        = 1800
+# conflict_threshold   = 0.92
+# session_stale_days   = 30
+# session_archive_days = 90
+
+# ─── Node Identity ──────────────────────────────────────────────────
+# Free-form labels for this gateway node. Surfaced in logs and in the
+# admin console's status panel. Leave blank on a single-node install.
+[node]
+name = ""                             # e.g., "host-a", "host-d"
+role = "gateway"                      # gateway | worker | hybrid
+
+# ─── System Prompt ──────────────────────────────────────────────────
+# Loaded once at startup, prepended to every LLM request. Tiered prompts
+# (per-skill-level overrides) live under prompt_dir; see
+# arch/FAMILIAR-TIERED-PROMPTS-SPEC.md for the layout.
+[system_prompt]
+file = "~/.familiar/system_prompt.md"
+# prompt_dir = "~/.familiar/prompts"
+
+# ─── Instance Metadata ──────────────────────────────────────────────
+# Surfaced via the `instance` skill so the bot can answer "how do I
+# register", "where's the admin console", "who do I contact". The
+# skill is registered unconditionally (since 0dd7422) — empty fields
+# just mean the tool returns "no info configured" until you fill them
+# in, which is a perfectly valid state for a fresh install.
+[instance]
+name          = ""                    # e.g., "Familiar (Host-a)"
+admin_url     = ""                    # e.g., "https://host-a.your-tailnet.ts.net:8443/admin/"
+register_url  = ""                    # often same as admin_url
+admin_contact = ""                    # e.g., "@roo on Slack" or "ops@example.com"
+docs_url      = ""                    # link to user-facing docs
+help_notes    = ""                    # freeform guidance injected into the tool response
+
+# ─── Identity Seeds ─────────────────────────────────────────────────
+# Operator-curated identity_map bootstrap. Reseeded on every startup
+# with ON CONFLICT DO NOTHING, so edits propagate without manual SQL
+# and post-seed admin-UI or Slack-bootstrap changes are preserved.
+#
+# For a single-operator first install: uncomment the three blocks
+# below, replace "U0XXXXXXXXX" with your own Slack user ID, and run.
+# You'll own the system from first boot without needing to register
+# through the admin console.
+#
+# For multi-user: the first admin seeds themselves here, then Slack
+# workspace members auto-provision on first DM (Phase 5 bootstrap).
+# Keep this list small — it's meant for the owner and any accounts
+# that must survive a database reset, not for day-to-day users.
+
+# OWNER-MIGRATION: the legacy "owner" canonical_id was retired in
+# favour of an explicit per-user identifier (e.g. "operator", "ali").
+# Pre-migration deploys can rename their data with
+# `internal/db/migrate.go`'s "owner_to_operator_rename" step; new
+# deploys should seed themselves with the canonical_id they actually
+# want. Examples below use "operator" — substitute your own.
+#
+# [[identity.seed]]
+# platform     = "cli"
+# platform_id  = "local"
+# canonical_id = "operator"
+# display_name = "Operator"
+#
+# [[identity.seed]]
+# platform     = "openai"
+# platform_id  = "operator@example.com"  # email used in X-User-Email header
+# canonical_id = "operator"
+# display_name = "Operator"
+#
+# [[identity.seed]]
+# platform     = "workspace"
+# platform_id  = "operator"              # canonical id is its own platform_id here
+# canonical_id = "operator"              # (avoids needing a workspace→canonical mapping)
+# display_name = "Operator"
+#
+# [[identity.seed]]
+# platform     = "slack"
+# platform_id  = "U0XXXXXXXXX"         # your real Slack user ID
+# canonical_id = "operator"
+# display_name = "Operator"
+
+# ─── Adapters ───────────────────────────────────────────────────────
+# Each adapter exposes Familiar on a different channel. Enable as many
+# as you need; they all route through the same pipeline.
+
+[adapter.cli]
+prompt = "> "
+history_file = "~/.familiar/cli_history"
+
+[adapter.http]
+# Native Familiar HTTP chat API (POST /api/chat) plus the admin console
+# (mounts on /admin/ when [admin].enabled=true). The Familiar workspace
+# reverse-proxies to this. Enable by running the gateway with --http.
+listen_addr = "0.0.0.0:8000"
+# OWNER-MIGRATION removed the default_sender_id field. Requests with no
+# X-User-Email header and no admin session cookie now return 401.
+
+[adapter.slack]
+# Slack Socket Mode adapter. Requires app_mentions:read, chat:write,
+# im:history, im:read, im:write, users:read, AND users:read.email
+# (the last is required for the Phase 5 auto-bootstrap flow).
+bot_token = ""                        # xoxb-... (Bot User OAuth Token)
+app_token = ""                        # xapp-... (Socket Mode token)
+default_channel = ""                  # channel ID for proactive messages
+allowed_users = []                    # Slack user IDs; empty = allow all
+                                      # Any non-empty list acts as an
+                                      # emergency deny-by-default switch.
+                                      # Example:
+                                      #   allowed_users = ["U00000000000"]
+
+# ─── Embedder ───────────────────────────────────────────────────────
+# nomic-embed-text-v1.5 served by llama-server. The pipeline prepends
+# "search_query: " for retrieval queries automatically. Dimension must
+# match the pgvector column the memories table was created with.
+[embedder]
+endpoint = ""                         # e.g., "http://127.0.0.1:8100"
+model = "nomic-embed-text"
+dimension = 768                       # nomic = 768; bge-large / mxbai = 1024
+
+# ─── Router ─────────────────────────────────────────────────────────
+# Tier selection: sidecar (tier 1-2) for cheap/chat work, backend
+# (tier 3-4) for reasoning/code. Rule-based router is the fast default;
+# sidecar-model router is more accurate but adds ~200ms per request.
+[router]
+enabled = true
+prefer_local = true
+use_sidecar_router = false
+fallback_router = "rule_based"
+confidence_threshold = 0.6            # below this, fall through to rule-based selection
+
+# Force-routing rules: bypass the router for matching patterns.
+# [[router.rules.force]]
+# pattern = "(?i)code|debug|implement|refactor"
+# model = "gpu-host/qwen3.5-122b"
+# reason = "code_specialist"
+
+# ─── GPU Sidecar ────────────────────────────────────────────────────
+# Local models for the gateway's auxiliary tasks: classification,
+# query condensation, fact extraction, summarization, and so on.
+#
+# SIDECAR-SLOT-FIXES: each task is assigned an explicit model ID from
+# [[models]] below. A task with no <task>_model key falls back to
+# default_model; with neither set, the task is skipped (logged once
+# at startup). The old opaque small/medium "slot" roles are gone —
+# the gateway prints the resolved task → model → endpoint table at
+# startup so you can verify routing.
+[sidecar]
+enabled = false
+embedder_endpoint = ""                # e.g., "http://127.0.0.1:8100" (embedder is separate)
+connect_timeout_ms = 500
+request_timeout_ms = 10000
+retry_interval_seconds = 10
+fallback_on_failure = true            # route to backend if sidecar dies
+
+# Task → model assignment. Each value must match a [[models]] entry
+# id; the gateway resolves it to that model's endpoint.
+default_model = "sidecar/gemma-4-e4b"
+
+# Critical path — blocks time-to-first-token. Use the fastest model.
+classify_model       = "sidecar/gemma-4-e4b"
+condense_model       = "sidecar/gemma-4-e4b"
+expand_queries_model = "sidecar/gemma-4-e4b"
+
+# Background / post-turn — runs after generation. Use a capable model.
+extract_model      = "sidecar/gemma-4-31b"
+summarize_model    = "sidecar/gemma-4-31b"
+conflict_model     = "sidecar/gemma-4-31b"
+relationship_model = "sidecar/gemma-4-31b"
+entity_group_model = "sidecar/gemma-4-31b"
+
+# extract_large_model routes large-document extraction (research
+# write-ups, multi-KB notes) to a bigger model that holds the whole
+# document in context — the small extract model overruns and times out.
+# ADDITIVE: setting it alone never disables the other tasks' fallback,
+# and when unset the large path falls back to extract_model. It runs
+# post-delivery, best-effort — never on a user's critical path — so it's
+# fine to point at the heavy backend even though it's slow.
+extract_large_model = "gpu-host/qwen3.5-122b"
+
+# router_endpoint is DEPRECATED. Pre-SIDECAR-SLOT-FIXES configs that
+# set it (and no *_model keys) still work via the legacy role path —
+# the gateway resolves task endpoints from [[models]] role tags.
+# router_endpoint = ""
+
+# ─── Memory (pgvector) ──────────────────────────────────────────────
+# The gateway's direct pgvector connection. Writes go straight to the
+# memories table; there is no separate hot-tier RAM cache — retrieval
+# always hits Postgres.
+#
+# Requires PostgreSQL with the pgvector extension:
+#   CREATE EXTENSION vector;
+[memory]
+use_sidecar_embedder = false
+store = "local"
+local_dsn = ""                        # postgresql://familiar:pw@localhost:5432/familiar_memory
+relevance_threshold = 0.55            # cosine floor for retrieval (dense arm)
+max_injected_memories = 5             # top-k into context
+dedup_threshold = 0.95                # cosine above this = duplicate
+
+# Memory retrieval is hybrid by default: dense pgvector similarity +
+# Postgres full-text search, fused with Reciprocal Rank Fusion. No
+# config needed — the FTS index is created by a migration.
+
+# ─── Reranking ──────────────────────────────────────────────────────
+# Optional cross-encoder precision pass after hybrid retrieval. A
+# reranker scores (query, memory) pairs jointly and trims a wide
+# candidate pool down to the few genuinely relevant facts. Needs a
+# dedicated reranker model served on its own endpoint — e.g. a
+# llama.cpp instance started with --reranking serving a BGE-reranker
+# or mxbai-rerank model. When disabled the hybrid-search RRF order is
+# used directly.
+[rerank]
+enabled  = false
+endpoint = ""                         # e.g. "http://127.0.0.1:8300"
+model    = "bge-reranker-v2-m3"
+pool_size = 50                        # hybrid candidates fed to the reranker
+
+# ─── Context Window ─────────────────────────────────────────────────
+# Token budget carving for the prompt assembler. Ratios apply to
+# (window_size - output_reservation). The remainder after all ratios
+# goes to the conversation history.
+[context]
+window_size = 32768
+output_reservation = 4096
+system_prompt_ratio   = 0.10          # ~10% system prompt + tool schemas
+working_context_ratio = 0.05          # ~5% user profile (Layer 1)
+memory_ratio          = 0.12          # ~12% retrieved memories
+tool_result_ratio     = 0.12          # ~12% skill output
+# Per-result cap: a single tool result is head+tail truncated to this
+# many tokens before entering the tool zone, so one giant MCP/search
+# payload can't crowd out everything else. 0 disables (zone eviction
+# only). ~2000 tokens ≈ 8KB.
+max_tool_result_tokens = 2000
+
+# ─── Pipeline ───────────────────────────────────────────────────────
+[pipeline]
+response_reserve_tokens = 4096
+memory_budget_pct       = 20
+min_history_turns       = 2
+
+# ─── External APIs / Tool Integrations ─────────────────────────────
+# Keys for services the skills call on behalf of the LLM. Skills
+# register regardless of whether keys are present; missing keys
+# produce a friendly error at tool-call time rather than a startup
+# failure.
+
+[tools.brave]
+enabled = false
+api_key = ""                          # Brave Search API key
+max_results = 5
+
+[tools.pirate_weather]
+# Pirate Weather is a drop-in replacement for the sunset Dark Sky API.
+# Free tier (10k requests/month) is plenty for a homelab assistant.
+# Sign up at pirate-weather.apiable.io.
+api_key = ""
+
+# ─── Skills ─────────────────────────────────────────────────────────
+# Most skills auto-register and need no config. News needs RSS feeds
+# (nothing else reads them; empty = no news output). Weather reads
+# tools.pirate_weather above. Profile (update_my_email), memory, and
+# instance skills read their own sections elsewhere in this file.
+
+[media]
+# Page-attached images (MEDIA-DIAGRAMS Phase 1). Bytes live as flat
+# files here; metadata in Postgres (page_media). Uploads are sniffed
+# (png/jpeg/gif/webp only — SVG refused) and served back through the
+# gateway with book-membership checks.
+dir           = "~/.familiar/media"
+max_upload_mb = 10
+
+[push]
+# Web Push (PWA notifications). When VAPID keys are set, users can enable
+# notifications on the mobile PWA and scheduled actions with a "push"
+# delivery target notify them (tap → opens the action's conversation).
+# Generate a keypair once with:  familiar-gateway --gen-vapid
+# The private key is a secret — prefer ${PUSH_VAPID_PRIVATE_KEY}.
+vapid_public_key  = ""
+vapid_private_key = ""
+subject           = "mailto:admin@example.com"
+
+[skills]
+# Imported-skills library (SKILL-PACKAGES-SPEC Phase 2): one
+# agentskills.io-shaped directory per skill (SKILL.md + optional
+# references/, assets/; scripts/ are never executed). Admit packages
+# via the console's Import dialog, or drop a directory here and click
+# Rescan. Imported skills only run inside shards.
+dir = "~/.familiar/skills"
+
+[skills.news]
+cache_minutes = 15
+
+[skills.news.feeds]
+# Free-form category names → lists of RSS/Atom URLs. The news skill
+# accepts a category argument that matches a key here. Pick whatever
+# categories match how you think about your media diet.
+tech = [
+    "https://hnrss.org/frontpage",
+    "https://www.theverge.com/rss/index.xml",
+]
+# ai = [
+#     "https://blog.google/technology/ai/rss/",
+#     "https://www.anthropic.com/feed.xml",
+# ]
+# cybersecurity = [
+#     "https://feeds.feedburner.com/TheHackersNews",
+#     "https://krebsonsecurity.com/feed/",
+# ]
+
+[skills.research]
+# Deep-research fan-out (RESEARCH-SKILL-SPEC): spawn_research_workers
+# dispatches parallel virtual-shard workers that each investigate one
+# sub-question and append findings to a shared evidence page. Opt-in,
+# and only registered when web search ([tools.brave]) is on — workers
+# are useless without web_search.
+enabled              = false
+max_workers          = 3            # keep ≤ inference slots − 2 so the
+                                    # orchestrator + chat keep slots
+worker_search_budget = 4            # web_search calls per worker turn
+worker_tier          = "technical"  # tier3 = chat model; "tier2" pins the
+                                    # sidecar model for cheap workers
+# worker_model = ""                 # pin workers to an explicit [[models]] ID
+                                    # (must speak tools); overrides the tier's
+                                    # model routing, tier still sets thinking
+# writer_model = ""                 # compose the note on a dedicated model:
+                                    # offers compose_research_note, a no-tools
+                                    # completion — coordinator and writer can
+                                    # differ. Empty = chat model writes in-turn
+evidence_retention_hours = 72       # deep-tier evidence pages live in a hidden
+                                    # per-user research book; a sweep reaps them
+                                    # after this window. 0 disables the sweep.
+max_rounds               = 2        # autonomous deep runs (§6.7): initial batch
+                                    # plus (max_rounds-1) automatic retries of any
+                                    # failed sub-questions, then synthesis
+
+# ─── Scheduled actions ──────────────────────────────────────────────
+# The config-file cron scheduler was retired (SCHEDULED-ACTIONS-SPEC).
+# Recurring + event-driven work now lives in the database: create and
+# manage actions from the console's Scheduled panel (or the
+# /console/api/actions API). Actions are per-user, can run inside a
+# shard envelope, keep a run ledger, disable themselves after repeated
+# failures, and can fire on cron schedules, page-saved events, or
+# inbound webhooks. A leftover [scheduler] block here is ignored.
+
+# ─── Admin Console ──────────────────────────────────────────────────
+# WebAuthn-gated management UI mounted on the OpenAI adapter's HTTP
+# server at /admin/. Security is hardware-key (or platform
+# authenticator) only — no passwords, no bearer tokens.
+#
+# Phase 1-4 (shipped): role-aware access control, email-keyed
+# registration, memory inspection scoped by role.
+# Phase 5 (shipped): Slack workspace members auto-provision on first
+# DM; their email from Slack's users.info flows into the users row.
+#
+# PUBLIC-PROXY-MIGRATION: admin supports multiple relying parties so
+# the gateway can sit behind both a public hostname (TLS via nginx
+# on a public droplet) and a Tailscale-direct hostname at the same
+# time. Each inbound Host header routes to its own RP; WebAuthn's
+# registrable-suffix rule means the two paths can't share
+# credentials, so the user enrolls one passkey per origin.
+#
+# Two equivalent ways to configure:
+#
+#   1. Multi-RP (preferred). One [[admin.relying_party]] block per
+#      hostname. Required for the public-proxy deployment.
+#   2. Legacy single-RP (rp_id + rp_origins, no blocks). Still
+#      supported — the loader auto-synthesises a single RP entry
+#      whose Hosts list is derived from the origins.
+#
+# cookie_secure stamps Secure: true on every admin cookie. Set true
+# in production (the gateway is HTTPS-fronted at every entry point);
+# leave false when running plain HTTP on localhost during dev.
+[admin]
+enabled         = false
+rp_display_name = "Familiar"
+session_max_age = 7200                # session IDLE window, seconds. Sessions slide:
+                                      # activity renews them, so this is "log out after
+                                      # this much inactivity", not an absolute deadline.
+                                      # Shards can override per-shard (session_max_age).
+cookie_secure   = false               # set true when fronted by HTTPS
+
+# first_user_id is the canonical_id assigned to the very first
+# WebAuthn credential registered on a fresh deploy. Pre-OWNER-
+# MIGRATION this was hard-coded to "owner" — operators must now
+# declare it explicitly so the bootstrap admin can't become the
+# silent fallback for unmapped identities.
+first_user_id   = "operator"
+
+# Multi-RP example (production shape — uncomment to use):
+# [[admin.relying_party]]
+# rp_id   = "familiar.wiki"
+# origins = ["https://host-a.familiar.wiki"]
+# hosts   = ["host-a.familiar.wiki"]
+#
+# [[admin.relying_party]]
+# rp_id   = "host-a.your-tailnet.ts.net"
+# origins = ["https://host-a.your-tailnet.ts.net"]
+# hosts   = ["host-a.your-tailnet.ts.net"]
+
+# Legacy single-RP form. Used when no [[admin.relying_party]] blocks
+# above are configured. rp_id must be the hostname the browser sees
+# (no scheme, no port); rp_origins must list every scheme+host+port
+# the UI is loaded from.
+rp_id = "localhost"
+rp_origins = [
+    "http://localhost:8000",
+    # "http://100.64.0.1:8000",     # Tailscale
+    # "http://10.0.0.104:8000",    # LAN
+    # "https://your-host.ts.net:8443",
+]
+
+# ─── Backend Models ─────────────────────────────────────────────────
+# The router picks among these based on request classification. At
+# least one model is required.
+#
+# IMPORTANT: Models that should support LLM-driven tool calling MUST
+# include "tools" in capabilities. Without it, the pipeline skips
+# sending tool schemas and the tool-call loop never activates. This
+# is the most common deployment gotcha.
+#
+# The id prefix ("gpu-host/", "sidecar/") is informational and routes
+# to the endpoint you specify; it's not a provider lookup. Pick names
+# that tell you which physical machine is serving what.
+
+# Heavy backend — large model for tiers 3-4 (reasoning, code, agentic).
+[[models]]
+id              = "gpu-host/qwen3.5-122b"
+provider        = "llama-server"
+endpoint        = "http://10.0.0.10:8080"
+context_window  = 32768
+capabilities    = [
+    "deep_reasoning",
+    "code_generation",
+    "tools",
+    "long_analysis",
+    "security_review",
+    "architecture_review",
+]
+latency_profile = "slow"
+max_concurrent  = 1
+
+# Sidecar — small/fast model for tiers 1-2 (chat, classification,
+# synthesis). Its endpoint typically matches [sidecar].router_endpoint
+# above; duplicating here lets the router treat it as a routable
+# destination with its own capability set.
+[[models]]
+id              = "sidecar/gemma-4-26b-a4b"
+provider        = "llama-server"
+endpoint        = "http://127.0.0.1:8200"
+context_window  = 65536
+capabilities    = [
+    "conversation",
+    "simple_qa",
+    "formatting",
+    "extraction",
+    "greetings",
+    "summarization",
+    "light_reasoning",
+    "memory_ops",
+    "context_management",
+    "general",
+    "tools",
+]
+latency_profile = "instant"
+max_concurrent  = 1
+
+
+# ── Public-link sharing ─────────────────────────────────────────
+#
+# Lets users mint a public URL for a wiki/note page from the panel
+# "..." menu. The link only resolves on hostnames listed in
+# public_hosts; requests on any other host (e.g. Tailscale-direct)
+# 404 even with a valid key, so a shared link never renders on the
+# private side.
+#
+# public_base_url is the absolute prefix the toggle endpoint hands
+# the frontend for the copy-link button. Leave [sharing] absent to
+# disable sharing entirely — the toggle returns 503 and /p/{key}
+# returns 404 from every host.
+
+# [sharing]
+# public_hosts    = ["host-a.familiar.wiki"]
+# public_base_url = "https://host-a.familiar.wiki"

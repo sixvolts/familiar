@@ -1,0 +1,28 @@
+# Familiar — persistent tier services
+# Usage: docker compose up -d
+#
+# Postgres with pgvector for semantic memory, fact store, and conversation history.
+# Data is persisted in a named volume so it survives container restarts.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: familiar-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: familiar
+      POSTGRES_PASSWORD: familiar_dev
+      POSTGRES_DB: familiar
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U familiar"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pgdata:

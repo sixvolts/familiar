@@ -1,0 +1,9 @@
+# Mark vendored/minified assets as generated so GitHub collapses them in
+# diffs and excludes them from language stats.
+familiar-workspace/static/vendor/** linguist-vendored
+*.min.js linguist-generated=true
+*.min.css linguist-generated=true
+
+# Generated protobuf bindings — collapse in diffs, exclude from language stats.
+# Regenerate via `go generate ./proto/engine` (protoc), never hand-edit.
+*.pb.go linguist-generated=true

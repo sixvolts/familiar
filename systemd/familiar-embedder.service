@@ -1,0 +1,18 @@
+[Unit]
+Description=Familiar Embedder (nomic-embed-text-v1.5)
+After=network.target
+
+[Service]
+Type=simple
+User=youruser
+ExecStart=/home/youruser/llama.cpp/build/bin/llama-server \
+    --host 127.0.0.1 --port 8100 \
+    -m /home/youruser/models/sidecar/nomic-embed-text-v1.5.f16.gguf \
+    -ngl 99 -c 2048 \
+    --embeddings
+Restart=on-failure
+RestartSec=5
+Environment=HSA_OVERRIDE_GFX_VERSION=9.0.6
+
+[Install]
+WantedBy=multi-user.target

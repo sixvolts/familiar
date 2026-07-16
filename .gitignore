@@ -1,0 +1,40 @@
+# ── Build artifacts (compiled binaries) ──────────────────────────
+familiar-gateway/gateway
+familiar-gateway/familiar-gateway
+familiar-gateway/familiar-ctl
+familiar-gateway/ctl
+familiar-gateway/smoke
+familiar-workspace/familiar-workspace
+*.bak*
+.DS_Store
+familiar-gateway/.DS_Store
+
+# ── Local config & secrets (never commit) ────────────────────────
+.env
+.env.*
+gateway.toml
+workspace.toml
+*.pem
+*.key
+*.log
+
+# ── Architecture archive — historical specs kept locally only ────
+arch/archive/
+
+# ── Ad-hoc scripts (debug one-offs, smoke harnesses) ─────────────
+scripts/
+.claude/
+
+# Playwright run artifacts
+test-results/
+
+# local denylist for the public publisher (PII regexes)
+.publish-deny
+
+
+# ── Pre-rearch binary backups (stale) ────────────────────────────
+*.pre-rearch
+
+# Internal design/migration notes — private only, excluded from public publish
+docs/archive/
+arch/

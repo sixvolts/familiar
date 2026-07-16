@@ -1,0 +1,2171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0b0b0f">
+<title>Familiar</title>
+<!-- Geist + Geist Mono + Instrument Serif from Google Fonts.
+     Per DESIGN.md these are the three families with assigned roles:
+     Geist for chrome, Geist Mono for structure / kbd / eyebrows,
+     Instrument Serif italic for editorial display only. -->
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="manifest" href="/manifest.json">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500&family=Instrument+Serif:ital@1&display=swap">
+<link rel="stylesheet" href="/vendor/toastui/toastui-editor.min.css">
+<link rel="stylesheet" href="/vendor/toastui/toastui-editor-dark.min.css">
+<link rel="stylesheet" href="/app.css?v=20260714f">
+
+<style>
+/* Login view — design ported from the standalone login.html mockup
+   and inlined here so the SPA shell renders sign-in without a
+   separate page navigation. All selectors are .lp-* prefixed to
+   avoid colliding with the rest of app.css. Uses tokens already
+   defined in :root. */
+.lp-page {
+    position: relative;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    background: var(--bg-canvas);
+    color: var(--fg-2);
+}
+.lp-page[hidden] { display: none; }
+.lp-page::before {
+    content: "";
+    position: absolute; inset: 0;
+    background-image: radial-gradient(rgba(255,255,255,0.06) 1px, transparent 1px);
+    background-size: 16px 16px;
+    background-position: -1px -1px;
+    opacity: 0.7;
+    pointer-events: none;
+}
+.lp-glow {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -65%) scale(1.05);
+    width: 720px; height: 720px;
+    pointer-events: none;
+    background: radial-gradient(closest-side,
+        rgba(106,76,224,0.35),
+        rgba(106,76,224,0.10) 45%,
+        transparent 70%);
+    filter: blur(8px);
+}
+.lp-stack {
+    position: relative;
+    z-index: 2;
+    width: 380px;
+    display: flex;
+    flex-direction: column;
+}
+.lp-brand { display: flex; justify-content: center; margin-bottom: 28px; }
+.lp-wordmark {
+    display: inline-flex; align-items: center; gap: 14px;
+    color: var(--fg-1);
+    font-family: var(--font-sans, 'Geist', system-ui);
+    font-weight: 600; font-size: 43px;
+    letter-spacing: -0.03em; line-height: 1;
+}
+.lp-tagline { display: flex; justify-content: center; margin-bottom: 32px; }
+.lp-tagline p {
+    margin: 0; font-size: 14px; color: var(--fg-3);
+    letter-spacing: -0.01em;
+}
+/* First-run setup copy — same sans family as the wordmark, no italics. */
+.lp-eyebrow {
+    font: 500 var(--text-2xs, 11px)/1.5 var(--font-mono, monospace);
+    letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--fg-3); text-align: center; margin-bottom: 10px;
+}
+.lp-title {
+    margin: 0 0 12px; text-align: center;
+    font: 600 26px/1.1 var(--font-sans, 'Geist', system-ui);
+    letter-spacing: -0.02em; color: var(--fg-1);
+}
+.lp-sub {
+    margin: 0 auto 26px; max-width: 340px; text-align: center;
+    font-size: 14px; line-height: 1.6; color: var(--fg-3);
+    letter-spacing: -0.01em;
+}
+.lp-form { display: flex; flex-direction: column; gap: 12px; }
+.lp-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    gap: 8px;
+    font: 500 14px/1 var(--font-sans, 'Geist', system-ui);
+    letter-spacing: -0.01em;
+    height: 44px; padding: 0 18px;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
+    width: 100%;
+    box-sizing: border-box;
+}
+.lp-btn svg { width: 16px; height: 16px; stroke-width: 1.75; }
+.lp-btn-primary {
+    background: var(--accent, #6A4CE0);
+    color: #fff;
+    box-shadow: 0 0 0 1px rgba(106,76,224,0.35),
+                0 8px 32px -8px rgba(106,76,224,0.45);
+}
+.lp-btn-primary:hover { background: #8A70EC; }
+.lp-btn-primary:active { transform: scale(0.99); }
+.lp-btn-shard {
+    background: #E8BE55;
+    color: #1B1B23;
+    box-shadow: 0 0 0 1px rgba(232,190,85,0.35),
+                0 8px 32px -8px rgba(232,190,85,0.45);
+}
+.lp-btn-shard:hover { background: #F0CB6F; }
+.lp-btn-shard:active { transform: scale(0.99); }
+.lp-btn-shard svg { stroke: #1B1B23; }
+.lp-btn-secondary {
+    background: var(--bg-card, #1B1B23);
+    color: var(--fg-1);
+    border-color: var(--border-default, rgba(255,255,255,0.10));
+}
+.lp-btn-secondary:hover {
+    background: var(--bg-hover, #22222C);
+    border-color: var(--border-strong, rgba(255,255,255,0.16));
+}
+.lp-btn[disabled] { opacity: 0.6; cursor: not-allowed; }
+.lp-divider {
+    display: flex; align-items: center; gap: 12px; margin: 6px 0;
+    font-size: 14px; color: var(--fg-3);
+    letter-spacing: -0.01em;
+}
+.lp-divider::before, .lp-divider::after {
+    content: ""; flex: 1; height: 1px;
+    background: var(--border-default, rgba(255,255,255,0.10));
+}
+.lp-field { position: relative; }
+.lp-input {
+    font: 400 14px var(--font-sans, 'Geist', system-ui);
+    color: var(--fg-1);
+    background: var(--bg-card, #1B1B23);
+    border: 1px solid var(--border-default, rgba(255,255,255,0.10));
+    border-radius: 6px;
+    padding: 0 14px; height: 42px; width: 100%;
+    outline: none;
+    letter-spacing: -0.01em;
+    box-sizing: border-box;
+    transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease;
+}
+.lp-input::placeholder { color: var(--fg-4); }
+.lp-input:hover { border-color: var(--border-strong, rgba(255,255,255,0.16)); }
+.lp-input:focus {
+    border-color: var(--accent, #6A4CE0);
+    box-shadow: 0 0 0 3px rgba(106,76,224,0.35);
+    background: var(--bg-raised, #15151B);
+}
+.lp-input-icon {
+    position: absolute; right: 12px; top: 50%;
+    transform: translateY(-50%);
+    width: 16px; height: 16px;
+    color: var(--fg-4);
+    cursor: pointer; background: none; border: 0; padding: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+}
+.lp-input-icon:hover { color: var(--fg-2); }
+.lp-forgot-row { display: flex; justify-content: center; margin-top: 22px; }
+.lp-forgot {
+    font-size: 14px; color: var(--fg-3);
+    letter-spacing: -0.01em;
+    text-decoration: underline; text-underline-offset: 3px;
+    text-decoration-color: rgba(255,255,255,0.25);
+}
+.lp-error {
+    margin-top: 14px;
+    padding: 10px 12px;
+    font-size: 13px;
+    color: #E37A74;
+    background: rgba(227, 122, 116, 0.08);
+    border: 1px solid rgba(227, 122, 116, 0.24);
+    border-radius: 6px;
+    word-wrap: break-word;
+}
+.lp-error[hidden] { display: none; }
+.lp-hint {
+    margin-top: 14px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: rgba(255, 255, 255, 0.42);
+    text-align: center;
+}
+</style>
+</head>
+<body>
+
+<!-- Title bar removed — the F-mark + breadcrumb duplicated the
+     sidebar header (which carries the same mark + holds the
+     ⌘K-hinted search input). The two no-op buttons (sidebar
+     toggle, tweaks) didn't earn their place yet. The view-shell
+     grid below collapses from 3 rows to 2 to reclaim the 40px. -->
+
+<main id="view-loading" class="view">
+    <div class="center-stack">
+        <svg class="fmark-loader" viewBox="78 56 96 110" aria-hidden="true">
+            <g transform="translate(-82 0)">
+                <path d="M 165.41 64.56 L 244.48 64.56 L 233.02 79.97 L 180.48 79.97 L 180.48 100.21 L 218.40 100.21 L 206.94 115.63 L 181.04 115.63 L 181.04 154.56 L 165.41 154.56 Z" fill="var(--accent, #6A4CE0)"/>
+                <circle class="fmark-loader-dot" cx="198.69" cy="146.74" r="7.817" fill="#E8BE55"/>
+            </g>
+        </svg>
+        <div class="micro">Checking session</div>
+    </div>
+</main>
+
+<main id="view-setup" class="view lp-page" hidden>
+    <div class="lp-glow"></div>
+    <div class="lp-stack">
+        <div class="lp-brand">
+            <span class="lp-wordmark">
+                <svg width="54" height="54" viewBox="78 56 96 110" aria-hidden="true">
+                    <g transform="translate(-82 0)">
+                        <path d="M 165.41 64.56 L 244.48 64.56 L 233.02 79.97 L 180.48 79.97 L 180.48 100.21 L 218.40 100.21 L 206.94 115.63 L 181.04 115.63 L 181.04 154.56 L 165.41 154.56 Z" fill="var(--accent, #6A4CE0)"/>
+                        <circle cx="198.69" cy="146.74" r="7.817" fill="#E8BE55"/>
+                    </g>
+                </svg>
+                Familiar
+            </span>
+        </div>
+        <div class="lp-eyebrow">First-time setup</div>
+        <h1 class="lp-title">Register a passkey</h1>
+        <p class="lp-sub">No accounts exist yet. Enter your email to create the first admin account, then follow your browser's prompt to bind a passkey — Touch ID, Windows Hello, iCloud Keychain, or a hardware security key.</p>
+        <div class="lp-form">
+            <div class="lp-field">
+                <input id="setup-email" class="lp-input" type="email" placeholder="you@example.com" autocomplete="email" required>
+            </div>
+            <div class="lp-field">
+                <input id="setup-display-name" class="lp-input" type="text" placeholder="Display name (optional)">
+            </div>
+            <button type="button" id="btn-setup-register" class="lp-btn lp-btn-primary">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <circle cx="7.5" cy="15.5" r="5.5"/>
+                    <path d="M21 2 11.5 11.5"/>
+                    <path d="m17 6 3 3"/>
+                    <path d="m14 9 3 3"/>
+                </svg>
+                Register passkey
+            </button>
+            <div id="setup-error" class="lp-error" hidden></div>
+        </div>
+    </div>
+</main>
+
+<main id="view-login" class="view lp-page" hidden>
+    <div class="lp-glow"></div>
+    <div class="lp-stack">
+        <div class="lp-brand">
+            <span class="lp-wordmark">
+                <svg width="54" height="54" viewBox="78 56 96 110" aria-hidden="true">
+                    <g transform="translate(-82 0)">
+                        <path d="M 165.41 64.56 L 244.48 64.56 L 233.02 79.97 L 180.48 79.97 L 180.48 100.21 L 218.40 100.21 L 206.94 115.63 L 181.04 115.63 L 181.04 154.56 L 165.41 154.56 Z" fill="var(--accent, #6A4CE0)"/>
+                        <circle cx="198.69" cy="146.74" r="7.817" fill="#E8BE55"/>
+                    </g>
+                </svg>
+                Familiar
+            </span>
+        </div>
+        <div class="lp-tagline"><p>Your data, your AI, your rules.</p></div>
+        <form class="lp-form" id="lp-form">
+            <button type="button" class="lp-btn lp-btn-primary" id="btn-login">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <circle cx="7.5" cy="15.5" r="5.5"/>
+                    <path d="M21 2 11.5 11.5"/>
+                    <path d="m17 6 3 3"/>
+                    <path d="m14 9 3 3"/>
+                </svg>
+                Continue with passkey
+            </button>
+            <div class="lp-divider"><span>or</span></div>
+            <!-- SHARD-AUTH-SPEC Phase 1 — kiosk / cross-device login.
+                 Same WebAuthn ceremony as the purple passkey button
+                 above; the browser handles QR / hybrid transport when
+                 the credential lives on a different device. The
+                 visual split is for users to recognize which kind of
+                 credential they're presenting. -->
+            <button type="button" class="lp-btn lp-btn-shard" id="btn-shard-login">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M14 2.2 L20.5 9.6 L17.2 21.6 L7.4 19.0 L4.2 12.4 Z"/>
+                    <path d="M14 2.2 L10.4 11.6 L4.2 12.4"/>
+                    <path d="M10.4 11.6 L17.2 21.6"/>
+                    <path d="M10.4 11.6 L20.5 9.6"/>
+                </svg>
+                Shard login
+            </button>
+            <p class="lp-hint">Most people use “Continue with passkey”. Shard login is for shared agent / kiosk devices.</p>
+            <div class="lp-error" id="login-error" hidden></div>
+        </form>
+    </div>
+</main>
+
+<main id="view-dashboard" class="view-shell" hidden>
+    <!-- Sidebar — single rail per DESIGN.md. Header (mark +
+         search), Home row, four colored category rows, flex spacer,
+         User / Config footer. The secondary nav block (Memory,
+         Profile, Sessions, Skills, Users, System status) was
+         deleted in this commit; those surfaces re-home into the
+         User panel in Phase 3c. -->
+    <nav class="sidebar" id="sidebar">
+        <!-- Header: F mark + "Familiar" wordmark, clickable as a
+             single block that lands on Home. The search input
+             that used to sit here was removed pending a real
+             implementation; the ⌘K hint will resurface when the
+             command palette ships. -->
+        <a href="#" class="sidebar-header" data-mode="home" aria-label="Home">
+            <span class="sidebar-mark" aria-hidden="true">
+                <svg viewBox="78 56 96 110" width="22" height="26" fill="none">
+                    <g transform="translate(-82 0)">
+                        <path d="M 165.41 64.56 L 244.48 64.56 L 233.02 79.97 L 180.48 79.97 L 180.48 100.21 L 218.40 100.21 L 206.94 115.63 L 181.04 115.63 L 181.04 154.56 L 165.41 154.56 Z" fill="var(--accent)"></path>
+                        <circle cx="198.69" cy="146.74" r="7.817" fill="var(--mark)"></circle>
+                    </g>
+                </svg>
+            </span>
+            <span class="sidebar-wordmark">Familiar</span>
+        </a>
+
+        <!-- Home row — muted gray, neutral active state. Clicking
+             switches workspace mode to 'home' (lands in Phase 3b;
+             for now this is a no-op so nothing breaks). -->
+        <a href="#" class="sidebar-row sidebar-home" data-mode="home" id="sidebar-home-row">
+            <span class="sidebar-glyph" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M3.5 11 L12 4 L20.5 11 V19.5 a1 1 0 0 1 -1 1 H4.5 a1 1 0 0 1 -1 -1 Z"/>
+                    <path d="M9.5 20.5 V14 a1 1 0 0 1 1 -1 h3 a1 1 0 0 1 1 1 V20.5"/>
+                </svg>
+            </span>
+            <span class="sidebar-row-label">Home</span>
+        </a>
+
+        <!-- The four categories. Each carries its own accent color
+             (Chat=moss, Notes=iris, Wiki=slate, Shards=sun). The
+             category color is the only colored element per row;
+             label + count are neutral. data-surface still drives
+             workspace.js's focusSurface() handler so existing
+             behavior is preserved while the chrome catches up.
+             Order: Chat → Notes → Wiki → Shards (Home stays the
+             row above this group). -->
+        <div class="sidebar-categories">
+            <a href="#" class="sidebar-row sidebar-cat sidebar-cat-chat is-active" data-surface="chat" data-category="chat">
+                <span class="sidebar-glyph" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M4 5.5 a2 2 0 0 1 2 -2 h12 a2 2 0 0 1 2 2 v9 a2 2 0 0 1 -2 2 H9 l-4 3.5 V5.5 Z"/>
+                    </svg>
+                </span>
+                <span class="sidebar-row-label">Chat</span>
+                <span class="sidebar-row-count" id="sidebar-count-chat"></span>
+                <button class="sidebar-cat-new" type="button" aria-label="New chat">+</button>
+                <span class="sidebar-row-chevron" aria-hidden="true">›</span>
+            </a>
+            <a href="#" class="sidebar-row sidebar-cat sidebar-cat-notes" data-surface="notes" data-category="notes">
+                <span class="sidebar-glyph" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M6 3 h8 l5 5 v12 a1.5 1.5 0 0 1 -1.5 1.5 H6 a1.5 1.5 0 0 1 -1.5 -1.5 V4.5 A1.5 1.5 0 0 1 6 3 Z"/>
+                        <path d="M14 3 v3.5 A1.5 1.5 0 0 0 15.5 8 H19"/>
+                    </svg>
+                </span>
+                <span class="sidebar-row-label">Notes</span>
+                <span class="sidebar-row-count" id="sidebar-count-notes"></span>
+                <button class="sidebar-cat-new" type="button" aria-label="New note">+</button>
+                <span class="sidebar-row-chevron" aria-hidden="true">›</span>
+            </a>
+            <a href="#" class="sidebar-row sidebar-cat sidebar-cat-wiki" data-surface="wiki" data-category="wiki">
+                <span class="sidebar-glyph" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="4" y="6" width="4" height="14" rx="1"/>
+                        <path d="M4 9.5 H8"/>
+                        <rect x="9" y="4.5" width="4" height="15.5" rx="1"/>
+                        <path d="M9 8 H13"/>
+                        <path d="M15.2 6.3 l3.6 -1 a1 1 0 0 1 1.25 0.7 l3.3 12.0 a1 1 0 0 1 -0.7 1.25 l-3.6 1 a1 1 0 0 1 -1.25 -0.7 l-3.3 -12.0 a1 1 0 0 1 0.7 -1.25 Z"/>
+                        <path d="M16.6 9.7 L20.2 8.7"/>
+                    </svg>
+                </span>
+                <span class="sidebar-row-label">Wiki</span>
+                <span class="sidebar-row-count" id="sidebar-count-wiki"></span>
+                <button class="sidebar-cat-new" type="button" aria-label="New book">+</button>
+                <span class="sidebar-row-chevron" aria-hidden="true">›</span>
+            </a>
+            <a href="#" class="sidebar-row sidebar-cat sidebar-cat-shards" data-surface="shards" data-category="shards">
+                <span class="sidebar-glyph" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M14 2.2 L20.5 9.6 L17.2 21.6 L7.4 19.0 L4.2 12.4 Z"/>
+                        <path d="M14 2.2 L10.4 11.6 L4.2 12.4"/>
+                        <path d="M10.4 11.6 L17.2 21.6"/>
+                        <path d="M10.4 11.6 L20.5 9.6"/>
+                    </svg>
+                </span>
+                <span class="sidebar-row-label">Shards</span>
+                <span class="sidebar-row-count" id="sidebar-count-shards"></span>
+                <button class="sidebar-cat-new" type="button" aria-label="New shard">+</button>
+                <span class="sidebar-row-chevron" aria-hidden="true">›</span>
+            </a>
+            <!-- Scheduled actions — opens the panel directly.
+                 Teal accent, shared with the Home action card. -->
+            <a href="#" class="sidebar-row sidebar-cat sidebar-cat-scheduled" data-surface="scheduled" data-category="scheduled">
+                <span class="sidebar-glyph" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="9"/>
+                        <path d="M12 7.5 V12 L15 14"/>
+                    </svg>
+                </span>
+                <span class="sidebar-row-label">Actions</span>
+                <span class="sidebar-row-count" id="sidebar-count-scheduled"></span>
+                <button class="sidebar-cat-new" type="button" aria-label="New action">+</button>
+                <span class="sidebar-row-chevron" aria-hidden="true">›</span>
+            </a>
+        </div>
+
+        <!-- Flex spacer pushes the user footer to the bottom regardless
+             of how many child rows are expanded above. -->
+        <div class="sidebar-spacer"></div>
+
+        <!-- User / Config footer — clicking opens the User panel as a
+             workspace replacement (Phase 3c). For now this is a
+             rendered shell; the click handler is a no-op so we don't
+             black out the workspace. -->
+        <a href="#" class="sidebar-user" id="sidebar-user-row" data-mode="user">
+            <span class="sidebar-user-avatar" id="sidebar-user-avatar" aria-hidden="true"></span>
+            <span class="sidebar-user-text">
+                <span class="sidebar-user-name" id="sidebar-user-name">—</span>
+            </span>
+            <span class="sidebar-row-chevron" aria-hidden="true">›</span>
+        </a>
+        <div class="sidebar-resize" id="sidebar-resize"></div>
+    </nav>
+
+    <div class="content">
+    <!-- Maintenance-mode banner. Populated by applyMaintenanceBanner()
+         from /auth/status (boot + 90s watchdog); hidden when not in
+         maintenance. Spans the content column above the active panel. -->
+    <div id="maintenance-banner-host"></div>
+    <!-- ═══════════════════════════════════════════════════════════
+         Home — landing surface per DESIGN.md.
+
+         Replaces the workspace when mode === 'home'. Greeting strip
+         on top, pinned grid (Phase 3b ships an empty placeholder
+         until a pin data model exists), recent list (fed by the
+         existing /console/api/dashboard/recent_* endpoints), today's
+         shards (placeholder), quick capture, open splits (read from
+         workspace state).
+         ═══════════════════════════════════════════════════════════ -->
+    <section id="panel-home" class="panel home-host" hidden>
+        <div class="home-content">
+
+            <header class="home-greet">
+                <h1 class="home-greeting-line" id="home-greeting-line">Hello.</h1>
+            </header>
+
+            <div class="home-grid">
+
+                <!-- ── Quadrant 1: Pinned ── -->
+                <div class="home-slot">
+                    <section class="home-card fill">
+                        <div class="home-card-hd">
+                            <svg class="home-card-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--mark)" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/></svg>
+                            <h3>Pinned</h3>
+                        </div>
+                        <div class="home-rec-list" id="home-pinned-grid">
+                            <div class="home-empty">Loading…</div>
+                        </div>
+                    </section>
+                </div>
+
+                <!-- ── Quadrant 2: Search + action cards ── -->
+                <div class="home-slot home-quad">
+                    <div class="home-quad-search" id="home-search-box">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--fg-3)" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                        <input type="text" id="home-search-input" placeholder="Search for anything" autocomplete="off">
+                    </div>
+                    <button class="home-action-card notes" id="home-act-note" type="button">
+                        <span class="home-ac-icon"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3 h8 l5 5 v12 a1.5 1.5 0 0 1 -1.5 1.5 H6 a1.5 1.5 0 0 1 -1.5 -1.5 V4.5 A1.5 1.5 0 0 1 6 3 Z"/><path d="M14 3 v3.5 A1.5 1.5 0 0 0 15.5 8 H19"/></svg></span>
+                        <span class="home-ac-label">New note</span>
+                    </button>
+                    <button class="home-action-card chats" id="home-act-chat" type="button">
+                        <span class="home-ac-icon"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5 a2 2 0 0 1 2 -2 h12 a2 2 0 0 1 2 2 v9 a2 2 0 0 1 -2 2 H9 l-4 3.5 V5.5 Z"/></svg></span>
+                        <span class="home-ac-label">New chat</span>
+                    </button>
+                    <button class="home-action-card scheduled" id="home-act-scheduled" type="button">
+                        <span class="home-ac-icon"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7.5 V12 L15 14"/></svg></span>
+                        <span class="home-ac-label">New scheduled action</span>
+                    </button>
+                    <button class="home-action-card shard" id="home-act-shard" type="button">
+                        <span class="home-ac-icon"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2.2 L20.5 9.6 L17.2 21.6 L7.4 19.0 L4.2 12.4 Z"/><path d="M14 2.2 L10.4 11.6 L4.2 12.4"/><path d="M10.4 11.6 L17.2 21.6"/><path d="M10.4 11.6 L20.5 9.6"/></svg></span>
+                        <span class="home-ac-label">New shard</span>
+                    </button>
+                </div>
+
+                <!-- ── Quadrant 3: Recent ── -->
+                <div class="home-slot">
+                    <section class="home-card fill">
+                        <div class="home-card-hd">
+                            <svg class="home-card-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--fg-1)" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/></svg>
+                            <h3>Recent</h3>
+                        </div>
+                        <ul class="home-rec-list" id="home-recent-list">
+                            <li class="home-empty">Loading…</li>
+                        </ul>
+                    </section>
+                </div>
+
+                <!-- ── Quadrant 4: Weather ── -->
+                <div class="home-slot">
+                    <section class="home-card home-wx fill" id="home-weather">
+                        <div class="home-empty" style="padding:22px">Loading…</div>
+                    </section>
+                </div>
+
+            </div>
+        </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════
+         Workspace — primary surfaces (Chat / Notes / Wiki / Shards)
+         in a configurable panel grid. Per FAMILIAR-WORKSPACE-SPEC
+         Phase 1b. Layout state and tab inventory live in
+         localStorage so the grid restores instantly on reload.
+         Phase 1c populates panel content with real surfaces; this
+         phase ships the grid + tab + persistence mechanics with
+         placeholder content.
+         ═══════════════════════════════════════════════════════════ -->
+    <section id="panel-workspace" class="panel ws-host" hidden>
+        <!-- The "Workspace" eyebrow + layout-name readout were
+             dropped per DESIGN.md. Layout is implied;
+             the picker speaks for itself. -->
+        <header class="ws-toolbar">
+            <span class="ws-layout-name" id="ws-layout-name" hidden>side by side</span>
+            <div class="ws-toolbar-spacer"></div>
+            <div class="ws-toolbar-right">
+                <div class="ws-layout-picker" id="ws-layout-picker">
+                    <button class="ws-layout-btn" data-layout="single" title="Single"><svg width="18" height="14" viewBox="0 0 18 14"><rect x="0" y="0" width="18" height="14" rx="2" fill="currentColor"/></svg></button>
+                    <button class="ws-layout-btn" data-layout="split-2x1" title="Side by side"><svg width="18" height="14" viewBox="0 0 18 14"><rect x="0" y="0" width="8" height="14" rx="1.5" fill="currentColor"/><rect x="10" y="0" width="8" height="14" rx="1.5" fill="currentColor"/></svg></button>
+                    <button class="ws-layout-btn" data-layout="split-1x2" title="Stacked"><svg width="18" height="14" viewBox="0 0 18 14"><rect x="0" y="0" width="18" height="6" rx="1.5" fill="currentColor"/><rect x="0" y="8" width="18" height="6" rx="1.5" fill="currentColor"/></svg></button>
+                    <button class="ws-layout-btn" data-layout="t-top" title="T-top"><svg width="18" height="14" viewBox="0 0 18 14"><rect x="0" y="0" width="18" height="6" rx="1.5" fill="currentColor"/><rect x="0" y="8" width="8" height="6" rx="1.5" fill="currentColor"/><rect x="10" y="8" width="8" height="6" rx="1.5" fill="currentColor"/></svg></button>
+                </div>
+                <div class="ws-zoom-picker" id="ws-zoom-picker">
+                    <button class="ws-layout-btn ws-zoom-btn" data-zoom="small" title="Small (100%)"><svg width="18" height="14" viewBox="0 0 18 14"><rect x="5" y="4" width="8" height="6" rx="1.5" fill="currentColor"/></svg></button>
+                    <button class="ws-layout-btn ws-zoom-btn" data-zoom="medium" title="Medium (110%)"><svg width="18" height="14" viewBox="0 0 18 14"><rect x="2" y="2" width="14" height="10" rx="1.5" fill="currentColor"/></svg></button>
+                    <button class="ws-layout-btn ws-zoom-btn" data-zoom="large" title="Large (120%)"><svg width="18" height="14" viewBox="0 0 18 14"><rect x="0" y="0" width="18" height="14" rx="2" fill="currentColor"/></svg></button>
+                </div>
+            </div>
+        </header>
+        <div class="ws-grid" id="ws-grid">
+            <!-- Panels rendered by workspace.js into this container.
+                 The grid layout is driven by the .ws-grid-<layout>
+                 class added at render time; resize handles are
+                 inserted between panels. -->
+        </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════
+         Dashboard — the landing page. Phase G.
+
+         Card grid fed by /console/api/dashboard/* (7 endpoints).
+         Non-admins see their own data; admins get a user picker
+         in the section meta that re-fetches every card on change.
+         ═══════════════════════════════════════════════════════════ -->
+    <section id="panel-dashboard" class="panel" hidden>
+        <header class="section-header dash-header">
+            <div>
+                <div class="label">Landing page</div>
+                <h2 class="section-title" id="dash-section-title">Dashboard</h2>
+            </div>
+            <div class="section-meta">
+                <button type="button" id="dash-refresh" class="btn-ghost btn-small">Refresh</button>
+            </div>
+        </header>
+
+        <!-- Admin view-as banner — same contract as memory/graph:
+             the personal dashboard is always self; cross-user enters
+             via Users → View dashboard. -->
+        <div class="memory-viewas" id="dash-viewas" hidden>
+            <span class="memory-viewas-text">Viewing dashboard of <strong id="dash-viewas-user">&mdash;</strong></span>
+            <button type="button" id="dash-viewas-clear" class="btn-ghost btn-small">Back to my dashboard</button>
+        </div>
+
+        <div id="dash-global-error" class="error" hidden></div>
+
+        <!-- Full-width welcome hero. Copy is synthesized from the
+             overview endpoint's last_chat_at + fact_count + display_name
+             on render so fresh users see "say hi to get started" and
+             long-running users see "Hi Operator. Last chat 3h ago." -->
+        <article class="dash-hero-card" id="dash-hero">
+            <div class="label">Welcome</div>
+            <h1 class="dash-hero-title" id="dash-hero-title">Hi.</h1>
+            <p class="dash-hero-sub" id="dash-hero-sub">Loading your dashboard…</p>
+        </article>
+
+        <div class="dash-grid">
+            <!-- Memory stats — facts / entities / relationships -->
+            <article class="dash-card" id="dash-card-memory">
+                <div class="label">Memory</div>
+                <h3 class="dash-card-title">What Familiar knows</h3>
+                <div class="dash-stat-grid" id="dash-memory-stats">
+                    <div class="dash-stat"><span class="dash-stat-num" id="dash-fact-count">—</span><span class="dash-stat-label">facts</span></div>
+                    <div class="dash-stat"><span class="dash-stat-num" id="dash-entity-count">—</span><span class="dash-stat-label">entities</span></div>
+                    <div class="dash-stat"><span class="dash-stat-num" id="dash-rel-count">—</span><span class="dash-stat-label">relationships</span></div>
+                </div>
+                <div class="dash-empty" id="dash-memory-empty" hidden>No memories yet. Say hi to Familiar to get started.</div>
+                <a href="#" class="dash-card-link" data-panel="memory">View memory →</a>
+            </article>
+
+            <!-- Entity breakdown — per-type counts -->
+            <article class="dash-card" id="dash-card-entities">
+                <div class="label">Graph</div>
+                <h3 class="dash-card-title">Entities by type</h3>
+                <div class="dash-breakdown" id="dash-entity-breakdown"></div>
+                <div class="dash-empty" id="dash-entities-empty" hidden>No entities yet. Conversations about people, places, and projects will fill this in.</div>
+                <a href="#" class="dash-card-link" data-panel="memory-graph">View graph →</a>
+            </article>
+
+            <!-- Recent sessions — live in-memory only -->
+            <article class="dash-card" id="dash-card-sessions">
+                <div class="label">Live</div>
+                <h3 class="dash-card-title">Recent sessions</h3>
+                <ul class="dash-list" id="dash-sessions-list"></ul>
+                <div class="dash-empty" id="dash-sessions-empty" hidden>No recent sessions. Start a chat to see activity here.</div>
+            </article>
+
+            <!-- Recent writes — last N memory rows -->
+            <article class="dash-card" id="dash-card-writes">
+                <div class="label">Recent</div>
+                <h3 class="dash-card-title">Saved memories</h3>
+                <ul class="dash-list" id="dash-writes-list"></ul>
+                <div class="dash-empty" id="dash-writes-empty" hidden>Familiar hasn't saved anything yet.</div>
+                <a href="#" class="dash-card-link" data-panel="memory">View memory →</a>
+            </article>
+
+            <!-- Shards summary — count + disabled state -->
+            <article class="dash-card" id="dash-card-shards">
+                <div class="label">Agents</div>
+                <h3 class="dash-card-title">Shards</h3>
+                <p class="dash-card-value" id="dash-shard-summary-num">—</p>
+                <p class="dash-card-meta" id="dash-shard-summary-meta">shards configured</p>
+                <div class="dash-empty" id="dash-shards-empty" hidden>You don't have any shards. Create one to expose Familiar as a focused agent.</div>
+                <a href="#" class="dash-card-link" data-panel="shards">View all →</a>
+            </article>
+
+            <!-- Memory growth sparkline — hand-rolled SVG -->
+            <article class="dash-card" id="dash-card-sparkline">
+                <div class="label">Growth</div>
+                <h3 class="dash-card-title">Memory over 30 days</h3>
+                <div class="dash-sparkline-wrap" id="dash-sparkline-wrap"></div>
+                <p class="dash-card-meta" id="dash-sparkline-delta">—</p>
+                <div class="dash-empty" id="dash-sparkline-empty" hidden>Too early to chart — come back after a few days of activity.</div>
+            </article>
+        </div>
+
+        <!-- Graph preview — full-width, renders cytoscape without
+             interaction. Click anywhere to jump to the full graph
+             panel. Lazy-loads cytoscape via the same promise as the
+             full graph view so the CDN fetch is shared. -->
+        <article class="dash-card dash-card-full" id="dash-card-graph">
+            <header class="dash-card-head">
+                <div>
+                    <div class="label">Preview</div>
+                    <h3 class="dash-card-title">Top entities &amp; connections</h3>
+                </div>
+                <a href="#" class="dash-card-link" data-panel="memory-graph">Open full graph →</a>
+            </header>
+            <div class="dash-graph-preview" id="dash-graph-preview">
+                <div class="graph-loading micro">Loading</div>
+            </div>
+            <div class="dash-empty" id="dash-graph-empty" hidden>Your graph is empty. Chat with Familiar to build connections between people, places, and projects.</div>
+        </article>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════
+         User / Config panel — DESIGN.md.
+
+         Replaces the workspace when mode === 'user'. Two-pane:
+         grouped sub-nav left (Account / Memory / Policy / Admin),
+         active section content right. Sub-section panels are the
+         existing panel-* sections (profile, memory, sessions, etc.)
+         which get JS-relocated into user-content-host on first
+         click — no HTML restructure needed for those, and the
+         existing init/render code keeps working unchanged.
+
+         Sign out lives at the bottom of the left column. Per the
+         spec it is the ONLY sign-out affordance in the app.
+
+         Admin group renders only when document.body.dataset.role
+         === 'admin' (CSS-gated via the existing .admin-only rule).
+         ═══════════════════════════════════════════════════════════ -->
+    <section id="panel-user" class="panel user-host" hidden>
+        <aside class="user-subnav" id="user-subnav">
+            <div class="user-subnav-group">
+                <div class="user-subnav-eyebrow">Account</div>
+                <a href="#" class="user-subnav-row" data-user-section="profile">Profile</a>
+                <a href="#" class="user-subnav-row" data-user-section="skills">Skills</a>
+                <!-- Preferences is a placeholder for now; the panel
+                     doesn't exist yet (Phase 6 polish). Hidden until
+                     it does so the row doesn't lead to a blank
+                     section. -->
+                <a href="#" class="user-subnav-row" data-user-section="preferences" hidden>Preferences</a>
+                <!-- Rules editor is a future-add per spec. Hidden
+                     until it exists. -->
+                <a href="#" class="user-subnav-row" data-user-section="rules" hidden>Rules</a>
+            </div>
+            <div class="user-subnav-group">
+                <div class="user-subnav-eyebrow">Memory</div>
+                <a href="#" class="user-subnav-row" data-user-section="memory">Overview</a>
+                <a href="#" class="user-subnav-row" data-user-section="memory-graph">Graph</a>
+            </div>
+            <div class="user-subnav-group admin-only">
+                <div class="user-subnav-eyebrow">Admin</div>
+                <a href="#" class="user-subnav-row" data-user-section="users">Users</a>
+                <a href="#" class="user-subnav-row" data-user-section="system-skills">System skills</a>
+                <a href="#" class="user-subnav-row" data-user-section="system-status">System status</a>
+                <a href="#" class="user-subnav-row" data-user-section="system-prompt">System prompt</a>
+                <!-- Audit log + feature flags don't have backends
+                     yet; hidden until they do. -->
+                <a href="#" class="user-subnav-row" data-user-section="audit" hidden>Audit log</a>
+                <a href="#" class="user-subnav-row" data-user-section="flags" hidden>Feature flags</a>
+            </div>
+
+            <div class="user-subnav-spacer"></div>
+
+            <a href="#" class="user-subnav-signout" id="user-signout">Sign out</a>
+        </aside>
+
+        <!-- The active sub-section's panel-* element gets JS-
+             relocated here on first click. Renders a small
+             placeholder before any section is picked. -->
+        <div class="user-content" id="user-content-host">
+            <div class="user-content-empty" id="user-content-empty">
+                Pick a section from the left.
+            </div>
+        </div>
+    </section>
+
+    <section id="panel-system-status" class="panel" hidden>
+    <header class="section-header">
+        <div>
+            <h2 class="section-title">System status</h2>
+        </div>
+    </header>
+    <p class="body dash-intro">Live gateway health, model status, and aggregate store counts. Refreshes every 30 seconds while this panel is visible.</p>
+
+    <div id="dash-error" class="error" hidden></div>
+
+    <section class="card-grid">
+        <article class="card">
+            <div class="label">Gateway</div>
+            <h2 class="card-title">Uptime</h2>
+            <p class="card-value" id="dash-uptime">&mdash;</p>
+            <p class="card-meta">Since process start</p>
+        </article>
+        <article class="card">
+            <div class="label">Memory</div>
+            <h2 class="card-title">Total rows</h2>
+            <p class="card-value" id="dash-memory">&mdash;</p>
+            <p class="card-meta">Semantic store</p>
+        </article>
+        <article class="card">
+            <div class="label">Users</div>
+            <h2 class="card-title" id="dash-users-total">&mdash;</h2>
+            <p class="card-value" id="dash-users-detail">&mdash;</p>
+            <p class="card-meta">Approved / pending</p>
+        </article>
+        <article class="card">
+            <div class="label">Sessions</div>
+            <h2 class="card-title">Active</h2>
+            <p class="card-value" id="dash-sessions">&mdash;</p>
+            <p class="card-meta">In-memory</p>
+        </article>
+    </section>
+
+    <section class="dash-section">
+        <header class="section-header">
+            <div>
+                <h2 class="section-title">Models</h2>
+            </div>
+        </header>
+        <div class="memory-table-wrap">
+            <table class="memory-table">
+                <thead>
+                    <tr>
+                        <th class="col-content">ID</th>
+                        <th>Provider</th>
+                        <th>Status</th>
+                        <th>Endpoint</th>
+                    </tr>
+                </thead>
+                <tbody id="dash-models-rows">
+                    <tr class="row-empty"><td colspan="4">Loading</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section class="dash-section admin-only">
+        <header class="section-header">
+            <div>
+                <h2 class="section-title">Maintenance mode</h2>
+            </div>
+        </header>
+        <div class="maint-control">
+            <p class="maint-desc">Take the primary model out of rotation and route chat to a slower fallback. A warning banner shows for every user while active; it also engages automatically if the primary goes offline.</p>
+            <div id="maint-state" class="maint-state"></div>
+            <div class="maint-row">
+                <label class="maint-field">
+                    <span class="maint-field-label">Fallback model</span>
+                    <select id="maint-model" class="maint-select"></select>
+                </label>
+                <button id="maint-toggle" type="button" class="btn">Enable</button>
+            </div>
+            <div id="maint-error" class="form-error" hidden></div>
+        </div>
+    </section>
+
+    <section class="dash-section">
+        <header class="section-header">
+            <div>
+                <h2 class="section-title">Skills</h2>
+            </div>
+        </header>
+        <div id="dash-skills" class="dash-skills"><span class="label">&mdash;</span></div>
+    </section>
+
+    </section>
+
+    <section id="panel-users" class="panel" hidden>
+    <section id="users-section" class="users-section" hidden>
+        <header class="section-header">
+            <div>
+                <h2 class="section-title">Users</h2>
+            </div>
+            <div class="section-meta">
+                <span id="users-pending-count" class="memory-total">&mdash;</span>
+                <span class="label">Pending requests</span>
+                <button type="button" id="users-invite-btn" class="btn-accent btn-small">+ Invite</button>
+            </div>
+        </header>
+
+        <!-- Email-invite form. Hidden until the operator clicks
+             "+ Invite" — keeps the table chrome quiet until needed.
+             generate_enrollment_link=true returns a token URL the
+             admin can share with the new user for first-time
+             passkey registration. -->
+        <div id="users-invite-form" class="users-invite-form" hidden>
+            <div class="users-invite-fields">
+                <input type="email" id="users-invite-email" class="users-invite-input" placeholder="email@example.com" required>
+                <input type="text" id="users-invite-name" class="users-invite-input" placeholder="Display name (e.g. Operator K)">
+                <select id="users-invite-role" class="users-invite-input">
+                    <option value="user">User</option>
+                    <option value="admin">Admin</option>
+                </select>
+                <select id="users-invite-rp" class="users-invite-input">
+                    <option value="">No enrollment link</option>
+                </select>
+                <button type="button" id="users-invite-go" class="btn-accent btn-small">Invite</button>
+                <button type="button" id="users-invite-cancel" class="btn-ghost btn-small">Cancel</button>
+            </div>
+            <div id="users-invite-result" class="users-invite-result" hidden>
+                <div id="users-invite-msg" class="users-invite-msg"></div>
+                <input type="text" id="users-invite-url" class="users-invite-url" readonly>
+                <div class="button-row">
+                    <button type="button" id="users-invite-copy" class="btn-ghost btn-small">Copy link</button>
+                    <button type="button" id="users-invite-dismiss" class="btn-ghost btn-small">Done</button>
+                </div>
+            </div>
+            <div id="users-invite-error" class="error" hidden></div>
+        </div>
+
+        <div class="user-tabs">
+            <button type="button" class="user-tab is-active" data-status="">All</button>
+            <button type="button" class="user-tab" data-status="pending">Pending</button>
+            <button type="button" class="user-tab" data-status="approved">Approved</button>
+            <button type="button" class="user-tab" data-status="denied">Denied</button>
+            <button type="button" class="user-tab" data-status="disabled">Disabled</button>
+        </div>
+
+        <div id="users-error" class="error" hidden></div>
+
+        <div class="users-table-wrap">
+            <table class="users-table">
+                <thead>
+                    <tr>
+                        <th class="col-name">Name</th>
+                        <th class="col-id">ID</th>
+                        <th class="col-status">Status</th>
+                        <th class="col-links">Identities</th>
+                        <th class="col-created">Created</th>
+                        <th class="col-actions"></th>
+                    </tr>
+                </thead>
+                <tbody id="users-rows">
+                    <tr class="row-empty"><td colspan="6">Loading</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <aside id="user-detail" class="detail-panel" hidden>
+        <div class="detail-inner">
+            <header class="detail-header">
+                <div class="label">User detail</div>
+                <button type="button" id="user-detail-close" class="btn-ghost btn-small">Close</button>
+            </header>
+            <h3 class="detail-id" id="user-detail-name">&mdash;</h3>
+            <div class="detail-meta" id="user-detail-meta"></div>
+
+            <div class="user-actions">
+                <button type="button" id="user-approve" class="btn-accent btn-small">Approve</button>
+                <button type="button" id="user-deny" class="btn-ghost btn-small btn-danger">Deny</button>
+                <button type="button" id="user-disable" class="btn-ghost btn-small">Disable</button>
+                <button type="button" id="user-reinstate" class="btn-ghost btn-small">Reinstate</button>
+                <a href="#" id="user-view-memories" class="view-as-link">View memories</a>
+                <a href="#" id="user-view-graph" class="view-as-link">View graph</a>
+                <a href="#" id="user-view-dashboard" class="view-as-link">View dashboard</a>
+                <a href="#" id="user-edit-profile" class="view-as-link">Edit personality</a>
+            </div>
+
+            <div class="label user-links-label">Linked identities</div>
+            <ul id="user-detail-links" class="user-links"></ul>
+
+            <!-- CROSS-DOMAIN-ENROLLMENT.md: admin-only enrollment-link
+                 generator. Picks a target RP from the dropdown
+                 (populated on flyout open from
+                 /console/api/auth/passkeys's available_rps), POSTs the
+                 token, and surfaces the URL for the admin to share
+                 with the user. -->
+            <div class="label user-enroll-label">Cross-domain enrollment</div>
+            <div class="user-enroll">
+                <div class="link-fields">
+                    <select id="user-enroll-rp">
+                        <option value="">— Pick a domain —</option>
+                    </select>
+                    <button type="button" id="user-enroll-go" class="btn-ghost btn-small">Copy enrollment link</button>
+                </div>
+                <div id="user-enroll-result" class="user-enroll-result" hidden>
+                    <div class="user-enroll-msg" id="user-enroll-msg"></div>
+                    <input class="user-enroll-url" id="user-enroll-url" type="text" readonly>
+                    <div class="button-row">
+                        <button type="button" id="user-enroll-copy" class="btn-ghost btn-small">Copy</button>
+                        <button type="button" id="user-enroll-dismiss" class="btn-ghost btn-small">Dismiss</button>
+                    </div>
+                </div>
+            </div>
+
+            <form id="user-link-form" class="user-link-form" autocomplete="off">
+                <div class="label">Add identity</div>
+                <div class="link-fields">
+                    <select id="link-platform" name="platform">
+                        <option value="openai">OpenAI</option>
+                        <option value="slack">Slack</option>
+                        <option value="cli">CLI</option>
+                    </select>
+                    <input id="link-platform-id" name="platform_id" type="text" placeholder="Platform ID" required>
+                </div>
+                <input id="link-display-name" name="display_name" type="text" placeholder="Display name (optional)">
+                <button type="submit" class="btn-ghost btn-small">Link</button>
+            </form>
+
+            <div id="user-detail-error" class="error" hidden></div>
+        </div>
+    </aside>
+    </section>
+
+    <section id="panel-shards" class="panel" hidden>
+    <section id="shards-section" class="users-section">
+        <header class="section-header">
+            <div>
+                <h2 class="section-title section-title-shards">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M14 2.2 L20.5 9.6 L17.2 21.6 L7.4 19.0 L4.2 12.4 Z"/>
+                        <path d="M14 2.2 L10.4 11.6 L4.2 12.4"/>
+                        <path d="M10.4 11.6 L17.2 21.6"/>
+                        <path d="M10.4 11.6 L20.5 9.6"/>
+                    </svg>
+                    <span>Shards</span>
+                </h2>
+            </div>
+            <div class="section-meta">
+                <button type="button" id="shards-new" class="btn-accent btn-small">New shard</button>
+            </div>
+        </header>
+
+        <p class="body shards-blurb">Shards let you create purpose-built assistants inside Familiar, each with their own prompt, tools, and memory.</p>
+
+        <div id="shards-error" class="error" hidden></div>
+
+        <div class="users-table-wrap">
+            <table class="users-table">
+                <thead>
+                    <tr>
+                        <th class="col-name">Name</th>
+                        <th class="col-id">ID</th>
+                        <th class="col-status">Mode</th>
+                        <th class="col-status">Visibility</th>
+                        <th class="col-status">Tools</th>
+                        <th class="col-status">Tokens</th>
+                        <th class="col-status">Status</th>
+                        <th class="col-created">Updated</th>
+                    </tr>
+                </thead>
+                <tbody id="shards-rows">
+                    <tr class="row-empty"><td colspan="8">Loading</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <!-- Shard create / edit form. Swaps between create and edit mode via
+         a hidden "mode" input on the form; the submit handler posts or
+         patches depending on the mode. Renders inline within
+         panel-shards (replacing the table view) rather than as a
+         right-side modal — shard configs are too tall for a slide-
+         out panel and benefit from the full workspace width. -->
+    <aside id="shard-detail" class="shard-detail-inline" hidden>
+        <div class="detail-inner">
+            <header class="section-header shard-detail-header">
+                <div>
+                    <button type="button" id="shard-detail-back" class="shard-detail-back">← Shards</button>
+                    <!-- Same shard glyph as the main Shards panel title. The
+                         icon is a SIBLING of #shard-detail-title (a span) —
+                         the panel JS sets its textContent, which would wipe
+                         a nested SVG. -->
+                    <div class="section-title section-title-shards shard-detail-title-row">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M14 2.2 L20.5 9.6 L17.2 21.6 L7.4 19.0 L4.2 12.4 Z"/>
+                            <path d="M14 2.2 L10.4 11.6 L4.2 12.4"/>
+                            <path d="M10.4 11.6 L17.2 21.6"/>
+                            <path d="M10.4 11.6 L20.5 9.6"/>
+                        </svg>
+                        <span id="shard-detail-title">New shard</span>
+                    </div>
+                </div>
+            </header>
+
+            <form id="shard-form" class="user-link-form shard-form" autocomplete="off">
+
+                <fieldset class="shard-section">
+                    <div class="shard-section-head">
+                        <h3 class="shard-section-title">Identity</h3>
+                        <p class="shard-section-sub">What this shard is called and what it does.</p>
+                    </div>
+                    <div class="field">
+                        <label class="label" for="shard-id">ID (slug)</label>
+                        <input id="shard-id" name="id" type="text" placeholder="charger-extractor" pattern="[a-z0-9][a-z0-9-]{0,62}" required>
+                        <div class="micro">Lowercase letters, numbers, hyphens. Immutable after create.</div>
+                    </div>
+                    <div class="field">
+                        <label class="label" for="shard-name">Display name</label>
+                        <input id="shard-name" name="name" type="text" placeholder="Charger Extractor" required>
+                    </div>
+                    <div class="field">
+                        <label class="label" for="shard-description">Description</label>
+                        <input id="shard-description" name="description" type="text" placeholder="Extracts charger metadata from Google Maps URLs.">
+                    </div>
+                </fieldset>
+
+                <fieldset class="shard-section">
+                    <div class="shard-section-head">
+                        <h3 class="shard-section-title">Behavior</h3>
+                        <p class="shard-section-sub">How the shard persists and where its memory shows up.</p>
+                    </div>
+                    <div class="field">
+                        <label class="label">Persistence</label>
+                        <div class="shard-radios">
+                            <label class="shard-radio"><input type="radio" name="persistence" value="ephemeral" checked><span>Ephemeral</span></label>
+                            <label class="shard-radio"><input type="radio" name="persistence" value="persistent"><span>Persistent</span></label>
+                        </div>
+                        <div class="micro">Ephemeral: no memory writes, no sessions. Persistent: writes memory and keeps sessions.</div>
+                    </div>
+                    <div class="field">
+                        <label class="label">Visibility</label>
+                        <div class="shard-radios">
+                            <label class="shard-radio"><input type="radio" name="visibility" value="isolated" checked><span>Isolated</span></label>
+                            <label class="shard-radio"><input type="radio" name="visibility" value="promoted"><span>Promoted</span></label>
+                        </div>
+                        <div class="micro">Isolated: memory hidden from top-level Familiar. Promoted: surfaced to both views.</div>
+                    </div>
+                    <details class="shard-advanced">
+                        <summary>Advanced model settings</summary>
+                        <div class="shard-advanced-body">
+                            <div class="field">
+                                <label class="label" for="shard-scope">Scope tag</label>
+                                <input id="shard-scope" name="scope_tag" type="text" placeholder="shard:charger-extractor">
+                                <div class="micro">Defaults to <code>shard:&lt;id&gt;</code>. Every memory the shard writes is tagged with this.</div>
+                            </div>
+                            <div class="field">
+                                <label class="label" for="shard-model">Model preference</label>
+                                <input id="shard-model" name="model_preference" type="text" placeholder="(router) or e.g. gpu-host/qwen3.5-122b">
+                                <div class="micro">An explicit model ID bypasses the router. Blank = router selection.</div>
+                            </div>
+                            <div class="field">
+                                <label class="label" for="shard-tier">Tier preference</label>
+                                <select id="shard-tier" name="tier_preference">
+                                    <option value="">(router)</option>
+                                    <option value="trivial">Trivial (tier 1)</option>
+                                    <option value="knowledge">Knowledge (tier 2)</option>
+                                    <option value="technical">Technical (tier 3)</option>
+                                    <option value="deep_reasoning">Deep reasoning (tier 4)</option>
+                                </select>
+                                <div class="micro">Mutually exclusive with model preference.</div>
+                            </div>
+                            <div class="shard-form-row">
+                                <div class="field">
+                                    <label class="label" for="shard-max-tokens">Max tokens</label>
+                                    <input id="shard-max-tokens" name="max_tokens" type="number" min="1" max="32768" value="2048">
+                                </div>
+                                <div class="field">
+                                    <label class="label" for="shard-temperature">Temperature</label>
+                                    <input id="shard-temperature" name="temperature" type="number" min="0" max="2" step="0.05" value="0.7">
+                                </div>
+                            </div>
+                        </div>
+                    </details>
+                </fieldset>
+
+                <fieldset class="shard-section">
+                    <div class="shard-section-head">
+                        <h3 class="shard-section-title">Sign-in &amp; access</h3>
+                        <p class="shard-section-sub">What a shard-passkey login can reach. Enroll devices after saving.</p>
+                    </div>
+                    <div class="field field-check">
+                        <label class="micro"><input type="checkbox" id="shard-console-access" name="console_access"> Allow console sign-in (passkey)</label>
+                        <div class="micro">When off, no passkey on this shard can mint a session — keeps it purely API-driven.</div>
+                    </div>
+                    <div class="shard-form-row">
+                        <div class="field field-check">
+                            <label class="micro"><input type="checkbox" id="shard-chat-enabled" name="chat_enabled" checked> Chat enabled</label>
+                        </div>
+                        <div class="field field-check">
+                            <label class="micro"><input type="checkbox" id="shard-api-enabled" name="api_enabled" checked> API invoke enabled</label>
+                        </div>
+                    </div>
+                    <div class="field">
+                        <label class="label">Visible panels</label>
+                        <div class="shard-checklist" id="shard-console-panels">
+                            <label class="shard-checklist-option"><input type="checkbox" value="books"> Books</label>
+                            <label class="shard-checklist-option"><input type="checkbox" value="notes"> Notes</label>
+                            <label class="shard-checklist-option"><input type="checkbox" value="chat"> Chat</label>
+                            <label class="shard-checklist-option"><input type="checkbox" value="memory"> Memory</label>
+                            <label class="shard-checklist-option"><input type="checkbox" value="dashboard"> Dashboard</label>
+                            <label class="shard-checklist-option"><input type="checkbox" value="shards"> Shards</label>
+                        </div>
+                        <div class="micro">Leave all unchecked to inherit every panel you can see. Checked = explicit allow-list.</div>
+                    </div>
+                    <div class="field">
+                        <label class="label">Book access</label>
+                        <div class="shard-checklist" id="shard-book-access"></div>
+                        <div class="micro">Tick books the shard can read/write. Leave all unchecked to inherit your memberships.</div>
+                    </div>
+                    <div class="field">
+                        <label class="label" for="shard-session-max-age">Login idle window (seconds, optional)</label>
+                        <input id="shard-session-max-age" name="session_max_age" type="number" min="60" step="60" placeholder="inherit gateway default">
+                        <div class="micro">Sessions slide — a device in use stays signed in; login expires only after this much idle time. Blank = gateway default (2h). A kiosk might use 604800 (a week).</div>
+                    </div>
+                </fieldset>
+
+                <fieldset class="shard-section">
+                    <div class="shard-section-head">
+                        <h3 class="shard-section-title">Capabilities</h3>
+                        <p class="shard-section-sub">Tools and skills this shard can use.</p>
+                    </div>
+                    <div class="field">
+                        <label class="label">Tools</label>
+                        <div id="shard-tools" class="shard-tools"></div>
+                        <div class="micro">Tools this shard can invoke. Write-capable memory tools are disabled for ephemeral shards.</div>
+                    </div>
+                    <div class="field">
+                        <label class="label">Imported skills</label>
+                        <div id="shard-skillpacks" class="shard-checklist"></div>
+                        <div class="micro">Bound skills are offered via progressive disclosure. Manage the library in the Skills panel.</div>
+                    </div>
+                </fieldset>
+
+                <fieldset class="shard-section">
+                    <div class="shard-section-head">
+                        <h3 class="shard-section-title">Prompt</h3>
+                        <p class="shard-section-sub">The system prompt, plus optional input/output schemas.</p>
+                    </div>
+                    <div class="field">
+                        <label class="label" for="shard-prompt">System prompt</label>
+                        <textarea id="shard-prompt" name="system_prompt" rows="10" placeholder="You are a specialized agent that..." required></textarea>
+                    </div>
+                    <details class="shard-schema">
+                        <summary>Input schema (JSON — documentation only)</summary>
+                        <textarea id="shard-input-schema" name="input_schema" rows="6" placeholder='{"type":"object","properties":{...}}'></textarea>
+                    </details>
+                    <details class="shard-schema">
+                        <summary>Output schema (JSON — documentation only)</summary>
+                        <textarea id="shard-output-schema" name="output_schema" rows="6" placeholder='{"type":"object","properties":{...}}'></textarea>
+                    </details>
+                </fieldset>
+
+                <div id="shard-form-error" class="error" hidden></div>
+
+                <div class="button-row shard-form-actions">
+                    <button type="submit" class="btn-accent btn-small">Save</button>
+                    <button type="button" id="shard-chat" class="btn-ghost btn-small" hidden>Chat</button>
+                    <button type="button" id="shard-disable" class="btn-ghost btn-small" hidden>Disable</button>
+                    <button type="button" id="shard-enable" class="btn-ghost btn-small" hidden>Enable</button>
+                    <button type="button" id="shard-delete" class="btn-ghost btn-small btn-danger" hidden>Delete</button>
+                </div>
+            </form>
+
+            <section id="shard-tokens-section" class="shard-tokens-section" hidden>
+                <header class="section-header">
+                    <div>
+                        <div class="label">Tokens</div>
+                        <h3 class="card-title">Shard credentials</h3>
+                    </div>
+                    <div class="section-meta">
+                        <button type="button" id="shard-mint-token" class="btn-ghost btn-small">Mint token</button>
+                    </div>
+                </header>
+                <div id="shard-tokens-error" class="error" hidden></div>
+                <div class="memory-table-wrap">
+                    <table class="memory-table">
+                        <thead>
+                            <tr>
+                                <th class="col-name">Label</th>
+                                <th class="col-id">Prefix</th>
+                                <th class="col-created">Created</th>
+                                <th class="col-created">Last used</th>
+                                <th class="col-status">Status</th>
+                                <th class="col-actions"></th>
+                            </tr>
+                        </thead>
+                        <tbody id="shard-tokens-rows">
+                            <tr class="row-empty"><td colspan="6">No tokens</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Passkeys section — SHARD-AUTH-SPEC Phase 1. Lets the
+                 owner enroll a WebAuthn credential bound to this shard
+                 so a kiosk device can sign in directly. The "Add
+                 passkey" button kicks off the standard registration
+                 ceremony; the browser handles cross-device QR
+                 automatically when the credential is being enrolled
+                 from a different device than the one running the
+                 console. -->
+            <section id="shard-passkeys-section" class="shard-tokens-section" hidden>
+                <header class="section-header">
+                    <div>
+                        <div class="label">Passkeys</div>
+                        <h3 class="card-title">Shard sign-in keys</h3>
+                    </div>
+                    <div class="section-meta">
+                        <button type="button" id="shard-add-passkey" class="btn-accent btn-small">Add passkey</button>
+                    </div>
+                </header>
+                <p class="micro shards-blurb">A device with a passkey enrolled here can log in as this shard with the scope the form above defines. Use the cross-device flow (scan the QR code with a phone) to enroll a kiosk that lives on a different device.</p>
+                <div id="shard-passkeys-error" class="error" hidden></div>
+                <div class="memory-table-wrap">
+                    <table class="memory-table">
+                        <thead>
+                            <tr>
+                                <th class="col-name">Label</th>
+                                <th class="col-id">Transports</th>
+                                <th class="col-created">Enrolled by</th>
+                                <th class="col-created">Created</th>
+                                <th class="col-created">Last used</th>
+                                <th class="col-actions"></th>
+                            </tr>
+                        </thead>
+                        <tbody id="shard-passkeys-rows">
+                            <tr class="row-empty"><td colspan="6">No passkeys</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Passkey-label modal. The "Add passkey" button opens
+                 this so the user can name the device before the
+                 WebAuthn ceremony fires (browsers don't let us
+                 prompt mid-ceremony). One field, one button. -->
+            <div id="shard-passkey-label-modal" class="token-modal" hidden>
+                <div class="token-modal-card">
+                    <div class="label">New passkey</div>
+                    <h3 class="card-title">Name this device</h3>
+                    <p class="body">Pick a label so this passkey is recognizable later (e.g. "kitchen iPad", "Drew's iPhone"). The browser's passkey dialog opens after you click Continue.</p>
+                    <div class="field">
+                        <input id="shard-passkey-label-input" class="input" type="text" placeholder="kitchen iPad" autocomplete="off">
+                    </div>
+                    <div class="button-row">
+                        <button type="button" id="shard-passkey-label-cancel" class="btn-ghost btn-small">Cancel</button>
+                        <button type="button" id="shard-passkey-label-go" class="btn-accent btn-small">Continue</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </aside>
+    </section>
+
+    <!-- One-shot token-reveal modal. Lives outside any panel so it
+         overlays the whole dashboard when opened. The plaintext is
+         rendered into #token-modal-value on mint and cleared when the
+         modal closes — at which point it is irrecoverable. -->
+    <div id="token-modal" class="token-modal" hidden>
+        <div class="token-modal-card">
+            <div class="label">Token minted</div>
+            <h3 class="card-title">Copy this once</h3>
+            <p class="body">Familiar stores a bcrypt hash — this plaintext value will not be visible again. Copy it to your caller's secret store now.</p>
+            <div class="token-modal-value-row">
+                <code id="token-modal-value" class="token-modal-value"></code>
+                <button type="button" id="token-modal-copy" class="btn-accent btn-small">Copy</button>
+            </div>
+            <div class="button-row">
+                <button type="button" id="token-modal-close" class="btn-ghost btn-small">I have saved it</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Wiki book-members modal. Opened from wiki.js when a book
+         owner clicks "Manage users" on the book-splash. Single
+         instance — wiki.js stamps the active book's slug onto
+         data-book-slug while it's open. -->
+    <div id="wiki-members-modal" class="wiki-members-modal" hidden>
+        <div class="wiki-members-card">
+            <div class="wiki-members-head">
+                <div>
+                    <div class="label">Book</div>
+                    <h3 class="card-title" id="wiki-members-title">Members</h3>
+                </div>
+                <button type="button" id="wiki-members-close" class="btn-ghost btn-small">Close</button>
+            </div>
+
+            <div class="wiki-members-body" id="wiki-members-body">
+                <div class="wiki-members-loading">Loading…</div>
+            </div>
+
+            <form class="wiki-members-add" id="wiki-members-add">
+                <div class="wiki-members-add-row">
+                    <div class="wiki-members-typeahead">
+                        <input id="wiki-members-add-id" class="input" type="text" placeholder="search by name, email, or id" autocomplete="off" required>
+                        <input id="wiki-members-add-resolved" type="hidden">
+                        <div id="wiki-members-suggestions" class="wiki-members-suggestions" hidden></div>
+                    </div>
+                    <select id="wiki-members-add-role" class="input">
+                        <option value="writer" selected>Writer</option>
+                        <option value="reader">Reader</option>
+                        <option value="owner">Owner</option>
+                    </select>
+                    <button type="submit" class="btn-accent btn-small">Add</button>
+                </div>
+                <div class="wiki-members-add-hint">Pick a user from the suggestions, or type an email exactly to invite.</div>
+                <div id="wiki-members-error" class="wiki-members-error" hidden></div>
+            </form>
+        </div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════
+         SKILLS (user) — My skills only. Users author markdown skills
+         here; the system + imported library is admin-only, in
+         #panel-system-skills. USER-SKILLS-SPEC Phase C.
+         ═══════════════════════════════════════════════════════════ -->
+    <section id="panel-skills" class="panel" hidden>
+    <div id="skills-home">
+        <header class="section-header">
+            <div>
+                <h2 class="section-title">My skills</h2>
+            </div>
+            <div class="button-row">
+                <button type="button" id="myskills-new" class="btn-accent btn-small">New skill</button>
+            </div>
+        </header>
+        <p class="body skills-blurb">Your private markdown skills. Only you can see and use them: flip "Use in chat" to make one available in your normal conversations, or bind it to your shards from a shard's detail page. Write one with New skill — plain markdown instructions the assistant follows when the skill applies. Bundled scripts are never executed.</p>
+        <div id="myskills-error" class="error" hidden></div>
+        <div id="myskills-list" class="skills-list">
+            <div class="micro">Loading</div>
+        </div>
+    </div>
+
+    <!-- Skill editor page — USER-SKILLS-SPEC Phase C. Full-page view
+         (the same list→detail pattern shards and scheduled use): the
+         server composes the SKILL.md frontmatter from name+description,
+         so the body is pure markdown instructions. skills.js toggles
+         .is-editing on the panel root. -->
+    <div id="skill-editor-view" class="shard-detail-inline" hidden>
+        <div class="detail-inner">
+            <header class="section-header shard-detail-header">
+                <div>
+                    <button type="button" id="skill-editor-back" class="shard-detail-back">← My skills</button>
+                    <h2 class="section-title" id="skill-editor-title">New skill</h2>
+                </div>
+            </header>
+            <div class="skill-editor-form">
+                <div class="field">
+                    <label class="label" for="skill-editor-name">Name</label>
+                    <input id="skill-editor-name" class="input" type="text" placeholder="grocery-rules" autocomplete="off" spellcheck="false">
+                    <div class="micro">lowercase letters, digits, single hyphens &mdash; how the assistant activates it; fixed after creation</div>
+                </div>
+                <div class="field">
+                    <label class="label" for="skill-editor-desc">Description</label>
+                    <input id="skill-editor-desc" class="input" type="text" placeholder="Rules for maintaining the grocery list. Use when editing it." autocomplete="off">
+                    <div class="micro">in every chat's prompt &mdash; say WHAT it does and WHEN to use it</div>
+                </div>
+                <div class="field">
+                    <label class="label" for="skill-editor-body">Instructions (markdown)</label>
+                    <textarea id="skill-editor-body" class="input skill-editor-body" rows="16" spellcheck="false" placeholder="# Grocery rules&#10;&#10;Step-by-step instructions the assistant follows once it activates this skill."></textarea>
+                </div>
+                <div id="skill-editor-error" class="error" hidden></div>
+                <div class="button-row">
+                    <button type="button" id="skill-editor-save" class="btn-accent btn-small">Save skill</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════
+         SYSTEM SKILLS (admin) — the instance-wide catalog: built-in
+         (native) skills, read-only, plus the imported SKILL.md library
+         (zip import / rescan / enable / disable / delete). Reached from
+         the Admin subnav group; SKILL-PACKAGES-SPEC + USER-SKILLS-SPEC.
+         ═══════════════════════════════════════════════════════════ -->
+    <section id="panel-system-skills" class="panel" hidden>
+    <div id="system-skills-home">
+        <header class="section-header skillpacks-header" style="margin-top:0">
+            <div>
+                <h2 class="section-title">Imported skills</h2>
+            </div>
+            <div class="button-row">
+                <button type="button" id="skillpacks-rescan" class="btn-ghost btn-small">Rescan library</button>
+                <button type="button" id="skillpacks-import" class="btn-accent btn-small">Import skill</button>
+            </div>
+        </header>
+        <p class="body skills-blurb">Standard Agent Skills (SKILL.md packages) imported into this instance's library. Imported skills only run inside shards — bind them from a shard's detail page. All packages are unsigned for now; bundled scripts are never executed. Admit new packages with Import skill, or drop a directory into the library folder and Rescan.</p>
+        <div id="skillpacks-error" class="error" hidden></div>
+        <div id="skillpacks-list" class="skills-list">
+            <div class="micro">Loading</div>
+        </div>
+
+        <header class="section-header skillpacks-header">
+            <div>
+                <h2 class="section-title">Built-in skills</h2>
+            </div>
+        </header>
+        <p class="body skills-blurb">The capabilities compiled into this gateway — memory retrieval, web search, weather, news, and so on. Each exposes one or more tools the assistant can call. Read-only: built-in skills are configured at the gateway and require a restart to change.</p>
+        <div id="skills-error" class="error" hidden></div>
+        <div id="skills-list" class="skills-list">
+            <div class="micro">Loading</div>
+        </div>
+    </div>
+
+    <!-- Skill import page — the approve-on-import flow as a full-page
+         view (admin, into the instance library). The import endpoint
+         dry-runs by default: Preview shows the package's declared
+         identity, digest, script/wasm flags, and tool mapping BEFORE
+         Approve sends confirm=true. Changing the source after a preview
+         revokes the approve button until the next preview. -->
+    <div id="skill-import-view" class="shard-detail-inline" hidden>
+        <div class="detail-inner">
+            <header class="section-header shard-detail-header">
+                <div>
+                    <button type="button" id="skill-import-back" class="shard-detail-back">← System skills</button>
+                    <h2 class="section-title">Import skill</h2>
+                </div>
+            </header>
+            <p class="body skills-blurb">Upload a skill zip or paste a direct zip URL. It's admitted into the instance library for shard use. Preview shows exactly what the package declares before it's admitted; bundled scripts are never executed.</p>
+            <div class="skill-editor-form">
+                <div class="field">
+                    <label class="label" for="skillpack-import-file">Zip file</label>
+                    <input id="skillpack-import-file" type="file" accept=".zip,application/zip">
+                </div>
+                <div class="field">
+                    <label class="label" for="skillpack-import-url">&hellip; or zip URL</label>
+                    <input id="skillpack-import-url" class="input" type="url" placeholder="https://example.com/skill.zip" autocomplete="off">
+                </div>
+                <div id="skillpack-import-error" class="error" hidden></div>
+                <div id="skillpack-import-preview" class="skillpack-import-preview" hidden></div>
+                <div class="button-row">
+                    <button type="button" id="skillpack-import-go" class="btn-accent btn-small">Preview</button>
+                    <button type="button" id="skillpack-import-approve" class="btn-accent btn-small" hidden>Approve &amp; import</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    </section>
+
+    <section id="panel-memory" class="panel" hidden>
+    <section id="memory-section" class="memory-section" hidden>
+        <header class="section-header">
+            <div>
+                <h2 class="section-title">Semantic memory</h2>
+            </div>
+            <div class="section-meta">
+                <span id="memory-total" class="memory-total">&mdash;</span>
+                <span class="label">Total matches</span>
+            </div>
+        </header>
+
+        <!-- Admin view-as banner. The personal Memory page is always
+             self-scoped (server-enforced); an admin lands here in
+             cross-user mode only via Users → View memory. -->
+        <div class="memory-viewas" id="memory-viewas" hidden>
+            <span class="memory-viewas-text">Viewing memory of <strong id="memory-viewas-user">&mdash;</strong></span>
+            <button type="button" id="memory-viewas-clear" class="btn-ghost btn-small">Back to my memory</button>
+        </div>
+
+        <!-- Kind tabs — the coarse knowledge/transcript split. The
+             default view shows exactly what retrieval sees: knowledge
+             rows, with raw conversation chunks excluded. The tabs
+             replace the old source-type dropdown. -->
+        <nav class="memory-kind-tabs" id="memory-kind-tabs">
+            <button type="button" class="memory-kind-tab is-active" data-kind="knowledge">Knowledge</button>
+            <button type="button" class="memory-kind-tab" data-kind="explicit">Explicit</button>
+            <button type="button" class="memory-kind-tab" data-kind="extracted">Extracted</button>
+            <button type="button" class="memory-kind-tab" data-kind="wiki">Wiki</button>
+            <button type="button" class="memory-kind-tab" data-kind="chunks">Conversation log</button>
+            <button type="button" class="memory-kind-tab" data-kind="all">All</button>
+            <button type="button" class="memory-kind-tab" data-kind="entities">Entities</button>
+        </nav>
+
+        <form id="memory-filter" class="memory-filter" autocomplete="off">
+            <div class="field">
+                <label class="label" for="m-q">Content</label>
+                <input id="m-q" name="q" type="text" placeholder="Substring match">
+            </div>
+            <div class="field">
+                <label class="label" for="m-scope">Scope</label>
+                <select id="m-scope" name="scope">
+                    <option value="">Any</option>
+                </select>
+            </div>
+            <div class="field field-check admin-only">
+                <label class="label" for="m-super">
+                    <input id="m-super" name="include_superseded" type="checkbox" value="1">
+                    Include superseded
+                </label>
+            </div>
+            <div class="field field-actions">
+                <button type="submit" class="btn-accent btn-small">Apply</button>
+                <button type="button" id="m-reset" class="btn-ghost btn-small">Reset</button>
+            </div>
+        </form>
+
+        <div id="memory-error" class="error" hidden></div>
+
+        <div class="memory-table-wrap" id="memory-facts-wrap">
+            <table class="memory-table">
+                <thead>
+                    <tr>
+                        <th class="col-content">Content</th>
+                        <th class="col-scope">Scope</th>
+                        <th class="col-user">User</th>
+                        <th class="col-source">Source</th>
+                        <th class="col-conf">Conf</th>
+                        <th class="col-created">Created</th>
+                        <th class="col-actions"></th>
+                    </tr>
+                </thead>
+                <tbody id="memory-rows">
+                    <tr class="row-empty"><td colspan="7">Loading</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="memory-pager">
+            <button type="button" id="m-prev" class="btn-ghost btn-small">Prev</button>
+            <span id="m-page-info" class="label">&mdash;</span>
+            <button type="button" id="m-next" class="btn-ghost btn-small">Next</button>
+        </div>
+
+        <!-- Entities mode (MEMORY-UI-SPEC Phase B) — swapped in when
+             the Entities tab is active; the fact-browser chrome above
+             hides. Column headers re-sort client-side. -->
+        <div id="memory-entities-wrap" hidden>
+            <div class="memory-entities-bar">
+                <input id="me-q" class="input" type="search" placeholder="Filter entities" autocomplete="off">
+            </div>
+            <div class="memory-table-wrap">
+                <table class="memory-table">
+                    <thead>
+                        <tr>
+                            <th class="me-sort" data-sort="name">Entity</th>
+                            <th class="me-sort" data-sort="degree">Connections</th>
+                            <th class="me-sort" data-sort="fact_count">Facts</th>
+                            <th class="me-sort" data-sort="last_seen">Last seen</th>
+                        </tr>
+                    </thead>
+                    <tbody id="memory-entity-rows">
+                        <tr class="row-empty"><td colspan="4">Loading</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Store health (Phase C §5) — is maintenance keeping up?
+             Loaded once per panel init; stays hidden if the health
+             endpoint isn't reachable. -->
+        <div class="memory-health" id="memory-health" hidden>
+            <div class="label">Store health</div>
+            <div class="memory-health-cells" id="memory-health-cells"></div>
+        </div>
+    </section>
+
+    <aside id="memory-detail" class="detail-panel" hidden>
+        <div class="detail-inner">
+            <header class="detail-header">
+                <div class="label">Memory detail</div>
+                <button type="button" id="detail-close" class="btn-ghost btn-small">Close</button>
+            </header>
+            <h3 class="detail-id" id="detail-id">&mdash;</h3>
+            <div class="detail-meta" id="detail-meta"></div>
+            <p class="detail-content" id="detail-content"></p>
+            <div id="detail-edit-wrap" hidden>
+                <textarea id="detail-edit-textarea" class="detail-content-edit"></textarea>
+                <div class="detail-edit-actions">
+                    <button type="button" id="detail-save" class="btn-accent btn-small">Save</button>
+                    <button type="button" id="detail-cancel-edit" class="btn-ghost btn-small">Cancel</button>
+                </div>
+            </div>
+            <div class="detail-tags" id="detail-tags"></div>
+            <div>
+                <div class="label">Relationship triples</div>
+                <div class="detail-triples" id="detail-triples">
+                    <span class="micro">None</span>
+                </div>
+            </div>
+            <div>
+                <div class="label">Version history</div>
+                <div class="version-history" id="detail-versions">
+                    <span class="micro">No versions</span>
+                </div>
+            </div>
+            <!-- Supersede chain (Phase C) — only shown when this row
+                 is part of a replacement chain; collapse prunes the
+                 dead intermediates and keeps the live tip. -->
+            <div id="detail-chain-wrap" hidden>
+                <div class="label">Supersede chain</div>
+                <div class="detail-chain" id="detail-chain"></div>
+                <button type="button" id="detail-collapse-chain" class="btn-ghost btn-danger btn-small">Collapse chain</button>
+            </div>
+            <div class="button-row">
+                <button type="button" id="detail-edit" class="btn-accent btn-small">Edit</button>
+                <button type="button" id="detail-delete" class="btn-ghost btn-danger btn-small">Delete</button>
+            </div>
+            <div id="detail-error" class="error" hidden></div>
+        </div>
+    </aside>
+
+    <!-- Entity detail (Phase B) — what we know about one entity:
+         meta, the facts its triples were extracted from (each opens
+         the memory detail above), and a jump into the graph. -->
+    <aside id="entity-detail" class="detail-panel" hidden>
+        <div class="detail-inner">
+            <header class="detail-header">
+                <div class="label">Entity detail</div>
+                <button type="button" id="entity-detail-close" class="btn-ghost btn-small">Close</button>
+            </header>
+            <h3 class="detail-id" id="entity-detail-name">&mdash;</h3>
+            <div class="detail-meta" id="entity-detail-meta"></div>
+            <div class="button-row">
+                <button type="button" id="entity-detail-graph" class="btn-accent btn-small">Focus in graph</button>
+            </div>
+            <div>
+                <div class="label">Facts</div>
+                <div class="entity-facts" id="entity-detail-facts">
+                    <span class="micro">Loading…</span>
+                </div>
+            </div>
+            <!-- Merge (Phase C) — fold this entity into another,
+                 rewriting every triple that mentions it. -->
+            <div>
+                <div class="label">Merge</div>
+                <div class="entity-merge-row">
+                    <input id="entity-merge-target" class="input" type="text" placeholder="Fold into entity…" autocomplete="off">
+                    <button type="button" id="entity-merge-go" class="btn-ghost btn-danger btn-small">Merge</button>
+                </div>
+                <p class="micro">Rewrites every triple mentioning this entity to the target name. Cannot be undone.</p>
+            </div>
+            <div id="entity-detail-error" class="error" hidden></div>
+        </div>
+    </aside>
+    </section>
+
+    <section id="panel-memory-graph" class="panel" hidden>
+        <header class="section-header">
+            <div>
+                <h2 class="section-title">Memory graph</h2>
+            </div>
+            <div class="section-meta">
+                <button type="button" id="graph-refresh" class="btn-ghost btn-small">Refresh</button>
+                <button type="button" id="graph-reset" class="btn-ghost btn-small">Reset view</button>
+            </div>
+        </header>
+
+        <p class="body skills-blurb">Entities (people, places, projects, things mentioned in conversation) and the relationships between them. Click a node or edge for detail — including the supporting fact behind an edge. Double-click a node to grow its neighborhood into the view. Edges can be edited (predicate, confidence) or deleted from the detail panel; that touches graph entries only, the underlying memories stay put.</p>
+
+        <!-- Admin view-as banner — same contract as the memory
+             browser: the personal graph is always self-scoped;
+             cross-user viewing enters via Users → View graph. -->
+        <div class="memory-viewas" id="graph-viewas" hidden>
+            <span class="memory-viewas-text">Viewing graph of <strong id="graph-viewas-user">&mdash;</strong></span>
+            <button type="button" id="graph-viewas-clear" class="btn-ghost btn-small">Back to my graph</button>
+        </div>
+
+        <div class="graph-toolbar">
+            <input id="graph-search" class="input" type="search" placeholder="Search for an entity (e.g. 'operator')" autocomplete="off">
+            <div id="graph-search-results" class="graph-search-results" hidden></div>
+            <span id="graph-banner" class="graph-banner" hidden></span>
+        </div>
+
+        <div id="graph-error" class="error" hidden></div>
+
+        <div class="graph-layout">
+            <div id="graph-canvas" class="graph-canvas">
+                <div class="graph-loading micro">Loading</div>
+            </div>
+            <aside id="graph-detail" class="graph-detail" hidden>
+                <header class="detail-header">
+                    <div class="label" id="graph-detail-label">Detail</div>
+                    <button type="button" id="graph-detail-delete" class="btn-ghost btn-small btn-danger">Delete</button>
+                    <button type="button" id="graph-detail-close" class="btn-ghost btn-small">Close</button>
+                </header>
+                <div id="graph-detail-body" class="graph-detail-body"></div>
+            </aside>
+        </div>
+    </section>
+
+
+
+    <!-- ═══════════════════════════════════════════════════════════
+         Scheduled actions — SCHEDULED-ACTIONS-SPEC Phase 1.
+         List + create/edit form + run ledger. Logic lives in
+         /panels/scheduled.js (window.familiarPanels.scheduled).
+         ═══════════════════════════════════════════════════════════ -->
+    <section id="panel-scheduled" class="panel" hidden>
+        <div id="scheduled-list">
+        <header class="section-header">
+            <div>
+                <h2 class="section-title section-title-scheduled">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <circle cx="12" cy="12" r="9"/>
+                        <path d="M12 7 v5 l3.5 2"/>
+                    </svg>
+                    <span>Scheduled Actions</span>
+                </h2>
+            </div>
+            <div class="section-meta">
+                <button type="button" id="actions-refresh" class="btn-ghost btn-small">Refresh</button>
+                <button type="button" id="actions-new" class="btn-accent btn-small">New action</button>
+            </div>
+        </header>
+
+        <p class="body skills-blurb">Have your Familiar perform actions for you in the background on a scheduled basis. You define the work to do, the data that's in scope, and how Familiar responds.</p>
+
+        <div id="actions-error" class="error" hidden></div>
+
+        <div class="memory-table-wrap" id="actions-list-wrap">
+            <table class="memory-table">
+                <thead>
+                    <tr>
+                        <th class="col-name">Name</th>
+                        <th class="col-status">Trigger</th>
+                        <th class="col-status">Envelope</th>
+                        <th class="col-status">Reports to</th>
+                        <th class="col-status">State</th>
+                        <th class="col-status">Last run</th>
+                        <th class="col-created">Last fired</th>
+                    </tr>
+                </thead>
+                <tbody id="actions-rows">
+                    <tr class="row-empty"><td colspan="7">Loading</td></tr>
+                </tbody>
+            </table>
+        </div>
+        </div>
+
+        <div id="action-detail" class="action-detail" hidden>
+            <button type="button" id="action-detail-back" class="shard-detail-back">← Scheduled Actions</button>
+            <header class="section-header action-detail-header">
+                <div>
+                    <div class="section-title section-title-scheduled shard-detail-title-row">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <circle cx="12" cy="12" r="9"/>
+                            <path d="M12 7 v5 l3.5 2"/>
+                        </svg>
+                        <span id="action-detail-title">New Action</span>
+                    </div>
+                </div>
+                <div class="section-meta">
+                    <button type="button" id="action-run-now" class="btn-accent btn-small" hidden>Run now</button>
+                    <button type="button" id="action-disable" class="btn-ghost btn-small" hidden>Disable</button>
+                    <button type="button" id="action-enable" class="btn-ghost btn-small" hidden>Enable</button>
+                    <button type="button" id="action-delete" class="btn-ghost btn-small btn-danger" hidden>Delete</button>
+                </div>
+            </header>
+
+            <div id="action-form-error" class="error" hidden></div>
+
+            <form id="action-form" class="user-link-form shard-form action-form" autocomplete="off">
+                <fieldset class="shard-section">
+                    <div class="shard-section-head">
+                        <h3 class="shard-section-title">Definition</h3>
+                        <p class="shard-section-sub">What the action is called and what it does.</p>
+                    </div>
+                    <div class="field">
+                        <label class="label" for="action-name">Name</label>
+                        <input id="action-name" type="text" placeholder="Morning brief" required>
+                    </div>
+                    <div class="field">
+                        <label class="label" for="action-prompt">Prompt</label>
+                        <textarea id="action-prompt" rows="4" placeholder="Summarize anything new in my notes since yesterday." required></textarea>
+                        <div class="micro">Runs through the full pipeline — the model can use its tools (read pages, search, etc.) before reporting.</div>
+                    </div>
+                </fieldset>
+
+                <fieldset class="shard-section">
+                    <div class="shard-section-head">
+                        <h3 class="shard-section-title">Trigger</h3>
+                        <p class="shard-section-sub">When the action fires.</p>
+                    </div>
+
+                <div class="field">
+                    <label class="label" for="action-trigger">Fires</label>
+                    <select id="action-trigger">
+                        <option value="cron">On a schedule (cron)</option>
+                        <option value="page_saved">When a page is saved in a book</option>
+                        <option value="webhook">When a webhook fires</option>
+                    </select>
+                </div>
+
+                <div id="action-trigger-cron" class="shard-form-row">
+                    <div class="field">
+                        <label class="label" for="action-cron">Cron (min hour dom mon dow)</label>
+                        <input id="action-cron" type="text" placeholder="0 7 * * *">
+                        <div class="micro">Presets:
+                            <a href="#" class="action-cron-preset" data-cron="0 7 * * *">daily 7am</a> &middot;
+                            <a href="#" class="action-cron-preset" data-cron="0 * * * *">hourly</a> &middot;
+                            <a href="#" class="action-cron-preset" data-cron="0 9 * * 1">Mondays 9am</a>
+                        </div>
+                    </div>
+                    <div class="field">
+                        <label class="label" for="action-timezone">Timezone</label>
+                        <select id="action-timezone">
+                            <option value="UTC">UTC</option>
+                            <option value="America/New_York">US Eastern (ET)</option>
+                            <option value="America/Chicago">US Central (CT)</option>
+                            <option value="America/Denver">US Mountain (MT)</option>
+                            <option value="America/Los_Angeles">US Pacific (PT)</option>
+                            <option value="Europe/Paris">Central European (CET)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div id="action-trigger-page" hidden>
+                    <div class="field">
+                        <label class="label" for="action-watch-book">Watch book (slug, or "personal")</label>
+                        <input id="action-watch-book" type="text" placeholder="personal">
+                        <div class="micro">Every save in this book fires the action — autosave bursts are throttled by the interval below.</div>
+                    </div>
+                </div>
+
+                <div id="action-trigger-webhook" hidden>
+                    <div class="micro action-webhook-box" id="action-webhook-hint">A secret webhook URL is generated when you save; POST to it to fire this action.</div>
+                </div>
+
+                <div id="action-interval-wrap" class="field" hidden>
+                    <label class="label" for="action-interval">Min seconds between fires</label>
+                    <input id="action-interval" type="number" value="60" min="0" max="86400">
+                </div>
+
+                </fieldset>
+
+                <fieldset class="shard-section">
+                    <div class="shard-section-head">
+                        <h3 class="shard-section-title">Report</h3>
+                        <p class="shard-section-sub">Where the result is delivered.</p>
+                    </div>
+
+                <div class="field">
+                    <label class="label" for="action-target-kind">Deliver to</label>
+                    <select id="action-target-kind">
+                        <option value="none">Nowhere — keep in run history only</option>
+                        <option value="page">Note / wiki page (append)</option>
+                        <option value="conversation">Chat conversation (new thread)</option>
+                        <option value="slack">Slack channel</option>
+                        <option value="slack_dm">Slack DM (to you)</option>
+                        <option value="log">Gateway log</option>
+                    </select>
+                </div>
+
+                <div id="action-target-slackdm" hidden>
+                    <div class="micro">Reports DM you on Slack via your linked Slack identity. Requires a Slack identity link (Users panel) and the bot's im:write scope.</div>
+                </div>
+
+                <div id="action-target-page" class="shard-form-row">
+                    <div class="field">
+                        <label class="label" for="action-target-book">Book slug</label>
+                        <input id="action-target-book" type="text" value="personal">
+                    </div>
+                    <div class="field">
+                        <label class="label" for="action-target-pageid">Page</label>
+                        <select id="action-target-pageid"></select>
+                    </div>
+                </div>
+
+                <div id="action-target-slack" hidden>
+                    <div class="field">
+                        <label class="label" for="action-target-channel">Channel ID</label>
+                        <input id="action-target-channel" type="text" placeholder="C0123456789">
+                    </div>
+                </div>
+
+                <div id="action-target-conversation" hidden>
+                    <div class="micro" id="action-conversation-hint">A dedicated "Scheduled: &hellip;" conversation is created with the action; reports land there as assistant messages you can reply to.</div>
+                </div>
+
+                <div class="field">
+                    <div class="field-check"><label><input type="checkbox" id="action-notify-push"> Also notify me via push (PWA)</label></div>
+                    <div class="micro">Pings your installed Familiar app when the action runs (in addition to the destination above); tapping opens its run history. Add Familiar to your home screen and enable notifications in Account.</div>
+                </div>
+
+                <div class="field">
+                    <label class="label" for="action-policy">Delivery policy</label>
+                    <select id="action-policy">
+                        <option value="always">Always deliver the report</option>
+                        <option value="on_content">Only when there&rsquo;s something to say (quiet otherwise)</option>
+                    </select>
+                </div>
+
+                </fieldset>
+
+                <fieldset class="shard-section">
+                    <div class="shard-section-head">
+                        <h3 class="shard-section-title">Envelope &amp; limits</h3>
+                        <p class="shard-section-sub">How the run is scoped and capped.</p>
+                    </div>
+
+                <div class="field">
+                    <label class="label" for="action-shard">Run as</label>
+                    <select id="action-shard">
+                        <option value="user">Run as you &mdash; full scope</option>
+                        <option value="ephemeral">Ephemeral &mdash; no scope beyond the prompt</option>
+                    </select>
+                    <div class="micro">"Run as you" uses your memory, prompt, and full toolbox. Ephemeral runs the prompt bare: no memory, no tools, nothing written. A shard bounds the run with its tool allowlist, memory scope, and pinned model.</div>
+                </div>
+
+                <div class="shard-form-row">
+                    <div class="field">
+                        <label class="label" for="action-timeout">Timeout (seconds)</label>
+                        <input id="action-timeout" type="number" value="600" min="30" max="3600">
+                    </div>
+                    <div class="field">
+                        <label class="label" for="action-budget">Max runs / day (0 = unlimited)</label>
+                        <input id="action-budget" type="number" value="0" min="0" max="1000">
+                    </div>
+                </div>
+
+                </fieldset>
+
+                <div class="button-row shard-form-actions">
+                    <button type="submit" class="btn-accent btn-small" id="action-save">Save action</button>
+                </div>
+            </form>
+
+            <section id="action-runs-section" class="action-runs-section" hidden>
+                <header class="section-header">
+                    <div>
+                        <div class="label">Ledger</div>
+                        <h2 class="section-title">Run history</h2>
+                    </div>
+                </header>
+                <div class="memory-table-wrap">
+                    <table class="memory-table">
+                        <thead>
+                            <tr>
+                                <th class="col-created">Started</th>
+                                <th class="col-status">Status</th>
+                                <th class="col-status">Trigger</th>
+                                <th class="col-status">Model</th>
+                                <th class="col-status">Duration</th>
+                                <th class="col-name">Output / error</th>
+                            </tr>
+                        </thead>
+                        <tbody id="action-runs-rows"></tbody>
+                    </table>
+                </div>
+            </section>
+        </div>
+    </section>
+
+    <section id="panel-profile" class="panel" hidden>
+        <header class="section-header">
+            <div>
+                <h2 class="section-title">Profile</h2>
+            </div>
+            <div class="section-meta"></div>
+        </header>
+
+        <!-- Admin view-as banner. Scopes the personality blob below;
+             the passkey/display-name editors further down are always
+             self (profile/me endpoints). Cross-user entry: Users →
+             Edit profile. -->
+        <div class="memory-viewas" id="profile-viewas" hidden>
+            <span class="memory-viewas-text">Editing personality of <strong id="profile-viewas-user">&mdash;</strong></span>
+            <button type="button" id="profile-viewas-clear" class="btn-ghost btn-small">Back to my profile</button>
+        </div>
+
+        <!-- Self-service display-name editor. The value flows into
+             every UI surface that shows the user (chat labels,
+             sidebar, admin user list). Saves via PATCH
+             /console/api/profile/me — any-role endpoint, scoped to
+             the caller's own row. -->
+        <div class="profile-display-name">
+            <div class="label">Display name</div>
+            <div class="profile-display-name-row">
+                <input type="text" id="profile-display-name-input" class="profile-display-name-input" placeholder="e.g. Operator K" maxlength="80">
+                <button type="button" id="profile-display-name-save" class="btn-accent btn-small">Save</button>
+                <span id="profile-display-name-status" class="label" aria-live="polite"></span>
+            </div>
+        </div>
+
+        <!-- Assistant personality. Saved to the typed
+             user_profiles.user_prompt column via PATCH
+             /console/api/profile; the pipeline surfaces it as its
+             own labeled section after the admin-owned system
+             prompt. Free text — how the user wants their assistant
+             to behave. -->
+        <div class="profile-user-prompt">
+            <div class="label">Assistant personality</div>
+            <p class="body">Describe how you'd like your assistant to behave — its tone, voice, and style. This travels with every turn and shapes the personality without touching the system prompt your administrator controls. Facts about you (your role, preferences, projects) don't go here — the assistant learns those into its memory as you talk.</p>
+            <textarea id="profile-user-prompt-input" class="profile-textarea" placeholder="e.g. Be concise and direct. Skip pleasantries. When I ask for code, give me the code first and a short explanation after."></textarea>
+            <div id="profile-error" class="error" hidden></div>
+            <div class="button-row">
+                <button type="button" id="profile-user-prompt-save" class="btn-accent btn-small">Save</button>
+                <button type="button" id="profile-user-prompt-reset" class="btn-ghost btn-small">Revert</button>
+                <span id="profile-user-prompt-status" class="label" aria-live="polite"></span>
+            </div>
+        </div>
+
+        <!-- Read-only system-prompt viewer. Only revealed when the
+             admin has flipped system_prompt_user_visible on; the
+             GET /console/api/system-prompt call 403s otherwise and
+             profile.js leaves this element hidden. -->
+        <details class="profile-system-prompt" id="profile-system-prompt" hidden>
+            <summary>System prompt</summary>
+            <p class="body">This is the base instruction set your administrator configured for the assistant. It's read-only — shown here for transparency.</p>
+            <pre class="profile-system-prompt-text" id="profile-system-prompt-text"></pre>
+        </details>
+
+        <!-- Security keys: registering an additional WebAuthn
+             credential (YubiKey, platform passkey, etc.) for the
+             signed-in account. Lives on the profile page so every
+             user can manage their own keys, not just admins. The
+             button + error div use the same IDs the global wire()
+             function binds to, so the existing handler works
+             unchanged. -->
+        <section class="profile-keys">
+            <div class="label">Passkeys &amp; security keys</div>
+            <p class="body">Add another credential so you can sign in from a different device. Your browser will offer a passkey (Touch ID, Windows Hello, iCloud Keychain) or a hardware security key — pick whichever matches the device you're on. The new credential is bound to the email on your session.</p>
+            <div class="button-row">
+                <button id="btn-add-key" class="btn-ghost">Add passkey or security key</button>
+            </div>
+            <div id="add-key-error" class="error" hidden></div>
+
+            <!-- CROSS-DOMAIN-ENROLLMENT.md: registered credential
+                 list. One row per stored credential with a chip
+                 indicating passkey vs hardware key, the domain it
+                 was registered for, last-used relative time, and a
+                 Remove button. Populated by loadEnrolledRPs(). -->
+            <div class="profile-keys-creds" id="profile-keys-creds" hidden>
+                <div class="label">Your credentials</div>
+                <div class="cred-list" id="profile-keys-cred-list"></div>
+            </div>
+
+            <!-- Per-RP passkey rollout summary. One row per
+                 configured RP shows either "✓ enrolled" or an
+                 Add-passkey button that mints an enrollment token
+                 and surfaces the link. -->
+            <div class="profile-keys-rps" id="profile-keys-rps" hidden>
+                <div class="label">Domains</div>
+                <div class="rp-list" id="profile-keys-rp-list"></div>
+            </div>
+
+            <!-- Modal-ish inline link surface: when the user clicks
+                 "Add passkey for X" the gateway mints a token and we
+                 drop the URL here for copy/paste. -->
+            <div class="profile-enroll-link" id="profile-enroll-link" hidden>
+                <div class="profile-enroll-link-msg" id="profile-enroll-link-msg"></div>
+                <input class="profile-enroll-link-url" id="profile-enroll-link-url" type="text" readonly>
+                <div class="button-row">
+                    <button type="button" class="btn-ghost btn-small" id="profile-enroll-link-copy">Copy</button>
+                    <button type="button" class="btn-ghost btn-small" id="profile-enroll-link-dismiss">Dismiss</button>
+                </div>
+            </div>
+        </section>
+    </section>
+
+    <!-- Admin-only system-prompt editor. Relocated into the User
+         panel's content host on first click of the Admin → System
+         prompt subnav row. Edits the base layer of the tiered
+         prompt; classifier tier overlays + tool-policy still
+         append on top. Backed by GET/PUT /console/api/system-prompt
+         (PUT is admin-gated server-side). -->
+    <section id="panel-system-prompt" class="panel" hidden>
+        <header class="section-header">
+            <div>
+                <h2 class="section-title">System prompt</h2>
+            </div>
+        </header>
+
+        <p class="body skills-blurb">This is the base layer of the assistant's prompt — shared by every user. The classifier-driven tier overlays and tool-policy layer are still appended automatically on top of whatever you save here. Leave the box empty to fall back to the file-loaded default (<code>base.md</code>).</p>
+
+        <div id="system-prompt-error" class="error" hidden></div>
+        <div id="system-prompt-saved" class="graph-banner" hidden>Saved.</div>
+        <p id="system-prompt-origin" class="micro"></p>
+
+        <div class="profile-editor">
+            <textarea id="system-prompt-editor" class="profile-textarea" spellcheck="false" placeholder="Leave blank to use the file-loaded default base.md prompt."></textarea>
+            <label class="system-prompt-toggle">
+                <input type="checkbox" id="system-prompt-user-visible">
+                <span>Let users view this system prompt (read-only) on their profile page</span>
+            </label>
+            <div class="button-row">
+                <button type="button" id="system-prompt-save" class="btn-accent btn-small">Save</button>
+                <button type="button" id="system-prompt-reset" class="btn-ghost btn-small">Revert</button>
+            </div>
+        </div>
+    </section>
+    </div>
+
+    <!-- Status bar removed — Sync state + vault + rules badges
+         were ambient clutter that didn't earn their persistent
+         28px. The per-surface "N words / N messages" context
+         readout it carried can come back as an inline indicator
+         inside the active panel later if it's missed. The setter
+         API window.familiarStatusBar.setContext() stays as a
+         no-op so existing call sites in chat.js / notes.js don't
+         break (the element they target just doesn't exist now). -->
+</main>
+
+<div id="toast-container" class="toast-container"></div>
+
+<script src="/app.js?v=20260704g"></script>
+<!-- Panel modules — each one is lazy-init'd by app.js's panel
+     switcher and registers itself on window.familiarPanels. Loaded
+     after app.js so window.familiarAppHelpers exists when they run. -->
+<script src="/panels/memory-graph.js?v=20260704d"></script>
+<script src="/panels/memory.js?v=20260704e"></script>
+<script src="/panels/shards.js?v=20260701a"></script>
+<script src="/panels/skills.js?v=20260709a"></script>
+<script src="/panels/scheduled.js?v=20260626c"></script>
+<script src="/panels/profile.js?v=20260704a"></script>
+<script src="/panels/system-prompt.js?v=20260522a"></script>
+<script src="/workspace.js?v=20260614c"></script>
+<script src="/diagram.js?v=20260613a"></script>
+<script src="/chat.js?v=20260715a"></script>
+<script src="/vendor/toastui/toastui-editor-all.min.js"></script>
+<script src="/vendor/mermaid/mermaid.min.js" defer></script>
+<script src="/image-resize.js?v=20260613a" defer></script>
+<script src="/mermaid-blocks.js?v=20260613e" defer></script>
+<script src="/wikilink.js?v=20260613a"></script>
+<script src="/notes.js?v=20260623a"></script>
+<script src="/wiki.js?v=20260710a"></script>
+</body>
+</html>

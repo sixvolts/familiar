@@ -1,13 +1,13 @@
 # Familiar
 
-Familiar is an AI-enabled workspace where you can take Notes, collaborate in wikis, chat with models, and create smart automations. 
+Familiar is a self-hosted AI assistant that runs entirely on your own hardware — local model inference, orchestration, memory, and web UI, with nothing phoning home. Beyond ordinary chat, a vector DB gives the assistant fast long-term memory, a built-in wiki/notes system it can read and write, and scheduled actions and scopes for agents through the Shards system. Several cool features are integrated like an autonomous multi-agent research mode that spins up worker agents to investigate a question and hand back a written, sourced report. There's a PWA mobile interface that supports proper notification on both iOS and Android, along with tear-off desktop app support through Chrome.  
 
 ![Familiar workspace — chat alongside a live note](docs/screenshot.png)
 
 > *In arcane tradition, a familiar is a magical entity bound to a practitioner —
 > it scouts, communicates, and serves as an extension of the caster's will.*
 
-Familiar has five major concepts - Chat, Notes, Wikis, scheduled actions, and shards.
+It scales to your setup: run it on a single GPU with a model like Qwen 3.6 or Gemma4, or on a Strix Halo / DGX Spark box with something bigger like Qwen3.5-122B. Unsloth's Q4_K_XL quants are a great place to start if you are looking for something to grab and go. Everything is local and open source — no API keys, no per-token bills, no data leaving your machine, and the whole stack is yours to read, fork, and rewire.
 
 ## Chat
 A chat interface for your local AI model that is tied into all of your data - your notes, wikis, and automations. Supports imported skills and system skills like research mode for doing deep dives and searches.
@@ -25,8 +25,6 @@ Schedule familiar to execute a task and deliver the output to you via Chat, Note
 Shards are basically data-driven agents. You define the scope of data an agent has access to, it's skills, and how you can access it. You can use an API to access data in your notes, talk to a shard on slack that can only read your recipes, or define a scope for a task runner and assign it via a scheduled action.
 
 Familiar is built with security taken seriously. You can login however you want, as long as it is with a passkey.
-
-
 
 ## Quick start
 

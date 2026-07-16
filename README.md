@@ -2,6 +2,8 @@
 
 Familiar is an AI-enabled workspace where you can take Notes, collaborate in wikis, chat with models, and create smart automations. 
 
+![Familiar workspace — chat alongside a live note](docs/screenshot.png)
+
 > *In arcane tradition, a familiar is a magical entity bound to a practitioner —
 > it scouts, communicates, and serves as an extension of the caster's will.*
 
@@ -24,7 +26,7 @@ Shards are basically data-driven agents. You define the scope of data an agent h
 
 Familiar is built with security taken seriously. You can login however you want, as long as it is with a passkey.
 
-![Familiar workspace — chat alongside a live note](docs/screenshot.png)
+
 
 ## Quick start
 

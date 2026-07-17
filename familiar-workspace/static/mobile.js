@@ -69,6 +69,10 @@
                         renderer: {
                             code: function (code, infostring) {
                                 var lang = (infostring || '').match(/\S*/)[0];
+                                // Inline completed-research card (research-blocks.js).
+                                if (lang === 'research-card' && window.familiarResearchCard) {
+                                    return window.familiarResearchCard.html(code);
+                                }
                                 if (lang && window.hljs.getLanguage && window.hljs.getLanguage(lang)) {
                                     try {
                                         return '<pre><code class="hljs language-' + lang + '">'
@@ -163,31 +167,61 @@
     // Transient network errors are ignored — only a definitive 401 /
     // unauthenticated answer logs the user out. Started once by startApp.
     var watchdogStarted = false;
-    // applyMaintenanceBanner mirrors the desktop banner: a warning
-    // strip at the top of the app shell when the big model is offline
-    // and a slower fallback is answering. Fed by /auth/status (boot +
-    // 90s watchdog) so it shows and auto-clears live.
+    // applyMaintenanceBanner mirrors the desktop banner: a warning strip
+    // when the big model is offline and a slower fallback is answering.
+    // Fed by /auth/status (boot + 90s watchdog) so it shows and auto-clears
+    // live. Rendered as a flex item BELOW each screen's header (before the
+    // .mob-scroll body), NOT at the top of the shell — the header owns the
+    // iOS safe-area top inset, so a strip beneath it never collides with the
+    // status bar / Dynamic Island. One slot per screen; only the active
+    // screen's (display:flex) is visible.
     function applyMaintenanceBanner(m) {
-        var host = document.getElementById('mob-maint-banner');
-        if (!host) return;
-        if (!m || !m.active) {
-            if (host.getAttribute('data-msg')) { host.innerHTML = ''; host.removeAttribute('data-msg'); }
-            return;
+        var active = !!(m && m.active);
+        // Compact single-line label on mobile — screen space is precious,
+        // so we drop the fallback-model detail the desktop banner carries
+        // and just show the state with the warning triangle.
+        var msg = active ? 'Maintenance Mode' : '';
+        var screens = document.querySelectorAll('.mob-screen');
+        for (var i = 0; i < screens.length; i++) {
+            var screen = screens[i];
+            var slot = screen.querySelector('.mob-maint-slot');
+            var homeHeader = screen.querySelector(':scope > .mob-home-header');
+            if (!active) {
+                if (slot) slot.remove();
+                if (homeHeader) homeHeader.classList.remove('has-maint');
+                continue;
+            }
+            if (!slot) {
+                slot = document.createElement('div');
+                slot.className = 'mob-maint-slot';
+                var searchPill = homeHeader && homeHeader.querySelector(':scope > .mob-search-pill');
+                if (homeHeader && searchPill) {
+                    // Home: the search pill lives inside the header, so wedge
+                    // the strip between the title row and search (gap split
+                    // evenly above/below via CSS), full-bleed across the
+                    // header padding.
+                    homeHeader.insertBefore(slot, searchPill);
+                    homeHeader.classList.add('has-maint');
+                } else {
+                    // Other screens: strip sits directly below the header.
+                    var header = screen.firstElementChild;
+                    screen.insertBefore(slot, header ? header.nextElementSibling : screen.firstChild);
+                }
+            }
+            if (slot.getAttribute('data-msg') === msg) continue;
+            slot.setAttribute('data-msg', msg);
+            slot.innerHTML = '';
+            var banner = document.createElement('div');
+            banner.className = 'mob-maint-banner';
+            var icon = document.createElement('span');
+            icon.className = 'mob-maint-icon';
+            icon.textContent = '⚠';
+            var text = document.createElement('span');
+            text.textContent = msg;
+            banner.appendChild(icon);
+            banner.appendChild(text);
+            slot.appendChild(banner);
         }
-        var msg = m.message || ('Maintenance mode — using ' + (m.model || 'a fallback model'));
-        if (host.getAttribute('data-msg') === msg) return;
-        host.setAttribute('data-msg', msg);
-        host.innerHTML = '';
-        var banner = document.createElement('div');
-        banner.className = 'mob-maint-banner';
-        var icon = document.createElement('span');
-        icon.className = 'mob-maint-icon';
-        icon.textContent = '⚠';
-        var text = document.createElement('span');
-        text.textContent = msg;
-        banner.appendChild(icon);
-        banner.appendChild(text);
-        host.appendChild(banner);
     }
 
     function startSessionWatchdog() {

@@ -1973,19 +1973,30 @@ button { font-family: inherit; }
 .mob-pill:disabled { opacity: 0.5; cursor: default; }
 .mob-pill[hidden] { display: none; }
 
-/* Maintenance-mode banner — top of the app shell when the big model
-   is offline and a slower fallback answers. Amber/warning accent. */
+/* Maintenance-mode banner — a warning strip that sits BELOW the active
+   screen's header (injected into a .mob-maint-slot by applyMaintenanceBanner)
+   when the big model is offline and a slower fallback answers. Placed under
+   the header, not at the shell top, so it never reaches the iOS status bar /
+   Dynamic Island (the header owns the safe-area top inset). Amber accent. */
+.mob-maint-slot { flex: 0 0 auto; }
 .mob-maint-banner {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 10px 16px;
+    padding: 9px 16px;
     background: linear-gradient(rgba(232, 190, 85, 0.18), rgba(232, 190, 85, 0.18)), var(--graphite-950);
     border-bottom: 1px solid rgba(232, 190, 85, 0.45);
     color: var(--fg-1);
     font-size: 13px;
+    line-height: 1.3;
 }
 .mob-maint-icon { color: #E8BE55; flex: 0 0 auto; }
+/* Home screen: the strip is wedged between the title row and the search
+   pill (both live inside .mob-home-header). Break it out of the header's
+   18px side padding so it stays a full-bleed strip, and split the gap
+   evenly above/below so it reads as centered in the header's empty space. */
+.mob-home-header.has-maint .mob-home-row { margin-bottom: 8px; }
+.mob-home-header > .mob-maint-slot > .mob-maint-banner { margin: 0 -18px 8px; }
 
 /* ================================================================
    SCHEDULED ACTIONS (mobile) — list cards, detail (run-now, prompt

@@ -103,6 +103,12 @@
                         renderer: {
                             code(code, infostring) {
                                 const lang = (infostring || "").match(/\S*/)[0];
+                                // A research-card fence renders as the inline
+                                // completed-research card (research-blocks.js);
+                                // falls through to a code block if unloaded.
+                                if (lang === "research-card" && window.familiarResearchCard) {
+                                    return window.familiarResearchCard.html(code);
+                                }
                                 if (lang && window.hljs.getLanguage && window.hljs.getLanguage(lang)) {
                                     try {
                                         return '<pre><code class="hljs language-' + lang + '">'

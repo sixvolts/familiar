@@ -119,9 +119,10 @@
 
 <div class="mob-app" id="mob-app" hidden>
 
-    <!-- Maintenance-mode banner. Populated by applyMaintenanceBanner()
-         from /auth/status (boot + watchdog); empty when not active. -->
-    <div id="mob-maint-banner"></div>
+    <!-- Maintenance-mode banner is injected per-screen by
+         applyMaintenanceBanner() (mobile.js) as a strip BELOW each
+         screen's header — so it clears the iOS status bar / Dynamic
+         Island, which the header already reserves via safe-area inset. -->
 
     <!-- Pull-to-refresh indicator. Hidden by default; mobile.js
          tweens the transform + opacity during a touch drag from the
@@ -630,6 +631,7 @@
 <script src="/vendor/mermaid/mermaid.min.js" defer></script>
 <script src="/image-resize.js?v=20260613a" defer></script>
 <script src="/mermaid-blocks.js?v=20260613e" defer></script>
+<script src="/research-blocks.js?v=20260717a" defer></script>
 <script src="/wikilink.js?v=20260613a"></script>
 <script src="/mobile.js?v=20260714e"></script>
 

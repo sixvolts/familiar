@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -161,13 +163,15 @@ func makeResearchSynthesizer(
 		if summary == "" {
 			summary = "I've written up the research in your notes: " + title + "."
 		}
-		// Append the clickable note link the deep path can't get from the
-		// streaming "done" event (synthesis runs server-side, no SSE
-		// client). Built here with the real slugs so it never depends on
-		// the model authoring a URL; the workspace's #note/ click-
-		// delegation opens it in-pane. Skip if the summary already has one.
+		// Attach the compact completed-research card — research-blocks.js
+		// renders it inline in the transcript with the note as a prominent
+		// CTA, so a finished deep run reads as a durable artifact rather
+		// than a bare dropped link. Built server-side because the deep path
+		// has no SSE client to assemble it; degrades to a readable key/value
+		// block if the script didn't load. Skip if the model already left a
+		// note link in the summary (the card's CTA would duplicate it).
 		if !strings.Contains(summary, "#note/") {
-			summary += "\n\n" + researchNoteLink(personal.Slug, stub.Slug, title)
+			summary += "\n\n" + researchCardBlock(run, personal.Slug, stub.Slug, title)
 		}
 
 		// A stop during the (multi-minute) synthesis marks the run failed.
@@ -207,6 +211,40 @@ func researchNoteLink(bookSlug, pageSlug, title string) string {
 	}
 	return "**[📄 Open " + label + " →](#note/" +
 		url.QueryEscape(bookSlug) + "/" + url.QueryEscape(pageSlug) + ")**"
+}
+
+// researchCardBlock renders the delivered message's completed-research
+// card as a fenced ```research-card block. research-blocks.js turns it
+// into an inline card (note as a CTA) on both live delivery and reload;
+// without the script it degrades to a readable key/value block. Fields
+// are newline-stripped so a topic/title can't break the fence, and the
+// book/page slugs are raw (the frontend URL-encodes them into #note/).
+func researchCardBlock(run *admin.ResearchRun, bookSlug, pageSlug, title string) string {
+	oneLine := func(s string) string {
+		return strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(s, "\r", " "), "\n", " "))
+	}
+	return "```research-card\n" +
+		"topic: " + oneLine(run.Topic) + "\n" +
+		"areas: " + fmt.Sprintf("%d/%d", run.WorkersDone, run.WorkersTotal) + "\n" +
+		"tokens: " + compactTokens(run.Tokens) + "\n" +
+		"round: " + strconv.Itoa(run.Round) + "\n" +
+		"book: " + oneLine(bookSlug) + "\n" +
+		"page: " + oneLine(pageSlug) + "\n" +
+		"title: " + oneLine(title) + "\n" +
+		"```"
+}
+
+// compactTokens formats a token count for the card's meta row
+// (193210 → "193k", 1_250_000 → "1.2M").
+func compactTokens(n int64) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1e6)
+	case n >= 1_000:
+		return fmt.Sprintf("%dk", n/1000)
+	default:
+		return strconv.FormatInt(n, 10)
+	}
 }
 
 // researchEvidenceBookSlug mirrors admin.researchSlug for the synthesis

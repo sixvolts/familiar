@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="$HOME/repos/familiar-engine"
+REPO="$HOME/repos/familiar"
 GATEWAY="$REPO/familiar-gateway"
 
 GREEN='\033[0;32m'
@@ -16,7 +16,8 @@ fail() { echo -e "${RED}✗ $1${NC}"; exit 1; }
 # Pull
 step "Pulling latest from origin..."
 cd "$REPO"
-git pull || fail "git pull failed"
+git fetch origin || fail "git fetch failed"
+git reset --hard origin/main || fail "git reset to origin/main failed"
 
 # Build gateway (the engine is now in-process Go — no separate build)
 step "Building gateway..."

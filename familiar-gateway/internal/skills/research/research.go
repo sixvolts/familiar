@@ -260,8 +260,8 @@ type RunStore interface {
 	// terminal status a concurrent cancel wrote. Returns whether applied.
 	UpdateIfActive(ctx context.Context, id string, p admin.RunPatch) (bool, error)
 	// IncrementWorkerDone bumps live progress (§6.7): one more area done
-	// plus its token + page tally, as each worker finishes.
-	IncrementWorkerDone(ctx context.Context, id string, tokens int64, pages int) error
+	// plus its input/output-token + page tally, as each worker finishes.
+	IncrementWorkerDone(ctx context.Context, id string, inTokens, outTokens int64, pages int) error
 	// SetWorkerState transitions one area's state in the roster the card
 	// renders (queued|active|done|failed), keyed by stable task index.
 	SetWorkerState(ctx context.Context, id string, idx int, state string) error
@@ -1211,15 +1211,16 @@ func (s *Skill) reportWorkerProgress(runDBID string, info *pipeline.RouteInfo) {
 	if runDBID == "" || !s.autonomous() {
 		return
 	}
-	var tokens int64
+	var inTokens, outTokens int64
 	var pages int
 	if info != nil {
-		tokens = int64(info.InputTokens + info.OutputTokens)
+		inTokens = int64(info.InputTokens)
+		outTokens = int64(info.OutputTokens)
 		pages = info.PagesFetched
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), statusAppendTimeout)
 	defer cancel()
-	if err := s.opts.Runs.IncrementWorkerDone(ctx, runDBID, tokens, pages); err != nil {
+	if err := s.opts.Runs.IncrementWorkerDone(ctx, runDBID, inTokens, outTokens, pages); err != nil {
 		log.Printf("[research] run db=%s: progress bump failed: %v", runDBID, err)
 	}
 }

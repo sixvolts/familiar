@@ -1497,6 +1497,18 @@ ALTER TABLE research_runs
 ALTER TABLE research_runs
     ADD COLUMN IF NOT EXISTS workers JSONB NOT NULL DEFAULT '[]'::jsonb;`,
 	},
+	{
+		// Split the research token tally into input vs output so the
+		// completed-research card can show per-item in/out. Bumped per
+		// worker alongside the combined `tokens`; the note pass's in/out
+		// rides the delivered card block, not stored here. Same ALTER
+		// pattern as research_runs_stats.
+		name: "research_runs_token_io",
+		ddl: `
+ALTER TABLE research_runs
+    ADD COLUMN IF NOT EXISTS input_tokens  BIGINT NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS output_tokens BIGINT NOT NULL DEFAULT 0;`,
+	},
 }
 
 // migrateLockKey is the pg_advisory_lock key that serializes Migrate

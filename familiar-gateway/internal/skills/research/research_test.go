@@ -1133,7 +1133,7 @@ func (m *mockRuns) UpdateIfActive(ctx context.Context, id string, p admin.RunPat
 	return true, m.Update(ctx, id, p)
 }
 
-func (m *mockRuns) IncrementWorkerDone(_ context.Context, id string, tokens int64, pages int) error {
+func (m *mockRuns) IncrementWorkerDone(_ context.Context, id string, inTokens, outTokens int64, pages int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	r, ok := m.byID[id]
@@ -1141,7 +1141,9 @@ func (m *mockRuns) IncrementWorkerDone(_ context.Context, id string, tokens int6
 		return admin.ErrRunNotFound
 	}
 	r.WorkersDone++
-	r.Tokens += tokens
+	r.Tokens += inTokens + outTokens
+	r.InputTokens += inTokens
+	r.OutputTokens += outTokens
 	r.PagesRead += pages
 	return nil
 }

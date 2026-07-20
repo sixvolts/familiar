@@ -1294,23 +1294,12 @@
             if (thinkingEl) wrap.append(thinkingEl);
             wrap.append(body);
 
-            // Tool calls (assistant messages only). Phase 1c shows
-            // them as a compact summary; richer cards land later.
-            if (m.role === "assistant" && m.tool_calls) {
-                try {
-                    const calls = typeof m.tool_calls === "string"
-                        ? JSON.parse(m.tool_calls)
-                        : m.tool_calls;
-                    if (Array.isArray(calls) && calls.length > 0) {
-                        const tools = document.createElement("div");
-                        tools.className = "chat-msg-tools";
-                        tools.textContent = "tools: " + calls
-                            .map((c) => (c.function && c.function.name) || c.name || "?")
-                            .join(", ");
-                        wrap.appendChild(tools);
-                    }
-                } catch (e) { /* ignore malformed tool_calls payloads */ }
-            }
+            // Tool calls are intentionally NOT surfaced on rehydrate: the
+            // "tools: X" summary was low-signal noise (and mobile never
+            // showed it, so desktop was the odd one out). What a tool
+            // produced is already in the content/result — and a research run
+            // renders its own inline card. m.tool_calls stays persisted;
+            // we just don't paint the chip.
             return wrap;
         }
 

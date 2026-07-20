@@ -95,7 +95,7 @@ func makeResearchSynthesizer(
 		sess.SetIdentity("research", run.UserID)
 		prompt := rSkill.SynthesisPrompt(run.Topic, slugifyTopic(run.Topic),
 			researchEvidenceBookSlug(run.UserID), run.EvidencePageSlug, personal.Slug, stub.Slug)
-		summary, _, turnErr := pl.Handle(turnCtx, sess, prompt, nil)
+		summary, synthInfo, turnErr := pl.Handle(turnCtx, sess, prompt, nil)
 
 		// The note LANDING — not the turn's exit code — decides success.
 		// A deep synthesis routinely writes the note and a 20-fact memory
@@ -171,7 +171,14 @@ func makeResearchSynthesizer(
 		// block if the script didn't load. Skip if the model already left a
 		// note link in the summary (the card's CTA would duplicate it).
 		if !strings.Contains(summary, "#note/") {
-			summary += "\n\n" + researchCardBlock(run, personal.Slug, stub.Slug, title)
+			// note-writing (synthesis) token usage — the second half of the
+			// per-item in/out split the card shows (workers vs note).
+			var noteIn, noteOut int64
+			if synthInfo != nil {
+				noteIn = int64(synthInfo.InputTokens)
+				noteOut = int64(synthInfo.OutputTokens)
+			}
+			summary += "\n\n" + researchCardBlock(run, personal.Slug, stub.Slug, title, noteIn, noteOut)
 		}
 
 		// A stop during the (multi-minute) synthesis marks the run failed.
@@ -219,19 +226,25 @@ func researchNoteLink(bookSlug, pageSlug, title string) string {
 // without the script it degrades to a readable key/value block. Fields
 // are newline-stripped so a topic/title can't break the fence, and the
 // book/page slugs are raw (the frontend URL-encodes them into #note/).
-func researchCardBlock(run *admin.ResearchRun, bookSlug, pageSlug, title string) string {
+func researchCardBlock(run *admin.ResearchRun, bookSlug, pageSlug, title string, noteIn, noteOut int64) string {
 	oneLine := func(s string) string {
 		return strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(s, "\r", " "), "\n", " "))
 	}
-	return "```research-card\n" +
+	b := "```research-card\n" +
 		"topic: " + oneLine(run.Topic) + "\n" +
-		"areas: " + fmt.Sprintf("%d/%d", run.WorkersDone, run.WorkersTotal) + "\n" +
-		"tokens: " + compactTokens(run.Tokens) + "\n" +
-		"round: " + strconv.Itoa(run.Round) + "\n" +
-		"book: " + oneLine(bookSlug) + "\n" +
+		"worker_in: " + compactTokens(run.InputTokens) + "\n" +
+		"worker_out: " + compactTokens(run.OutputTokens) + "\n"
+	// note in/out omitted when unknown (0) — the frontend then shows the
+	// Note-written row without a token tail.
+	if noteIn > 0 || noteOut > 0 {
+		b += "note_in: " + compactTokens(noteIn) + "\n" +
+			"note_out: " + compactTokens(noteOut) + "\n"
+	}
+	b += "book: " + oneLine(bookSlug) + "\n" +
 		"page: " + oneLine(pageSlug) + "\n" +
 		"title: " + oneLine(title) + "\n" +
 		"```"
+	return b
 }
 
 // compactTokens formats a token count for the card's meta row

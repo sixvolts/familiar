@@ -48,6 +48,8 @@ type ResearchRun struct {
 	WorkersTotal     int    `json:"workers_total"`
 	WorkersDone      int    `json:"workers_done"`
 	Tokens           int64  `json:"tokens"`
+	InputTokens      int64  `json:"input_tokens"`
+	OutputTokens     int64  `json:"output_tokens"`
 	PagesRead        int    `json:"pages_read"`
 	EvidenceBookSlug string `json:"evidence_book_slug,omitempty"`
 	EvidencePageSlug string `json:"evidence_page_slug,omitempty"`
@@ -89,14 +91,14 @@ func NewResearchRunStore(pool *db.Pool) *ResearchRunStore {
 }
 
 const researchRunCols = `id::text, user_id, conversation_id, topic, status, round,
-	workers_total, workers_done, tokens, pages_read, evidence_book_slug,
+	workers_total, workers_done, tokens, input_tokens, output_tokens, pages_read, evidence_book_slug,
 	evidence_page_slug, note_book_slug, note_page_slug, error, workers::text`
 
 func scanResearchRun(row interface{ Scan(...any) error }) (*ResearchRun, error) {
 	var r ResearchRun
 	var workersJSON []byte
 	err := row.Scan(&r.ID, &r.UserID, &r.ConversationID, &r.Topic, &r.Status,
-		&r.Round, &r.WorkersTotal, &r.WorkersDone, &r.Tokens, &r.PagesRead,
+		&r.Round, &r.WorkersTotal, &r.WorkersDone, &r.Tokens, &r.InputTokens, &r.OutputTokens, &r.PagesRead,
 		&r.EvidenceBookSlug, &r.EvidencePageSlug, &r.NoteBookSlug, &r.NotePageSlug, &r.Error,
 		&workersJSON)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -177,14 +179,16 @@ func (s *ResearchRunStore) SetWorkerState(ctx context.Context, id string, idx in
 // tally. Called concurrently by every worker goroutine, so the
 // increments are done in SQL. tokens/pages accumulate across gap-fill
 // rounds (total work); workers_done is reset per round by Update.
-func (s *ResearchRunStore) IncrementWorkerDone(ctx context.Context, id string, tokens int64, pages int) error {
+func (s *ResearchRunStore) IncrementWorkerDone(ctx context.Context, id string, inTokens, outTokens int64, pages int) error {
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE research_runs
 		   SET workers_done = workers_done + 1,
-		       tokens = tokens + $2,
-		       pages_read = pages_read + $3,
+		       tokens = tokens + $2 + $3,
+		       input_tokens = input_tokens + $2,
+		       output_tokens = output_tokens + $3,
+		       pages_read = pages_read + $4,
 		       updated_at = NOW()
-		 WHERE id = $1::uuid`, id, tokens, pages)
+		 WHERE id = $1::uuid`, id, inTokens, outTokens, pages)
 	if err != nil {
 		return fmt.Errorf("research_runs: worker done: %w", err)
 	}

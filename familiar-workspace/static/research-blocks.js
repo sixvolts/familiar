@@ -43,11 +43,12 @@
             ".research-note-card .rc-px{display:inline-flex;align-items:flex-end;gap:3px;}",
             ".research-note-card .rc-c{display:flex;flex-direction:column;gap:3px;}",
             ".research-note-card .rc-c i{display:block;width:3px;height:3px;border-radius:1px;background:rgba(var(--pc),0.9);}",
-            ".research-note-card .rc-note{display:flex;align-items:center;gap:11px;padding:13px 14px;border-top:1px solid var(--border-subtle,rgba(255,255,255,0.06));background:var(--accent-soft-bg,rgba(106,76,224,0.14));color:var(--iris-200,#CEC2F8);font-weight:600;text-decoration:none;}",
-            ".research-note-card .rc-note:hover{background:rgba(106,76,224,0.22);}",
-            ".research-note-card .rc-note-doc{flex:0 0 auto;}",
-            ".research-note-card .rc-note-lab{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",
-            ".research-note-card .rc-note-arrow{margin-left:auto;color:var(--iris-300,#AC98F3);}",
+            ".research-note-card .rc-note{display:flex;align-items:center;gap:11px;padding:14px;border-top:1px solid var(--border-subtle,rgba(255,255,255,0.06));background:var(--accent-soft-bg,rgba(106,76,224,0.14));color:var(--iris-100,#E8E1FB);font-weight:600;text-decoration:none;transition:background .12s ease;}",
+            ".research-note-card .rc-note:hover{background:rgba(106,76,224,0.24);}",
+            ".research-note-card .rc-note-doc{flex:0 0 auto;font-size:15px;}",
+            ".research-note-card .rc-note-lab{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",
+            ".research-note-card .rc-note-open{flex:0 0 auto;margin-left:auto;display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:999px;background:rgba(106,76,224,0.22);color:var(--iris-200,#CEC2F8);font-size:12px;font-weight:600;}",
+            ".research-note-card .rc-note-arrow{color:var(--iris-300,#AC98F3);}",
         ].join("");
         (document.head || document.documentElement).appendChild(s);
     }
@@ -89,7 +90,6 @@
         injectStyle();
         var d = parse(body);
         var topic = d.topic || "your topic";
-        var round = d.round || "1";
         var title = d.title || "the note";
         var href = "";
         if (d.book && d.page) {
@@ -98,28 +98,34 @@
             href = d.note;
         }
 
-        var meta = '<span class="rc-m"><span class="rc-k">round</span> <b>' + esc(round) + "</b></span>";
-        if (d.areas) meta += '<span class="rc-m rc-m-moss"><span class="rc-k">areas</span> <b>' + esc(d.areas) + "</b></span>";
-        if (d.tokens) meta += '<span class="rc-m"><span class="rc-k">tokens</span> <b>' + esc(d.tokens) + "</b></span>";
+        // Per-item token tail, appended to the grey row label. New blocks
+        // carry worker_in/out + note_in/out; older blocks only a combined
+        // `tokens` (workers) — fall back to that so rehydrated history still
+        // reads sensibly.
+        function io(inTok, outTok) {
+            return (inTok || outTok)
+                ? " · " + esc(inTok || "0") + " in · " + esc(outTok || "0") + " out"
+                : "";
+        }
+        var workerTail = io(d.worker_in, d.worker_out) || (d.tokens ? " · " + esc(d.tokens) : "");
+        var noteTail = io(d.note_in, d.note_out);
 
         var note = "";
         if (href) {
             note = '<a class="rc-note" href="' + esc(href) + '">' +
                 '<span class="rc-note-doc">📄</span>' +
-                '<span class="rc-note-lab">Open “' + esc(title) + '”</span>' +
-                '<span class="rc-note-arrow">→</span></a>';
+                '<span class="rc-note-lab">' + esc(title) + '</span>' +
+                '<span class="rc-note-open">Open<span class="rc-note-arrow">→</span></span></a>';
         }
 
         return '<div class="research-note-card">' +
             '<div class="rc-head"><div class="rc-title">' +
                 '<div class="rc-t">Researched <span class="rc-topic">“' + esc(topic) + '”</span></div>' +
-                '<div class="rc-s">all areas gathered · note written</div></div>' +
-                '<span class="rc-done-badge">✓ done</span></div>' +
+                '</div></div>' +
             '<div class="rc-roster">' +
-                '<div class="rc-row rc-done"><span class="rc-slot">' + pixels() + '</span><span class="rc-label">Research workers</span><span class="rc-wstate">complete</span></div>' +
-                '<div class="rc-row rc-done"><span class="rc-slot">' + pixels() + '</span><span class="rc-label">Note written</span><span class="rc-wstate">complete</span></div>' +
+                '<div class="rc-row rc-done"><span class="rc-slot">' + pixels() + '</span><span class="rc-label">Research workers' + workerTail + '</span><span class="rc-wstate">complete</span></div>' +
+                '<div class="rc-row rc-done"><span class="rc-slot">' + pixels() + '</span><span class="rc-label">Note written' + noteTail + '</span><span class="rc-wstate">complete</span></div>' +
             "</div>" +
-            '<div class="rc-meta">' + meta + "</div>" +
             note +
         "</div>";
     }

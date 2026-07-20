@@ -288,15 +288,18 @@ func TestResearchRunStore_IncrementStats(t *testing.T) {
 	if run.EvidenceBookSlug != "research:ru" {
 		t.Errorf("evidence_book_slug = %q, want research:ru", run.EvidenceBookSlug)
 	}
-	if err := store.IncrementWorkerDone(ctx, run.ID, 12000, 4); err != nil {
+	if err := store.IncrementWorkerDone(ctx, run.ID, 9000, 3000, 4); err != nil {
 		t.Fatalf("inc 1: %v", err)
 	}
-	if err := store.IncrementWorkerDone(ctx, run.ID, 8000, 3); err != nil {
+	if err := store.IncrementWorkerDone(ctx, run.ID, 6000, 2000, 3); err != nil {
 		t.Fatalf("inc 2: %v", err)
 	}
 	got, _ := store.Get(ctx, run.ID)
 	if got.WorkersDone != 2 || got.Tokens != 20000 || got.PagesRead != 7 {
 		t.Errorf("after 2 increments = done %d / tokens %d / pages %d, want 2 / 20000 / 7",
 			got.WorkersDone, got.Tokens, got.PagesRead)
+	}
+	if got.InputTokens != 15000 || got.OutputTokens != 5000 {
+		t.Errorf("token split = in %d / out %d, want 15000 / 5000", got.InputTokens, got.OutputTokens)
 	}
 }

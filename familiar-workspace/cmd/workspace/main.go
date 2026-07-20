@@ -148,6 +148,7 @@ func docSecurityHeaders(w http.ResponseWriter) {
 }
 
 func makeStaticHandler(staticDir string) http.HandlerFunc {
+	stamper := newAssetStamper(staticDir)
 	indexPath := filepath.Join(staticDir, "index.html")
 	mobilePath := filepath.Join(staticDir, "mobile.html")
 	hasMobile := false
@@ -186,7 +187,7 @@ func makeStaticHandler(staticDir string) http.HandlerFunc {
 		if rel == "" {
 			docSecurityHeaders(w)
 			w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-			http.ServeFile(w, r, pickShell(r))
+			stamper.serveShell(w, r, pickShell(r))
 			return
 		}
 		full := filepath.Join(staticDir, filepath.Clean("/"+rel))
@@ -205,7 +206,7 @@ func makeStaticHandler(staticDir string) http.HandlerFunc {
 		}
 		docSecurityHeaders(w)
 		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-		http.ServeFile(w, r, pickShell(r))
+		stamper.serveShell(w, r, pickShell(r))
 	}
 }
 

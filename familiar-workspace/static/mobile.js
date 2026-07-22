@@ -515,6 +515,20 @@
             }
         }
 
+        // A persisted message is worth painting only when it's actual
+        // conversation, not agentic plumbing. The gateway persists the
+        // whole tool loop so a restart can replay it to the model:
+        //   • role="tool" — tool-result rows.
+        //   • assistant turns that carried ONLY tool calls — these persist
+        //     with empty content (the spawn_research_workers kickoff, etc.).
+        // Neither is a reply; rendering them leaves bare "Familiar" bubbles
+        // with nothing under them. Skip both.
+        function isDisplayableMsg(m) {
+            if (!m || m.role === 'tool') return false;
+            if (m.role === 'assistant' && !String(m.content || '').trim()) return false;
+            return true;
+        }
+
         function renderThread() {
             var scroll = document.getElementById('mob-thread-scroll');
             if (!scroll) return;
@@ -526,14 +540,16 @@
             // Kick off markdown deps async; render plain text first
             // for fast paint, then upgrade in place once the renderer
             // is ready. Same pattern as desktop chat.js.
-            for (var i = 0; i < state.messages.length; i++) {
-                scroll.appendChild(messageEl(state.messages[i]));
+            var visible = state.messages.filter(isDisplayableMsg);
+            for (var i = 0; i < visible.length; i++) {
+                scroll.appendChild(messageEl(visible[i]));
             }
             scroll.scrollTop = scroll.scrollHeight;
             ensureMarkdownDeps().then(function (renderMD) {
                 scroll.innerHTML = '';
-                for (var i = 0; i < state.messages.length; i++) {
-                    scroll.appendChild(messageEl(state.messages[i], renderMD));
+                var vis = state.messages.filter(isDisplayableMsg);
+                for (var i = 0; i < vis.length; i++) {
+                    scroll.appendChild(messageEl(vis[i], renderMD));
                 }
                 scroll.scrollTop = scroll.scrollHeight;
             });

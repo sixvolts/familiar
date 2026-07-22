@@ -1212,6 +1212,21 @@
             await newConversation(shardID);
         }
 
+        // A persisted message is worth painting only when it's actual
+        // conversation, not agentic plumbing. The gateway persists the
+        // whole tool loop so a restart can replay it to the model:
+        //   • role="tool" — tool-result rows.
+        //   • assistant turns that carried ONLY tool calls — these persist
+        //     with empty content (the spawn_research_workers kickoff, etc.).
+        // Neither is a reply. We no longer paint a "tools: X" chip, so
+        // rendering them just leaves bare "Familiar" bubbles with nothing
+        // under them. Skip both; m.tool_calls stays persisted regardless.
+        function isDisplayableMessage(m) {
+            if (!m || m.role === "tool") return false;
+            if (m.role === "assistant" && !String(m.content || "").trim()) return false;
+            return true;
+        }
+
         async function renderMessages() {
             messagesEl.innerHTML = "";
             if (localState.messages.length === 0) {
@@ -1223,13 +1238,7 @@
             }
             const renderMD = await ensureMarkdownDeps();
             for (const m of localState.messages) {
-                // The gateway now persists the agentic loop's tool
-                // rows (role="tool") so post-restart hydration can
-                // replay them to the model. They're plumbing, not
-                // user-facing conversation — hide them in the UI.
-                // The preceding assistant message's "tools: foo,
-                // bar" tag is what surfaces the tool work visually.
-                if (m.role === "tool") continue;
+                if (!isDisplayableMessage(m)) continue;
                 messagesEl.appendChild(renderMessage(m, renderMD));
             }
             // If the last real turn is an unanswered user message, the

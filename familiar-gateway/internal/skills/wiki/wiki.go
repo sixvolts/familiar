@@ -757,6 +757,38 @@ func pageLocationData(bookSlug, pageSlug, title string) json.RawMessage {
 // updatePage replaces the body. Title is preserved when omitted by
 // passing nil into PagePatch — the store treats nil fields as
 // "leave alone".
+// stripReadAffixes removes the title H1 and metadata footer that
+// formatPageFull injects for read_page, if an agent echoed them back into
+// update_page content. read_page shows "# {title}\n\n{body}\n\n---\nbook: ...";
+// update_page stores raw body, so an agent that copies what it read would
+// otherwise double the header and bake the footer into the page. Only strips
+// a leading "# {title}" that matches this page's actual title (so a real,
+// intentional H1 with different text is preserved), and only a trailing
+// "---\nbook: ..." block that matches the footer shape.
+func stripReadAffixes(content, title string) string {
+	out := content
+	// Leading injected title header: "# {title}" as the first line,
+	// followed by a blank line. Match against the real title only.
+	if strings.TrimSpace(title) != "" {
+		lead := "# " + strings.TrimSpace(title)
+		trimmed := strings.TrimLeft(out, "\n")
+		if trimmed == lead || strings.HasPrefix(trimmed, lead+"\n") {
+			rest := strings.TrimPrefix(trimmed, lead)
+			out = strings.TrimLeft(rest, "\n")
+		}
+	}
+	// Trailing metadata footer: a "---" fence line followed by a
+	// "book: " line (the formatPageFull footer). Cut from the last such
+	// fence to the end when the block looks like the injected footer.
+	if idx := strings.LastIndex(out, "\n---\n"); idx != -1 {
+		tail := out[idx+len("\n---\n"):]
+		if strings.HasPrefix(strings.TrimLeft(tail, " "), "book: ") {
+			out = strings.TrimRight(out[:idx], "\n")
+		}
+	}
+	return out
+}
+
 func (s *Skill) updatePage(ctx context.Context, userID, bookSlug, pageSlug, newTitle, content string) (skills.ToolResult, error) {
 	bk, role, err := s.resolveBook(ctx, userID, bookSlug)
 	if errors.Is(err, admin.ErrBookNotFound) {
@@ -768,6 +800,19 @@ func (s *Skill) updatePage(ctx context.Context, userID, bookSlug, pageSlug, newT
 	if !canWrite(role) {
 		return skills.ToolResult{Error: fmt.Sprintf("Read-only on %q (role: %s). Ask an owner to grant writer access.", bk.Name, role)}, nil
 	}
+	// Guard the read_page/update_page round-trip: an agent that echoes back
+	// what read_page showed it would otherwise double the injected title
+	// header and bake in the metadata footer. Resolve the effective title
+	// (incoming retitle, else current page title) so the leading-header
+	// match uses the right string.
+	// Match against the CURRENT title — that is what read_page rendered as
+	// the "# {title}" header the agent may have echoed back, regardless of a
+	// concurrent retitle in this same call.
+	curTitle := newTitle
+	if cur, cerr := s.backend().GetPage(ctx, bk.ID, pageSlug); cerr == nil {
+		curTitle = cur.Title
+	}
+	content = stripReadAffixes(content, curTitle)
 	patch := admin.PagePatch{Content: &content}
 	if strings.TrimSpace(newTitle) != "" {
 		patch.Title = &newTitle

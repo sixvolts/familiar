@@ -780,7 +780,12 @@ func runHTTPAdapter(ctx context.Context, d httpAdapterDeps, adminHOut **admin.Ha
 							log.Printf("[actions] warning: start: %v", err)
 						} else {
 							adminH.AttachActions(actionsStore, runner)
-							defer runner.Stop()
+							// Tie the runner lifetime to ctx, NOT this function
+							// frame: runHTTPAdapter returns after wiring, so a
+							// plain `defer runner.Stop()` would halt the cron
+							// driver microseconds after Start() — entries stay
+							// registered but never fire (the 7/15 regression).
+							go func() { <-ctx.Done(); runner.Stop() }()
 							log.Printf("[actions] scheduled-actions runner started")
 						}
 					}

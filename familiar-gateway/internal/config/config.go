@@ -595,7 +595,13 @@ type ModelConfig struct {
 	ContextWindow  int      `toml:"context_window"`
 	Capabilities   []string `toml:"capabilities"`
 	LatencyProfile string   `toml:"latency_profile"` // "local", "remote"
-	MaxConcurrent  int      `toml:"max_concurrent"`
+	// Chat marks this model as the interactive chat backend.
+	// GetChatModelID prefers the (single) chat=true model; when
+	// none is set it falls back to the first role-less model in
+	// lex order. Lets a heavy pin-target (e.g. research) coexist
+	// with the chat model without lex-order accidents.
+	Chat          bool `toml:"chat"`
+	MaxConcurrent int  `toml:"max_concurrent"`
 
 	// DisplayName is the human-readable label rendered in the chat
 	// UI's model menu. Falls back to ID when blank — operators can

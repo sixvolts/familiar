@@ -131,17 +131,28 @@ func (r *Router) GetRegistry() *Registry {
 func (r *Router) GetChatModelID() string {
 	r.registry.mu.RLock()
 	defer r.registry.mu.RUnlock()
-	var ids []string
+	// Explicit wins: an operator-flagged chat=true model is the chat
+	// backend regardless of id ordering, so a heavy pin-target (e.g. a
+	// research model) can share the registry without stealing chat.
+	var flagged, roleless []string
 	for id, e := range r.registry.entries {
+		if e.Config.Chat {
+			flagged = append(flagged, id)
+		}
 		if e.Config.Role == "" {
-			ids = append(ids, id)
+			roleless = append(roleless, id)
 		}
 	}
-	if len(ids) == 0 {
+	if len(flagged) > 0 {
+		sort.Strings(flagged)
+		return flagged[0]
+	}
+	// Back-compat: no chat flag set — first role-less model in lex order.
+	if len(roleless) == 0 {
 		return ""
 	}
-	sort.Strings(ids)
-	return ids[0]
+	sort.Strings(roleless)
+	return roleless[0]
 }
 
 // GetSidecarModelID returns the canonical model ID for the sidecar from

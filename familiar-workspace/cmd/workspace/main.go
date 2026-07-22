@@ -147,6 +147,27 @@ func docSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("Referrer-Policy", "same-origin")
 }
 
+// staticAssetExts are the file extensions the app serves as built
+// assets. A request for one of these that misses on disk is a genuine
+// 404 (a mis-deploy or a stale cache-busted URL), never a client-side
+// SPA route — those are extensionless (/chat, /notes/<slug>). Kept as an
+// allowlist rather than "any extension" so a note slug with a dot can't
+// be mistaken for an asset and 404 its own page.
+var staticAssetExts = map[string]bool{
+	".js": true, ".css": true, ".map": true, ".json": true,
+	".svg": true, ".png": true, ".jpg": true, ".jpeg": true,
+	".gif": true, ".webp": true, ".ico": true, ".woff": true,
+	".woff2": true, ".ttf": true, ".otf": true, ".webmanifest": true,
+	".txt": true, ".xml": true, ".wasm": true,
+}
+
+// isStaticAssetPath reports whether a request path names a built asset,
+// by its extension. Used to 404 missing assets instead of falling back
+// to the SPA shell.
+func isStaticAssetPath(rel string) bool {
+	return staticAssetExts[strings.ToLower(filepath.Ext(rel))]
+}
+
 func makeStaticHandler(staticDir string) http.HandlerFunc {
 	stamper := newAssetStamper(staticDir)
 	indexPath := filepath.Join(staticDir, "index.html")
@@ -202,6 +223,17 @@ func makeStaticHandler(staticDir string) http.HandlerFunc {
 		info, err := os.Stat(full)
 		if err == nil && !info.IsDir() {
 			http.ServeFile(w, r, full)
+			return
+		}
+		// A MISSING path that names a built asset (.js/.css/.svg/…) must
+		// 404 — never fall through to the SPA shell. Serving index.html
+		// for /research-blocks.js returns HTML with a 200: the browser
+		// then parses HTML as JavaScript, the script silently fails to
+		// define its globals (e.g. window.familiarResearchCard), and the
+		// feature it powers quietly degrades with no error anywhere. Only
+		// extensionless routes are client-side routes worth the fallback.
+		if isStaticAssetPath(rel) {
+			http.NotFound(w, r)
 			return
 		}
 		docSecurityHeaders(w)

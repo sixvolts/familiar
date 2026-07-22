@@ -8,7 +8,10 @@ Familiar is a self-hosted AI assistant that runs entirely on your own hardware �
 ![Familiar workspace — chat alongside a live note](docs/screenshot.png)
 
 
-It scales to your setup: run it on a single GPU with a model like Qwen 3.6 or Gemma4, or on a Strix Halo / DGX Spark box with something bigger like Qwen3.5-122B. Unsloth's Q4_K_XL quants are a great place to start if you are looking for something to grab and go. Everything is local and open source — no API keys, no per-token bills, no data leaving your machine, and the whole stack is yours to read, fork, and rewire.
+It scales to your setup: run it on a single GPU with a model like Qwen 3.6 or Gemma4, or on a Strix Halo / DGX Spark box with something bigger like Qwen3.5-122B. Unsloth's Q4_K_XL quants are a great place to start if you are looking for something to grab and go. Everything is local and open source — no API keys, no per-token bills, no data leaving your machine, and the whole stack is yours to read, fork, and rewire. Our test setup runs these models for our main model and sidecar:
+
+Main Model: https://huggingface.co/SixVolts/Qwen3.5-122B-A10B-Opus-Reasoning-MTP-GGUF 
+Sidecar(Classification/routing): https://huggingface.co/unsloth/gemma-4-31B-it-qat-GGUF
 
 ## Chat
 A chat interface for your local AI model that is tied into all of your data - your notes, wikis, and automations. Supports imported skills and system skills like research mode for doing deep dives and searches.

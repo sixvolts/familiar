@@ -64,7 +64,13 @@
                 document.head.appendChild(css);
                 await Promise.all([loadScript(MD_CDN.marked), loadScript(MD_CDN.dompurify)]);
                 await loadScript(MD_CDN.hljsJS);
-                if (window.marked && window.marked.use && window.hljs) {
+                if (window.marked && window.marked.use) {
+                    // NOT gated on window.hljs: the vendored highlight core is
+                    // a CommonJS build that never sets the global, so gating
+                    // the whole override on it silently dropped the research-
+                    // card hook too (cards rendered as raw fenced text). hljs
+                    // use is guarded per-call; highlighting degrades to plain
+                    // escaped code when it's absent.
                     window.marked.use({
                         renderer: {
                             code: function (code, infostring) {
@@ -73,7 +79,7 @@
                                 if (lang === 'research-card' && window.familiarResearchCard) {
                                     return window.familiarResearchCard.html(code);
                                 }
-                                if (lang && window.hljs.getLanguage && window.hljs.getLanguage(lang)) {
+                                if (lang && window.hljs && window.hljs.getLanguage && window.hljs.getLanguage(lang)) {
                                     try {
                                         return '<pre><code class="hljs language-' + lang + '">'
                                             + window.hljs.highlight(code, { language: lang }).value

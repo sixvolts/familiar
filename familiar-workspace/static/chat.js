@@ -95,10 +95,16 @@
                 // syntax-highlight without bloating the bundle.
                 // hljs.core ships no languages; each is loaded
                 // separately. We'll lazy-load on first use too.
-                if (window.marked && window.marked.use && window.hljs) {
-                    // marked extension hook for code blocks — runs
-                    // hljs against any language tag it recognizes,
-                    // falls back to plain text otherwise.
+                if (window.marked && window.marked.use) {
+                    // marked extension hook for code blocks — renders the
+                    // research-card fence as an inline card and runs hljs
+                    // against any language tag it recognizes. NOT gated on
+                    // window.hljs: the vendored highlight core is a CommonJS
+                    // build that never sets the global, so gating the whole
+                    // override on it silently dropped the research-card hook
+                    // too (cards rendered as raw fenced text). hljs use is
+                    // guarded per-call instead; highlighting degrades to
+                    // plain escaped code when it's absent.
                     window.marked.use({
                         renderer: {
                             code(code, infostring) {
@@ -109,7 +115,7 @@
                                 if (lang === "research-card" && window.familiarResearchCard) {
                                     return window.familiarResearchCard.html(code);
                                 }
-                                if (lang && window.hljs.getLanguage && window.hljs.getLanguage(lang)) {
+                                if (lang && window.hljs && window.hljs.getLanguage && window.hljs.getLanguage(lang)) {
                                     try {
                                         return '<pre><code class="hljs language-' + lang + '">'
                                             + window.hljs.highlight(code, { language: lang }).value

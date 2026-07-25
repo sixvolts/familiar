@@ -23,6 +23,7 @@ import (
 	"github.com/familiar/gateway/internal/memengine"
 	"github.com/familiar/gateway/internal/memevents"
 	"github.com/familiar/gateway/internal/memory"
+	"github.com/familiar/gateway/internal/modelrole"
 	"github.com/familiar/gateway/internal/pageevents"
 	"github.com/familiar/gateway/internal/pipeline"
 	"github.com/familiar/gateway/internal/push"
@@ -132,6 +133,7 @@ func runHTTPAdapter(ctx context.Context, d httpAdapterDeps, adminHOut **admin.Ha
 					resolver:  identityResolver,
 					sessions:  sm,
 					skills:    skillReg,
+					roles:     d.roleRes,
 				})
 				log.Printf("[admin] status provider attached")
 				// Shards CRUD + tokens UI (Phase 1 Steps 8-9).
@@ -909,5 +911,6 @@ type httpAdapterDeps struct {
 	promptStore      *ctxbuild.PromptStore
 	memEvents        *memevents.Bus
 	reembedSweeper   *memengine.ReembedSweeper
+	roleRes          *modelrole.Resolver
 	adapterErrs      chan error
 }

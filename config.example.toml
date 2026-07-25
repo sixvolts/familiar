@@ -141,6 +141,11 @@ allowed_users = []                    # Slack user IDs; empty = allow all
 # nomic-embed-text-v1.5 served by llama-server. The pipeline prepends
 # "search_query: " for retrieval queries automatically. Dimension must
 # match the pgvector column the memories table was created with.
+# This block still works and needs no edit: at load the gateway turns it
+# into a provider="embeddings" [[models]] entry (id "embedder/legacy")
+# and points [roles.embedder] at it — which is what finally puts your
+# embedder under the heartbeat. To give it a BACKUP, declare the models
+# explicitly and set [roles.embedder] instead (see the roles section).
 [embedder]
 endpoint = ""                         # e.g., "http://127.0.0.1:8100"
 model = "nomic-embed-text"
@@ -173,29 +178,50 @@ confidence_threshold = 0.6            # below this, fall through to rule-based s
 # at startup). The old opaque small/medium "slot" roles are gone —
 # the gateway prints the resolved task → model → endpoint table at
 # startup so you can verify routing.
+#
+# The per-task keys below still work, but [roles] is now the preferred
+# way to express them — same assignment, plus an optional backup per
+# task. See the "Roles: primary/backup failover" section further down.
 [sidecar]
 enabled = false
-embedder_endpoint = ""                # e.g., "http://127.0.0.1:8100" (embedder is separate)
 connect_timeout_ms = 500
 request_timeout_ms = 10000
-retry_interval_seconds = 10
 fallback_on_failure = true            # route to backend if sidecar dies
 
+# DEPRECATED, parsed but ignored (each logs a warning at startup):
+#   embedder_endpoint       — never read at all. Configure a
+#                             provider="embeddings" [[models]] entry and
+#                             point [roles.embedder] at it instead.
+#   retry_interval_seconds  — the sidecar no longer runs its own health
+#                             loop; every model shares the one heartbeat
+#                             at [roles].health_interval_secs.
+# embedder_endpoint = ""
+# retry_interval_seconds = 10
+
 # Task → model assignment. Each value must match a [[models]] entry
-# id; the gateway resolves it to that model's endpoint.
-default_model = "sidecar/gemma-4-e4b"
+# id; the gateway resolves it to that model's endpoint. A task naming an
+# id you never declared is skipped with a warning at startup.
+#
+# Equivalent in the newer syntax, which also accepts a `backup`:
+#   [roles]
+#   fallback = "sidecar/gemma-4-26b-a4b"
+#   [roles.classify]
+#   primary = "sidecar/gemma-4-26b-a4b"
+default_model = "sidecar/gemma-4-26b-a4b"
 
 # Critical path — blocks time-to-first-token. Use the fastest model.
-classify_model       = "sidecar/gemma-4-e4b"
-condense_model       = "sidecar/gemma-4-e4b"
-expand_queries_model = "sidecar/gemma-4-e4b"
+# If you run a second, smaller instance (say a 4B alongside a 31B),
+# declare it in [[models]] and point these three at it instead.
+classify_model       = "sidecar/gemma-4-26b-a4b"
+condense_model       = "sidecar/gemma-4-26b-a4b"
+expand_queries_model = "sidecar/gemma-4-26b-a4b"
 
 # Background / post-turn — runs after generation. Use a capable model.
-extract_model      = "sidecar/gemma-4-31b"
-summarize_model    = "sidecar/gemma-4-31b"
-conflict_model     = "sidecar/gemma-4-31b"
-relationship_model = "sidecar/gemma-4-31b"
-entity_group_model = "sidecar/gemma-4-31b"
+extract_model      = "sidecar/gemma-4-26b-a4b"
+summarize_model    = "sidecar/gemma-4-26b-a4b"
+conflict_model     = "sidecar/gemma-4-26b-a4b"
+relationship_model = "sidecar/gemma-4-26b-a4b"
+entity_group_model = "sidecar/gemma-4-26b-a4b"
 
 # extract_large_model routes large-document extraction (research
 # write-ups, multi-KB notes) to a bigger model that holds the whole
@@ -219,12 +245,17 @@ extract_large_model = "gpu-host/qwen3.5-122b"
 # Requires PostgreSQL with the pgvector extension:
 #   CREATE EXTENSION vector;
 [memory]
-use_sidecar_embedder = false
 store = "local"
 local_dsn = ""                        # postgresql://familiar:pw@localhost:5432/familiar_memory
 relevance_threshold = 0.55            # cosine floor for retrieval (dense arm)
 max_injected_memories = 5             # top-k into context
 dedup_threshold = 0.95                # cosine above this = duplicate
+
+# DEPRECATED, parsed but ignored: use_sidecar_embedder. It routed
+# embedding through a sidecar method that always returned an error, so
+# every call silently fell through to the HTTP embedder anyway.
+# Embedding now resolves through [roles.embedder].
+# use_sidecar_embedder = false
 
 # Memory retrieval is hybrid by default: dense pgvector similarity +
 # Postgres full-text search, fused with Reciprocal Rank Fusion. No
@@ -492,6 +523,96 @@ capabilities    = [
 ]
 latency_profile = "instant"
 max_concurrent  = 1
+
+
+# ─── Roles: primary/backup failover ─────────────────────────────────
+# Every job the gateway sends to a model is a "role", and each role can
+# name a primary and a backup from [[models]] above. Roles resolve on
+# every call against the heartbeat, so if a primary stops answering its
+# traffic moves to the backup, and moves back on its own once the
+# primary recovers. Nothing here is required: with a single model and no
+# [roles] block, routing behaves exactly as it did before.
+#
+# The roles:
+#   chat            the interactive answering model
+#   classify        \
+#   condense         | critical path — these run before the model can
+#   expand_queries  /  start generating, so keep them fast
+#   extract         \
+#   extract_large    |
+#   summarize        | background / post-turn work
+#   conflict         |
+#   relationship     |
+#   entity_group    /
+#   embedder        text → vector (see the note below — it has a rule)
+#   rerank          optional cross-encoder precision pass
+#   research_worker / research_writer   autonomous research runs
+#
+# MIGRATING: you don't have to. The gateway folds the older keys into
+# these chains at load — a chat=true model becomes roles.chat.primary,
+# [sidecar].classify_model becomes roles.classify.primary, role="small"
+# / "medium" slot tags map to the tasks they used to serve, and an
+# [embedder] block is promoted to a real model entry. Writing an
+# explicit [roles.<name>] always overrides whatever was inferred. Add a
+# `backup` to any role to gain failover for it.
+
+# [roles]
+# fallback is the last resort for EVERY role whose own chain is
+# exhausted — typically the small always-on sidecar model. Keeping one
+# here means no role can ever resolve to nothing.
+# fallback = "sidecar/gemma-4-26b-a4b"
+#
+# Heartbeat + anti-flap. Every model in [[models]] is probed on this
+# interval. A model is only demoted after fail_threshold CONSECUTIVE
+# failed probes and only restored after recover_threshold consecutive
+# successes, so one blip can't swing your chat traffic onto the backup
+# and straight back.
+# health_interval_secs = 30
+# health_timeout_secs  = 15
+# fail_threshold       = 2
+# recover_threshold    = 2
+
+# [roles.chat]
+# primary = "gpu-host/qwen3.5-122b"
+# backup  = "sidecar/gemma-4-26b-a4b"   # answers while the big box is down
+
+# [roles.classify]
+# primary = "sidecar/gemma-4-26b-a4b"
+
+# [roles.extract_large]
+# primary = "gpu-host/qwen3.5-122b"
+
+# The embedder has one hard rule: a backup MUST declare the same
+# `model` and `dimension` as the primary, because vectors from two
+# different embedding models aren't comparable — cosine distance
+# against your stored rows would be meaningless (and outright fails at
+# different widths). So a backup embedder means a second instance of
+# the SAME model, not a different one. The gateway refuses to start on
+# a mismatch rather than silently degrading your retrieval.
+#
+# This matters more than it looks: a fact written while no embedder is
+# reachable is stored and findable by keyword, but invisible to
+# semantic search. Those rows are queued and embedded automatically
+# once an embedder returns (watch pending_embeds on the admin memory
+# health card), but a backup avoids the gap entirely.
+#
+# [[models]]
+# id        = "embed/nomic-a"
+# provider  = "embeddings"            # serves /v1/embeddings
+# endpoint  = "http://127.0.0.1:8100"
+# model     = "nomic-embed-text"
+# dimension = 768
+#
+# [[models]]
+# id        = "embed/nomic-b"
+# provider  = "embeddings"
+# endpoint  = "http://10.0.0.11:8100"
+# model     = "nomic-embed-text"      # same model as the primary
+# dimension = 768                     # and the same width
+#
+# [roles.embedder]
+# primary = "embed/nomic-a"
+# backup  = "embed/nomic-b"
 
 
 # ── Public-link sharing ─────────────────────────────────────────

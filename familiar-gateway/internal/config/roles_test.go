@@ -264,3 +264,60 @@ func TestLegacyEmbedderBlockLoadsAndValidates(t *testing.T) {
 		t.Fatalf("embedder chain = %v, want [%s]", chain, legacyEmbedderModelID)
 	}
 }
+
+// UPGRADE SAFETY: a legacy [sidecar].*_model naming a model that isn't
+// in [[models]] used to warn and skip that task. It must not become a
+// boot failure — an operator upgrading with that mismatch has a config
+// that ran yesterday.
+func TestDerivedRoleWithUnknownModelIsNotFatal(t *testing.T) {
+	c := DefaultConfig()
+	c.Embedder = EmbedderConfig{}
+	c.Models = []ModelConfig{{ID: "chat", Endpoint: "e", Provider: "llama-server", Chat: true}}
+	c.Sidecar = SidecarConfig{Enabled: true, ClassifyModel: "sidecar/typo"}
+	c.normalizeRoles()
+
+	if err := c.Validate(); err != nil {
+		t.Fatalf("a legacy typo must stay non-fatal on upgrade, got: %v", err)
+	}
+	// And the bad candidate is pruned, so the resolver never hands the
+	// sidecar a model the registry can't resolve.
+	if c.Roles.Classify.Primary != "" {
+		t.Errorf("unknown derived candidate should be pruned, got %q", c.Roles.Classify.Primary)
+	}
+	if _, present := c.Roles.ResolvedChains()[RoleClassify]; present {
+		t.Error("a pruned role should not appear in the resolved chains")
+	}
+}
+
+// ...but a hand-written [roles] typo IS fatal: that's new config the
+// operator just wrote, and silently skipping it would hide the mistake.
+func TestExplicitRoleWithUnknownModelIsFatal(t *testing.T) {
+	c := DefaultConfig()
+	c.Embedder = EmbedderConfig{}
+	c.Models = []ModelConfig{{ID: "chat", Endpoint: "e", Provider: "llama-server", Chat: true}}
+	c.Roles.Classify = RoleChain{Primary: "sidecar/typo"}
+	c.normalizeRoles()
+
+	if err := c.Validate(); err == nil {
+		t.Fatal("an explicit [roles] typo should fail validation")
+	}
+}
+
+// When only a derived primary is missing, a valid backup is promoted
+// rather than the whole role being dropped.
+func TestDerivedBackupPromotedWhenPrimaryPruned(t *testing.T) {
+	c := DefaultConfig()
+	c.Embedder = EmbedderConfig{}
+	c.Models = []ModelConfig{
+		{ID: "chat", Endpoint: "e", Provider: "llama-server", Chat: true},
+		{ID: "real", Endpoint: "e", Provider: "llama-server"},
+	}
+	// Simulate a derived chain (not in explicitRoles) with a bad primary.
+	c.normalizeRoles()
+	c.Roles.Summarize = RoleChain{Primary: "ghost", Backup: "real"}
+	c.pruneDerivedRoles()
+
+	if c.Roles.Summarize.Primary != "real" || c.Roles.Summarize.Backup != "" {
+		t.Fatalf("expected the backup promoted to primary, got %+v", c.Roles.Summarize)
+	}
+}

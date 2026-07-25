@@ -112,16 +112,31 @@ func (c *Config) Validate() error {
 		byID[c.Models[i].ID] = &c.Models[i]
 	}
 	if c.Roles.Fallback != "" {
-		if _, ok := byID[c.Roles.Fallback]; !ok {
+		fb, ok := byID[c.Roles.Fallback]
+		if !ok {
 			return fmt.Errorf("roles.fallback = %q has no matching [[models]] entry", c.Roles.Fallback)
 		}
+		// The global fallback backs the text-generation roles, so it has
+		// to be a generation model. An embeddings entry here would be a
+		// candidate that can only fail.
+		if fb.Provider == "embeddings" {
+			return fmt.Errorf("roles.fallback = %q is an embeddings model; the global fallback backs the chat and sidecar roles, so it must be a chat-capable model (set [roles.embedder] for embedders)",
+				c.Roles.Fallback)
+		}
 	}
+	// Strict for chains the operator wrote by hand; derived chains were
+	// already pruned-and-warned in normalizeRoles (a legacy config that
+	// used to boot with a warning must keep booting).
 	for _, role := range RoleNames {
 		chain := c.Roles.Chain(role)
 		for _, id := range chain.Candidates() {
-			if _, ok := byID[id]; !ok {
+			if _, ok := byID[id]; ok {
+				continue
+			}
+			if c.explicitRoles[role] {
 				return fmt.Errorf("roles.%s references model %q which has no matching [[models]] entry", role, id)
 			}
+			log.Printf("[config] warning: role %q references unknown model %q — role will be skipped", role, id)
 		}
 	}
 
@@ -189,15 +204,32 @@ func (c *Config) Validate() error {
 	//   - a [[models]] entry with role="small" (legacy role path),
 	//   - a literal sidecar.router_endpoint (legacy).
 	// router_endpoint is no longer required on its own.
+	// A [roles.<task>] chain is the preferred way to route a sidecar task,
+	// so it counts as configured routing too — otherwise a config that
+	// uses only the new syntax would be rejected and told to go back to
+	// the legacy keys.
+	sidecarRoleConfigured := false
+	for _, task := range []string{
+		RoleClassify, RoleCondense, RoleExpandQueries, RoleExtract,
+		RoleExtractLarge, RoleSummarize, RoleConflict, RoleRelationship,
+		RoleEntityGroup,
+	} {
+		if !c.Roles.Chain(task).IsEmpty() {
+			sidecarRoleConfigured = true
+			break
+		}
+	}
 	_, hasSmallRole := roleClaim[ModelSlotSmall]
 	if c.Sidecar.Enabled &&
+		!sidecarRoleConfigured &&
+		c.Roles.Fallback == "" &&
 		!c.Sidecar.HasExplicitTaskModels() &&
 		!hasSmallRole &&
 		c.Sidecar.RouterEndpoint == "" {
 		return fmt.Errorf("sidecar.enabled=true but no routing is configured: " +
-			"set [sidecar].default_model (or per-task *_model), " +
-			`assign role="small" to a [[models]] entry, ` +
-			"or set sidecar.router_endpoint")
+			"set a [roles.<task>] chain (e.g. [roles.classify].primary), " +
+			"or [roles].fallback, " +
+			"or the legacy [sidecar].default_model / per-task *_model")
 	}
 
 	// A task → model assignment that points at a model ID absent from

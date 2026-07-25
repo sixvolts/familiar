@@ -729,6 +729,7 @@ func main() {
 			promptStore:      promptStore,
 			memEvents:        memEvents,
 			reembedSweeper:   reembedSweeper,
+			roleRes:          roleRes,
 			adapterErrs:      adapterErrs,
 		}, &adminH)
 	}

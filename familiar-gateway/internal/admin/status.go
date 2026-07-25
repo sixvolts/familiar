@@ -19,10 +19,33 @@ type StatusProvider interface {
 type StatusSnapshot struct {
 	Gateway  GatewayStatus `json:"gateway"`
 	Models   []ModelStatus `json:"models"`
+	Roles    []RoleStatus  `json:"roles,omitempty"`
 	Memory   MemoryStatus  `json:"memory"`
 	Users    UserStatus    `json:"users"`
 	Sessions SessionStatus `json:"sessions"`
 	Skills   []string      `json:"skills"`
+}
+
+// RoleStatus reports one role's failover chain: every candidate in
+// priority order with its live health, and which tier is currently
+// serving. This is the view that answers "is anything running on a
+// backup right now?" without reading logs. Projected from
+// modelrole.Resolver.Snapshot() at the gateway boundary so the admin
+// package doesn't import the resolver.
+type RoleStatus struct {
+	Role       string                `json:"role"`
+	ActiveID   string                `json:"active_id,omitempty"`
+	ActiveTier int                   `json:"active_tier"`
+	Degraded   bool                  `json:"degraded"`
+	Candidates []RoleCandidateStatus `json:"candidates,omitempty"`
+}
+
+// RoleCandidateStatus is one model in a role's chain.
+type RoleCandidateStatus struct {
+	ModelID string `json:"model_id"`
+	Tier    int    `json:"tier"`
+	Status  string `json:"status"`
+	Active  bool   `json:"active"`
 }
 
 // GatewayStatus reports gateway-level health. Uptime is computed at

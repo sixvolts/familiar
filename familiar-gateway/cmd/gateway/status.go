@@ -7,6 +7,7 @@ import (
 	"github.com/familiar/gateway/internal/admin"
 	"github.com/familiar/gateway/internal/identity"
 	"github.com/familiar/gateway/internal/memory"
+	"github.com/familiar/gateway/internal/modelrole"
 	"github.com/familiar/gateway/internal/router"
 	"github.com/familiar/gateway/internal/session"
 	"github.com/familiar/gateway/internal/skills"
@@ -22,7 +23,8 @@ type gatewayStatusProvider struct {
 	memStore  *memory.PgVectorStore // optional
 	resolver  *identity.Resolver    // optional
 	sessions  *session.Manager
-	skills    *skills.Registry // optional
+	skills    *skills.Registry    // optional
+	roles     *modelrole.Resolver // optional; per-role failover chains
 }
 
 func (p *gatewayStatusProvider) Snapshot(ctx context.Context) (admin.StatusSnapshot, error) {
@@ -47,6 +49,29 @@ func (p *gatewayStatusProvider) Snapshot(ctx context.Context) (admin.StatusSnaps
 				Status:   p.registry.StatusOf(id),
 				Endpoint: cfg.Endpoint,
 			})
+		}
+	}
+
+	// Roles — each failover chain with live per-candidate health and the
+	// serving tier, so the dashboard can show at a glance whether
+	// anything is currently running on a backup.
+	if p.roles != nil {
+		for _, rs := range p.roles.Snapshot() {
+			out := admin.RoleStatus{
+				Role:       rs.Role,
+				ActiveID:   rs.ActiveID,
+				ActiveTier: rs.ActiveTier,
+				Degraded:   rs.ActiveTier > 0,
+			}
+			for _, c := range rs.Candidates {
+				out.Candidates = append(out.Candidates, admin.RoleCandidateStatus{
+					ModelID: c.ModelID,
+					Tier:    c.Tier,
+					Status:  c.Status,
+					Active:  c.Active,
+				})
+			}
+			snap.Roles = append(snap.Roles, out)
 		}
 	}
 

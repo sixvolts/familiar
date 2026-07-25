@@ -51,6 +51,13 @@ type Config struct {
 	// both no-op. Generate a keypair once (the gateway logs a fresh one
 	// at startup if unset) and put it here; the private key is a secret.
 	Push PushConfig `toml:"push"`
+
+	// explicitRoles records which [roles.x] blocks the operator wrote
+	// by hand (as opposed to chains normalizeRoles derived from legacy
+	// keys). Not a TOML field. Validate is strict about explicit chains
+	// and lenient about derived ones, so an upgrade can't start failing
+	// on a legacy config that previously only warned.
+	explicitRoles map[string]bool `toml:"-"`
 }
 
 // PushConfig holds the VAPID keypair the Web Push subsystem signs with
@@ -886,16 +893,38 @@ func (r RolesConfig) Chain(role string) RoleChain {
 	return RoleChain{}
 }
 
+// takesGlobalFallback reports whether a role can meaningfully fall back
+// to the single global [roles].fallback model.
+//
+// Only text-generation roles can: the fallback is one chat-capable model
+// (typically the always-on sidecar), and chat plus every sidecar task
+// speak that same /v1/chat/completions shape. The embedder and reranker
+// cannot — they need provider="embeddings" and a reranking server
+// respectively, so appending a chat model to their chains would inject a
+// candidate that can only ever fail (and would contradict the
+// embedder-provider check in Validate).
+func takesGlobalFallback(role string) bool {
+	switch role {
+	case RoleEmbedder, RoleRerank:
+		return false
+	default:
+		return true
+	}
+}
+
 // ResolvedChains projects the config into the ordered candidate map the
 // modelrole resolver consumes: role → [primary, backup, global
 // fallback] with blanks and duplicates removed. Only roles that name at
-// least one model appear. The global Fallback is appended to every
-// non-empty chain as the terminal tier.
+// least one model appear. The global Fallback is appended as the
+// terminal tier of every text-generation role (see
+// takesGlobalFallback) — a role whose own chain is empty gets the
+// fallback alone, which is what makes one key enough to keep every
+// generation role serving.
 func (r RolesConfig) ResolvedChains() map[string][]string {
 	out := make(map[string][]string, len(RoleNames))
 	for _, name := range RoleNames {
 		cands := r.Chain(name).Candidates()
-		if r.Fallback != "" {
+		if r.Fallback != "" && takesGlobalFallback(name) {
 			cands = append(cands, r.Fallback)
 		}
 		cands = dedupeStrings(cands)
@@ -1065,10 +1094,13 @@ func DefaultConfig() *Config {
 			ReasoningThreshold:  0.5,
 		},
 		Sidecar: SidecarConfig{
-			SocketPath:        "/run/familiar/sidecar.sock",
-			ConnectTimeoutMs:  500,
-			RequestTimeoutMs:  5000,
-			RetryIntervalSecs: 10,
+			SocketPath:       "/run/familiar/sidecar.sock",
+			ConnectTimeoutMs: 500,
+			RequestTimeoutMs: 5000,
+			// RetryIntervalSecs deliberately has no default: it's
+			// deprecated (the sidecar has no health loop of its own), and
+			// defaulting it non-zero would fire the deprecation warning on
+			// every boot for operators who never set it.
 			FallbackOnFailure: true,
 		},
 		Memory: MemoryConfig{
@@ -1161,6 +1193,20 @@ func (c *Config) normalizeRoles() {
 	c.Roles.FailThreshold = c.Roles.FailOrDefault()
 	c.Roles.RecoverThreshold = c.Roles.RecoverOrDefault()
 
+	// Remember which roles the operator wrote explicitly. Everything
+	// back-filled below is *derived* from legacy keys, and a derived
+	// candidate that names a missing model must stay non-fatal — the
+	// pre-roles code warned and skipped that task, and an upgrade must
+	// not start refusing to boot on a config that used to run. Explicit
+	// [roles.x] blocks are new config, so those stay strict (see
+	// Validate).
+	c.explicitRoles = make(map[string]bool, len(RoleNames))
+	for _, name := range RoleNames {
+		if !c.Roles.Chain(name).IsEmpty() {
+			c.explicitRoles[name] = true
+		}
+	}
+
 	// chat — mirror router.GetChatModelID's precedence at the config
 	// layer: an explicit chat=true model wins over a role-less one, lex
 	// order breaks ties.
@@ -1180,6 +1226,42 @@ func (c *Config) normalizeRoles() {
 	}
 	if c.Roles.ResearchWriter.IsEmpty() && c.Skills.Research.WriterModel != "" {
 		c.Roles.ResearchWriter.Primary = c.Skills.Research.WriterModel
+	}
+
+	c.pruneDerivedRoles()
+}
+
+// pruneDerivedRoles drops candidates that name a model absent from
+// [[models]] — but only from chains this function derived, never from an
+// explicit [roles.x] block. That reproduces the old behavior exactly: a
+// [sidecar].classify_model pointing at a nonexistent id used to warn and
+// skip the task, so it must not become a boot failure on upgrade. A typo
+// in a hand-written [roles] block is still fatal (Validate).
+func (c *Config) pruneDerivedRoles() {
+	known := make(map[string]bool, len(c.Models))
+	for _, m := range c.Models {
+		known[m.ID] = true
+	}
+	for _, name := range RoleNames {
+		if c.explicitRoles[name] {
+			continue
+		}
+		chain := c.Roles.chainPtr(name)
+		if chain == nil {
+			continue
+		}
+		if chain.Primary != "" && !known[chain.Primary] {
+			log.Printf("[config] warning: role %q resolved to model %q from legacy config, but no [[models]] entry declares it — role unassigned",
+				name, chain.Primary)
+			chain.Primary = ""
+		}
+		if chain.Backup != "" && !known[chain.Backup] {
+			chain.Backup = ""
+		}
+		// Promote a surviving backup when only the primary was dropped.
+		if chain.Primary == "" && chain.Backup != "" {
+			chain.Primary, chain.Backup = chain.Backup, ""
+		}
 	}
 }
 

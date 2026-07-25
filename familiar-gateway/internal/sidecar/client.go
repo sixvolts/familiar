@@ -424,12 +424,13 @@ func (c *Client) GenerateTitle(ctx context.Context, userMsg, assistantMsg string
 	return r.GenerateTitle(ctx, userMsg, assistantMsg)
 }
 
-// Embed is unimplemented — the pipeline's MakeEmbedder() handles HTTP
-// embedding directly against the [embedder] endpoint. Kept for
-// interface compatibility.
-func (c *Client) Embed(ctx context.Context, text string) (*EmbedResult, error) {
-	return nil, fmt.Errorf("sidecar embed: use pipeline embedder with [embedder] endpoint config instead")
-}
+// Embedding does not route through the sidecar. It resolves through the
+// [roles.embedder] chain to a provider="embeddings" [[models]] entry
+// (see llm.EmbeddingsProvider), which puts it under the shared heartbeat
+// and gives it primary/backup failover. The former Client.Embed stub
+// here always returned an error, so [memory].use_sidecar_embedder
+// silently fell through to the HTTP embedder on every call; both are
+// gone.
 
 // gateForTask returns the sync/async gate guarding a task's currently-
 // resolved endpoint, building it on first use. Critical-path tasks

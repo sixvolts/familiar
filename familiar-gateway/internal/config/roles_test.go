@@ -234,3 +234,33 @@ func TestValidateAcceptsMatchedEmbedderChain(t *testing.T) {
 		t.Fatalf("matched embedder chain should validate: %v", err)
 	}
 }
+
+// Pointing the embedder role at a chat model would silently drop every
+// vector — reject it at load.
+func TestValidateRejectsNonEmbeddingsEmbedder(t *testing.T) {
+	c := DefaultConfig()
+	c.Embedder = EmbedderConfig{}
+	c.Models = []ModelConfig{
+		{ID: "chatty", Endpoint: "e", Provider: "llama-server", Chat: true},
+	}
+	c.Roles.Embedder = RoleChain{Primary: "chatty"}
+	if err := c.Validate(); err == nil {
+		t.Fatal("expected error when the embedder role points at a chat provider")
+	}
+}
+
+// The legacy [embedder] block must survive a full Load+Validate and come
+// out as a health-checked embeddings model in the embedder chain.
+func TestLegacyEmbedderBlockLoadsAndValidates(t *testing.T) {
+	c := DefaultConfig()
+	c.Models = []ModelConfig{{ID: "chat", Endpoint: "e", Provider: "llama-server", Chat: true}}
+	c.Embedder = EmbedderConfig{Endpoint: "http://127.0.0.1:8100", Model: "nomic-embed-text", Dimension: 768}
+	c.normalizeRoles()
+	if err := c.Validate(); err != nil {
+		t.Fatalf("legacy embedder config should validate: %v", err)
+	}
+	chain := c.Roles.ResolvedChains()[RoleEmbedder]
+	if len(chain) != 1 || chain[0] != legacyEmbedderModelID {
+		t.Fatalf("embedder chain = %v, want [%s]", chain, legacyEmbedderModelID)
+	}
+}

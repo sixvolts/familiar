@@ -32,7 +32,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"sort"
@@ -1996,76 +1995,12 @@ func budgetToolResult(toolName, content string, perResultCap, budget, used int) 
 	return content, used + tk
 }
 
-// MakeEmbedder returns an EmbedFunc that calls an OpenAI-compatible /v1/embeddings endpoint.
-func (p *Pipeline) MakeEmbedder(cfg config.EmbedderConfig) EmbedFunc {
-	if cfg.Endpoint == "" {
-		return nil
-	}
-
-	endpoint := strings.TrimRight(cfg.Endpoint, "/")
-	model := cfg.Model
-	if model == "" {
-		model = "nomic-embed-text"
-	}
-
-	return func(ctx context.Context, text string) ([]float32, error) {
-		type embedReq struct {
-			Model string `json:"model"`
-			Input string `json:"input"`
-		}
-		type embedResp struct {
-			Data []struct {
-				Embedding []float32 `json:"embedding"`
-			} `json:"data"`
-			Error *struct {
-				Message string `json:"message"`
-			} `json:"error,omitempty"`
-		}
-
-		// nomic-embed-text-v1.5 requires task prefixes for optimal retrieval.
-		// Queries get "search_query: ", documents get "search_document: ".
-		prefixedText := "search_query: " + text
-
-		body, err := json.Marshal(embedReq{Model: model, Input: prefixedText})
-		if err != nil {
-			return nil, fmt.Errorf("marshaling embed request: %w", err)
-		}
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-			endpoint+"/v1/embeddings", bytes.NewReader(body))
-		if err != nil {
-			return nil, fmt.Errorf("building embed request: %w", err)
-		}
-		req.Header.Set("content-type", "application/json")
-
-		client := &http.Client{Timeout: 10 * time.Second}
-		resp, err := client.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("embed request: %w", err)
-		}
-		defer resp.Body.Close()
-
-		respBytes, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return nil, fmt.Errorf("reading embed response: %w", err)
-		}
-
-		var er embedResp
-		if err := json.Unmarshal(respBytes, &er); err != nil {
-			return nil, fmt.Errorf("parsing embed response: %w", err)
-		}
-
-		if er.Error != nil {
-			return nil, fmt.Errorf("embed API error: %s", er.Error.Message)
-		}
-
-		if len(er.Data) == 0 {
-			return nil, fmt.Errorf("empty embedding response")
-		}
-
-		return er.Data[0].Embedding, nil
-	}
-}
+// Embedding is not built here anymore. The embedder resolves through
+// the [roles.embedder] failover chain to an llm.EmbeddingsProvider (see
+// internal/llm/embeddings.go), which is where the /v1/embeddings request
+// body — and the nomic "search_query: " prefix every stored vector
+// depends on — now lives. main.go composes the resolver closure and
+// hands it in as Deps.Embedder.
 
 // GetRouter returns the pipeline's router (for external access).
 func (p *Pipeline) GetRouter() *router.Router {

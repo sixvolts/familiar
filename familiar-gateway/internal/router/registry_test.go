@@ -163,3 +163,38 @@ func TestResolveAPIKeyNoVaultKey(t *testing.T) {
 		t.Fatalf("expected config-key, got %q", got)
 	}
 }
+
+// provider="embeddings" builds an embeddings provider (so the embedder
+// gets a heartbeat like every other model) and is reachable through the
+// typed accessor the embed path uses.
+func TestGetEmbeddingsProvider(t *testing.T) {
+	r := NewRegistry([]config.ModelConfig{
+		{ID: "embed/a", Provider: "embeddings", Endpoint: "http://127.0.0.1:8100",
+			Model: "nomic-embed-text", Dimension: 768},
+		{ID: "chat/a", Provider: "llama-server", Endpoint: "http://127.0.0.1:8080"},
+	})
+
+	p, err := r.GetEmbeddingsProvider("embed/a", nil)
+	if err != nil {
+		t.Fatalf("GetEmbeddingsProvider: %v", err)
+	}
+	if p.Dimension() != 768 || p.Model() != "nomic-embed-text" {
+		t.Errorf("provider fields wrong: dim=%d model=%q", p.Dimension(), p.Model())
+	}
+	// Cached: the embed hot path shouldn't rebuild per call.
+	p2, _ := r.GetEmbeddingsProvider("embed/a", nil)
+	if p != p2 {
+		t.Error("expected the embeddings provider to be cached by model ID")
+	}
+	// A chat model is not an embedder.
+	if _, err := r.GetEmbeddingsProvider("chat/a", nil); err == nil {
+		t.Error("expected an error for a non-embeddings provider")
+	}
+	if _, err := r.GetEmbeddingsProvider("nope", nil); err == nil {
+		t.Error("expected an error for an unknown model")
+	}
+	// It also builds through the generic path, so health checks work.
+	if _, err := r.GetProvider("embed/a", nil); err != nil {
+		t.Errorf("embeddings model should build as a Provider for health checks: %v", err)
+	}
+}

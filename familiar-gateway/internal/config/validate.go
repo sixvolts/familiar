@@ -144,6 +144,30 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// Every model in the embedder chain must actually be an embeddings
+	// backend — pointing the role at a chat model yields a provider whose
+	// Embed path doesn't exist, which would surface as every memory write
+	// losing its vector.
+	for _, id := range c.Roles.Embedder.Candidates() {
+		if m := byID[id]; m != nil && m.Provider != "embeddings" {
+			return fmt.Errorf("roles.embedder references model %q with provider %q — an embedder must use provider = \"embeddings\"",
+				id, m.Provider)
+		}
+	}
+
+	// Deprecated keys that are parsed but ignored. Warn so an operator
+	// relying on them learns why nothing is happening.
+	if c.Sidecar.EmbedderEndpoint != "" {
+		log.Printf("[config] warning: [sidecar].embedder_endpoint is deprecated and ignored — configure a provider=\"embeddings\" [[models]] entry and point [roles.embedder] at it")
+	}
+	if c.Memory.UseSidecarEmbedder {
+		log.Printf("[config] warning: [memory].use_sidecar_embedder is deprecated and ignored — embedding routes through [roles.embedder]")
+	}
+	if c.Sidecar.RetryIntervalSecs > 0 && c.Roles.HealthIntervalSecs != c.Sidecar.RetryIntervalSecs {
+		log.Printf("[config] note: [sidecar].retry_interval_seconds is deprecated — heartbeat cadence comes from [roles].health_interval_secs (%ds)",
+			c.Roles.IntervalOrDefault())
+	}
+
 	// Heartbeat tuning — coerce non-positive values to defaults with a
 	// warning rather than erroring; a bad interval shouldn't block boot.
 	if c.Roles.HealthIntervalSecs <= 0 || c.Roles.HealthTimeoutSecs <= 0 ||

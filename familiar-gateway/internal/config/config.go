@@ -454,14 +454,21 @@ type NodeConfig struct {
 // the background ones). RouterEndpoint is deprecated — kept only so
 // the legacy fallback and pre-existing configs keep working.
 type SidecarConfig struct {
-	Enabled           bool   `toml:"enabled"`
-	SocketPath        string `toml:"socket_path"`       // gRPC Unix socket (future)
-	RouterEndpoint    string `toml:"router_endpoint"`   // deprecated — legacy small-slot URL
-	EmbedderEndpoint  string `toml:"embedder_endpoint"` // HTTP endpoint for embedder
-	ConnectTimeoutMs  int    `toml:"connect_timeout_ms"`
-	RequestTimeoutMs  int    `toml:"request_timeout_ms"`
-	RetryIntervalSecs int    `toml:"retry_interval_seconds"`
-	FallbackOnFailure bool   `toml:"fallback_on_failure"`
+	Enabled        bool   `toml:"enabled"`
+	SocketPath     string `toml:"socket_path"`     // gRPC Unix socket (future)
+	RouterEndpoint string `toml:"router_endpoint"` // deprecated — legacy small-slot URL
+	// EmbedderEndpoint is DEPRECATED and ignored: nothing ever read it.
+	// Embedding routes through [roles.embedder] to a
+	// provider="embeddings" [[models]] entry. Parsed only so existing
+	// configs that set it still load; Validate warns.
+	EmbedderEndpoint string `toml:"embedder_endpoint"`
+	ConnectTimeoutMs int    `toml:"connect_timeout_ms"`
+	RequestTimeoutMs int    `toml:"request_timeout_ms"`
+	// RetryIntervalSecs is DEPRECATED: the sidecar no longer runs its own
+	// health loop. Heartbeat cadence comes from
+	// [roles].health_interval_secs, shared with every other model.
+	RetryIntervalSecs int  `toml:"retry_interval_seconds"`
+	FallbackOnFailure bool `toml:"fallback_on_failure"`
 
 	// Task → model ID assignment. Each value must match a [[models]]
 	// entry ID; the sidecar client resolves it to that model's
@@ -525,6 +532,10 @@ func (s SidecarConfig) HasExplicitTaskModels() bool {
 // fields (PromoteEnabled, PromoteThreshold) — there's no RAM cache
 // to mirror into now that writes are synchronous to pgvector.
 type MemoryConfig struct {
+	// UseSidecarEmbedder is DEPRECATED and ignored. It routed embedding
+	// through a sidecar Embed() method that was a stub always returning
+	// an error, so every call silently fell through to the HTTP embedder
+	// anyway. Embedding now resolves through [roles.embedder].
 	UseSidecarEmbedder bool    `toml:"use_sidecar_embedder"`
 	Store              string  `toml:"store"` // "local", "remote"
 	LocalDSN           string  `toml:"local_dsn"`

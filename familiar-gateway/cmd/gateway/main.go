@@ -216,27 +216,43 @@ func main() {
 		sc.LogRouting()
 	}
 
-	// 7. Build embedder. We need a throwaway helper on the Pipeline type
-	// here (MakeEmbedder is a method), but the real Pipeline is
-	// constructed below once all its dependencies are resolved.
-	embedderHelper := &pipeline.Pipeline{}
+	// 7. Build the embedder as a role-resolved closure.
+	//
+	// The embedder is the one dependency memory correctness rests on: a
+	// fact committed without a vector still lands in pgvector but is
+	// unreachable by semantic search. So it resolves through the same
+	// [roles.embedder] chain as everything else, per call — a demoted
+	// primary embedder fails over to the backup instead of silently
+	// writing unreachable facts. Validation guarantees the backup shares
+	// the primary's model + dimension, so vectors stay comparable.
+	//
+	// Legacy configs need no change: normalizeRoles promoted an
+	// [embedder] block into a provider="embeddings" [[models]] entry and
+	// pointed roles.embedder at it, which is also what finally gives that
+	// endpoint a heartbeat.
 	var embedder pipeline.EmbedFunc
-	if cfg.Memory.UseSidecarEmbedder && sc != nil {
+	if len(roleRes.Chain(config.RoleEmbedder)) > 0 {
 		embedder = func(ctx context.Context, text string) ([]float32, error) {
-			result, err := sc.Embed(ctx, text)
-			if err != nil {
-				if cfg.Embedder.Endpoint != "" {
-					httpEmbedder := embedderHelper.MakeEmbedder(cfg.Embedder)
-					if httpEmbedder != nil {
-						return httpEmbedder(ctx, text)
-					}
-				}
-				return nil, err
+			modelID, tier, ok := roleRes.Resolve(config.RoleEmbedder)
+			if !ok || modelID == "" {
+				return nil, fmt.Errorf("embedder: no model configured for role %q", config.RoleEmbedder)
 			}
-			return result.Embedding, nil
+			p, err := reg.GetEmbeddingsProvider(modelID, apiKeyFn)
+			if err != nil {
+				return nil, fmt.Errorf("embedder %q: %w", modelID, err)
+			}
+			vec, err := p.Embed(ctx, text)
+			if err != nil {
+				return nil, fmt.Errorf("embedder %q (tier %d): %w", modelID, tier, err)
+			}
+			return vec, nil
 		}
-	} else if cfg.Embedder.Endpoint != "" {
-		embedder = embedderHelper.MakeEmbedder(cfg.Embedder)
+		log.Printf("[embedder] role %s", roleRes.FormatChain(config.RoleEmbedder))
+	} else {
+		log.Printf("[embedder] no embedder configured — facts will be stored without vectors (semantic search disabled)")
+	}
+	if cfg.Memory.UseSidecarEmbedder {
+		log.Printf("[embedder] warning: [memory].use_sidecar_embedder is deprecated and ignored — embedding routes through [roles.embedder]")
 	}
 
 	// 8. Resolve optional stores + skill registry. Everything goes into

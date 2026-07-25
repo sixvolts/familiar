@@ -62,10 +62,3 @@ type ContextTurn struct {
 	Role    string // "user" or "assistant"
 	Content string // truncated to ~200 chars for assistant, ~500 for user
 }
-
-// EmbedResult is the response from a sidecar embedding request.
-type EmbedResult struct {
-	Embedding   []float32 `json:"embedding"`
-	Dimensions  uint32    `json:"dimensions"`
-	InferenceMs float32   `json:"inference_ms"`
-}

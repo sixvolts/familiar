@@ -33,6 +33,11 @@ type Registry struct {
 	entries map[string]*ModelEntry
 	mu      sync.RWMutex
 
+	// embedders caches embeddings providers by model ID — the embed path
+	// runs per memory write and per retrieval query, so it shouldn't
+	// rebuild a provider each call.
+	embedders map[string]*llm.EmbeddingsProvider
+
 	// Heartbeat tuning. Zero values fall back to the historical
 	// hardcoded constants / single-probe behavior via the *OrDefault
 	// accessors, so a registry built without SetHealthParams behaves
@@ -46,7 +51,8 @@ type Registry struct {
 // NewRegistry initialises a registry from a slice of model configs.
 func NewRegistry(models []config.ModelConfig) *Registry {
 	r := &Registry{
-		entries: make(map[string]*ModelEntry, len(models)),
+		entries:   make(map[string]*ModelEntry, len(models)),
+		embedders: make(map[string]*llm.EmbeddingsProvider),
 	}
 	for _, m := range models {
 		m := m // copy
@@ -335,6 +341,13 @@ func buildProvider(cfg config.ModelConfig, apiKey string) (llm.Provider, error) 
 	switch cfg.Provider {
 	case "llama-server", "openai", "ollama", "vllm":
 		return llm.NewOpenAIProvider(cfg.Provider+"/"+cfg.ID, cfg.Endpoint, apiKey), nil
+	case "embeddings":
+		// Text → vector only. Registered as a normal model so it gets
+		// the shared heartbeat and can sit in a [roles.embedder] chain;
+		// its Complete/CompleteStream return an error, so a config that
+		// aims chat at it fails loudly.
+		return llm.NewEmbeddingsProvider(cfg.Provider+"/"+cfg.ID, cfg.Endpoint, apiKey,
+			cfg.ServedName(), cfg.Dimension, 0), nil
 	case "llama-completion":
 		formatter, err := pickFormatter(cfg.Formatter)
 		if err != nil {
@@ -386,6 +399,41 @@ func (r *Registry) StatusOf(modelID string) string {
 		return e.Status
 	}
 	return ""
+}
+
+// GetEmbeddingsProvider returns a live embeddings provider for a model
+// ID, or an error when the ID is unknown or the model isn't an
+// embeddings backend. Providers are cheap value types (an endpoint plus
+// an http.Client), but they're cached per model ID so the embed hot path
+// doesn't rebuild one per call.
+func (r *Registry) GetEmbeddingsProvider(modelID string, apiKeyFn func(string) string) (*llm.EmbeddingsProvider, error) {
+	r.mu.RLock()
+	entry, ok := r.entries[modelID]
+	cached := r.embedders[modelID]
+	r.mu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("unknown model %q", modelID)
+	}
+	if cached != nil {
+		return cached, nil
+	}
+	if entry.Config.Provider != "embeddings" {
+		return nil, fmt.Errorf("model %q has provider %q, want \"embeddings\"", modelID, entry.Config.Provider)
+	}
+
+	apiKey := resolveAPIKey(entry.Config, apiKeyFn)
+	p := llm.NewEmbeddingsProvider(entry.Config.Provider+"/"+entry.Config.ID,
+		entry.Config.Endpoint, apiKey, entry.Config.ServedName(), entry.Config.Dimension, 0)
+
+	r.mu.Lock()
+	if existing := r.embedders[modelID]; existing != nil {
+		p = existing // another goroutine won the race; reuse theirs
+	} else {
+		r.embedders[modelID] = p
+	}
+	r.mu.Unlock()
+	return p, nil
 }
 
 // ModelIDs returns all registered model IDs regardless of health status.

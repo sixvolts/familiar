@@ -103,6 +103,56 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// [roles] failover chains. Every named candidate (and the global
+	// fallback) must resolve to a [[models]] entry — a typo there
+	// silently drops a role's primary or backup out of the chain, which
+	// is exactly the kind of routing bug that only shows up mid-incident.
+	byID := make(map[string]*ModelConfig, len(c.Models))
+	for i := range c.Models {
+		byID[c.Models[i].ID] = &c.Models[i]
+	}
+	if c.Roles.Fallback != "" {
+		if _, ok := byID[c.Roles.Fallback]; !ok {
+			return fmt.Errorf("roles.fallback = %q has no matching [[models]] entry", c.Roles.Fallback)
+		}
+	}
+	for _, role := range RoleNames {
+		chain := c.Roles.Chain(role)
+		for _, id := range chain.Candidates() {
+			if _, ok := byID[id]; !ok {
+				return fmt.Errorf("roles.%s references model %q which has no matching [[models]] entry", role, id)
+			}
+		}
+	}
+
+	// An embedder role's backup must produce vectors comparable to the
+	// primary's stored rows: same embedding family (Model) and same width
+	// (Dimension). Cross-model or cross-dimension cosine in pgvector is
+	// either meaningless or a hard error, so reject the mismatch up front
+	// rather than silently corrupting retrieval while on the backup.
+	if emb := c.Roles.Embedder; emb.Primary != "" && emb.Backup != "" {
+		p, b := byID[emb.Primary], byID[emb.Backup]
+		if p != nil && b != nil {
+			if p.ServedName() != b.ServedName() {
+				return fmt.Errorf("roles.embedder: backup %q model %q must match primary %q model %q (cross-model vectors are not comparable)",
+					emb.Backup, b.ServedName(), emb.Primary, p.ServedName())
+			}
+			if p.Dimension != b.Dimension {
+				return fmt.Errorf("roles.embedder: backup %q dimension %d must match primary %q dimension %d",
+					emb.Backup, b.Dimension, emb.Primary, p.Dimension)
+			}
+		}
+	}
+
+	// Heartbeat tuning — coerce non-positive values to defaults with a
+	// warning rather than erroring; a bad interval shouldn't block boot.
+	if c.Roles.HealthIntervalSecs <= 0 || c.Roles.HealthTimeoutSecs <= 0 ||
+		c.Roles.FailThreshold <= 0 || c.Roles.RecoverThreshold <= 0 {
+		log.Printf("[config] warning: non-positive [roles] heartbeat tuning coerced to defaults (interval=%ds timeout=%ds fail=%d recover=%d)",
+			c.Roles.IntervalOrDefault(), c.Roles.TimeoutOrDefault(),
+			c.Roles.FailOrDefault(), c.Roles.RecoverOrDefault())
+	}
+
 	// [engine] is no longer validated
 	// deleted the previous engine and the gRPC dial. The struct stays
 	// as an empty block so existing gateway.toml entries parse

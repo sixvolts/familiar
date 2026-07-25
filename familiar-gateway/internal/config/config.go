@@ -2,8 +2,10 @@ package config
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -16,6 +18,7 @@ type Config struct {
 	Instance     InstanceConfig     `toml:"instance"`
 	Identity     IdentityConfig     `toml:"identity"`
 	Models       []ModelConfig      `toml:"models"`
+	Roles        RolesConfig        `toml:"roles"`
 	Router       RouterConfig       `toml:"router"`
 	Sidecar      SidecarConfig      `toml:"sidecar"`
 	Memory       MemoryConfig       `toml:"memory"`
@@ -610,6 +613,21 @@ type ModelConfig struct {
 	// MODEL-SELECTOR.md.
 	DisplayName string `toml:"display_name"`
 
+	// Model is the model name sent to the server in the request's
+	// `model` field (OpenAI chat + embeddings shape). Defaults to ID
+	// when blank — the historical convention, and llama-server with a
+	// single loaded model ignores it anyway. For an embedder role it
+	// also names the embedding *family*: a role's primary and backup
+	// must declare the same Model + Dimension so the vectors they
+	// produce are comparable in pgvector (see config validation).
+	Model string `toml:"model"`
+
+	// Dimension is the embedding width for an embeddings model. Only
+	// read for provider="embeddings"; ignored by chat providers. Used
+	// to enforce that an embedder role's primary and backup produce
+	// vectors of the same length (a hard requirement for cosine).
+	Dimension int `toml:"dimension"`
+
 	// Role tags this model with a single cross-cutting job in the
 	// pipeline. Exactly zero or one model may carry each role.
 	// Roles double as sidecar slot names under CHAT-REARCH:
@@ -698,6 +716,232 @@ func (m ModelConfig) DisplayLabel() string {
 		return m.DisplayName
 	}
 	return m.ID
+}
+
+// ServedName returns the model name sent to the server (the request's
+// `model` field). Falls back to ID — the historical convention where
+// the [[models]] id doubles as the served model name.
+func (m ModelConfig) ServedName() string {
+	if m.Model != "" {
+		return m.Model
+	}
+	return m.ID
+}
+
+// Role name constants for the [roles] failover chains. The sidecar-task
+// role names deliberately share the string values of the sidecar
+// package's Task* constants (they name the same unit of work); config
+// can't import sidecar without an import cycle, so the strings are
+// duplicated here as the canonical source and kept in sync by the
+// value equality assertion in the sidecar tests.
+const (
+	RoleChat           = "chat"
+	RoleEmbedder       = "embedder"
+	RoleRerank         = "rerank"
+	RoleResearchWorker = "research_worker"
+	RoleResearchWriter = "research_writer"
+
+	RoleClassify      = "classify"
+	RoleCondense      = "condense"
+	RoleExpandQueries = "expand_queries"
+	RoleExtract       = "extract"
+	RoleExtractLarge  = "extract_large"
+	RoleSummarize     = "summarize"
+	RoleConflict      = "conflict"
+	RoleRelationship  = "relationship"
+	RoleEntityGroup   = "entity_group"
+)
+
+// Default heartbeat / debounce tuning for the [roles] health loop.
+const (
+	DefaultHealthIntervalSecs = 30
+	DefaultHealthTimeoutSecs  = 15
+	DefaultFailThreshold      = 2
+	DefaultRecoverThreshold   = 2
+)
+
+// RoleChain is an ordered primary→backup pair of [[models]] IDs for a
+// single role. The resolver walks it (then the global fallback) at call
+// time, skipping any candidate the heartbeat currently reports offline,
+// so a role fails over to its backup and auto-returns to its primary
+// with no config change.
+type RoleChain struct {
+	Primary string `toml:"primary"`
+	Backup  string `toml:"backup"`
+}
+
+// IsEmpty reports whether the chain names no models at all — the signal
+// normalizeRoles uses to decide whether a legacy source should fill it.
+func (c RoleChain) IsEmpty() bool { return c.Primary == "" && c.Backup == "" }
+
+// Candidates returns the non-blank model IDs in priority order.
+func (c RoleChain) Candidates() []string {
+	out := make([]string, 0, 2)
+	if c.Primary != "" {
+		out = append(out, c.Primary)
+	}
+	if c.Backup != "" {
+		out = append(out, c.Backup)
+	}
+	return out
+}
+
+// RolesConfig is the unified per-role model-topology block. Each role
+// carries a primary/backup chain; Fallback is the global last-resort
+// appended to every chain (the "sidecar/maintenance backup"). The
+// scalar fields tune the single heartbeat that drives failover.
+//
+// An explicit [roles.<name>] block always wins; any role left empty is
+// back-filled by normalizeRoles from the legacy config (chat= flag,
+// [sidecar].*_model, role= tags, [embedder], research *_model) so
+// pre-roles configs keep working unchanged.
+type RolesConfig struct {
+	Fallback           string `toml:"fallback"`
+	HealthIntervalSecs int    `toml:"health_interval_secs"`
+	HealthTimeoutSecs  int    `toml:"health_timeout_secs"`
+	FailThreshold      int    `toml:"fail_threshold"`
+	RecoverThreshold   int    `toml:"recover_threshold"`
+
+	Chat           RoleChain `toml:"chat"`
+	Embedder       RoleChain `toml:"embedder"`
+	Rerank         RoleChain `toml:"rerank"`
+	ResearchWorker RoleChain `toml:"research_worker"`
+	ResearchWriter RoleChain `toml:"research_writer"`
+
+	Classify      RoleChain `toml:"classify"`
+	Condense      RoleChain `toml:"condense"`
+	ExpandQueries RoleChain `toml:"expand_queries"`
+	Extract       RoleChain `toml:"extract"`
+	ExtractLarge  RoleChain `toml:"extract_large"`
+	Summarize     RoleChain `toml:"summarize"`
+	Conflict      RoleChain `toml:"conflict"`
+	Relationship  RoleChain `toml:"relationship"`
+	EntityGroup   RoleChain `toml:"entity_group"`
+}
+
+// chainPtr returns a mutable pointer to the chain for a role name, or
+// nil for an unknown role. Used by normalizeRoles to back-fill.
+func (r *RolesConfig) chainPtr(role string) *RoleChain {
+	switch role {
+	case RoleChat:
+		return &r.Chat
+	case RoleEmbedder:
+		return &r.Embedder
+	case RoleRerank:
+		return &r.Rerank
+	case RoleResearchWorker:
+		return &r.ResearchWorker
+	case RoleResearchWriter:
+		return &r.ResearchWriter
+	case RoleClassify:
+		return &r.Classify
+	case RoleCondense:
+		return &r.Condense
+	case RoleExpandQueries:
+		return &r.ExpandQueries
+	case RoleExtract:
+		return &r.Extract
+	case RoleExtractLarge:
+		return &r.ExtractLarge
+	case RoleSummarize:
+		return &r.Summarize
+	case RoleConflict:
+		return &r.Conflict
+	case RoleRelationship:
+		return &r.Relationship
+	case RoleEntityGroup:
+		return &r.EntityGroup
+	}
+	return nil
+}
+
+// RoleNames is the canonical role order — used for stable iteration in
+// normalizeRoles, validation, resolver construction, and startup logs.
+var RoleNames = []string{
+	RoleChat,
+	RoleClassify, RoleCondense, RoleExpandQueries,
+	RoleExtract, RoleExtractLarge, RoleSummarize,
+	RoleConflict, RoleRelationship, RoleEntityGroup,
+	RoleEmbedder, RoleRerank,
+	RoleResearchWorker, RoleResearchWriter,
+}
+
+// Chain returns the (read-only) chain for a role, or an empty chain for
+// an unknown role name.
+func (r RolesConfig) Chain(role string) RoleChain {
+	if p := (&r).chainPtr(role); p != nil {
+		return *p
+	}
+	return RoleChain{}
+}
+
+// ResolvedChains projects the config into the ordered candidate map the
+// modelrole resolver consumes: role → [primary, backup, global
+// fallback] with blanks and duplicates removed. Only roles that name at
+// least one model appear. The global Fallback is appended to every
+// non-empty chain as the terminal tier.
+func (r RolesConfig) ResolvedChains() map[string][]string {
+	out := make(map[string][]string, len(RoleNames))
+	for _, name := range RoleNames {
+		cands := r.Chain(name).Candidates()
+		if r.Fallback != "" {
+			cands = append(cands, r.Fallback)
+		}
+		cands = dedupeStrings(cands)
+		if len(cands) > 0 {
+			out[name] = cands
+		}
+	}
+	return out
+}
+
+// dedupeStrings returns xs with blanks and later duplicates removed,
+// preserving first-seen order.
+func dedupeStrings(xs []string) []string {
+	seen := make(map[string]struct{}, len(xs))
+	out := make([]string, 0, len(xs))
+	for _, x := range xs {
+		if x == "" {
+			continue
+		}
+		if _, dup := seen[x]; dup {
+			continue
+		}
+		seen[x] = struct{}{}
+		out = append(out, x)
+	}
+	return out
+}
+
+// IntervalOrDefault / TimeoutOrDefault / FailOrDefault /
+// RecoverOrDefault return the tuning values coerced to their defaults
+// when unset or non-positive.
+func (r RolesConfig) IntervalOrDefault() int {
+	if r.HealthIntervalSecs > 0 {
+		return r.HealthIntervalSecs
+	}
+	return DefaultHealthIntervalSecs
+}
+
+func (r RolesConfig) TimeoutOrDefault() int {
+	if r.HealthTimeoutSecs > 0 {
+		return r.HealthTimeoutSecs
+	}
+	return DefaultHealthTimeoutSecs
+}
+
+func (r RolesConfig) FailOrDefault() int {
+	if r.FailThreshold > 0 {
+		return r.FailThreshold
+	}
+	return DefaultFailThreshold
+}
+
+func (r RolesConfig) RecoverOrDefault() int {
+	if r.RecoverThreshold > 0 {
+		return r.RecoverThreshold
+	}
+	return DefaultRecoverThreshold
 }
 
 // RouterConfig controls model selection.
@@ -884,7 +1128,185 @@ func Load(path string) (*Config, error) {
 	// Apply expansions.
 	expandConfig(cfg)
 
+	// Fold legacy model-assignment config into [roles] chains so a
+	// pre-roles gateway.toml keeps working. Runs after expansion so a
+	// synthesized embedder model picks up the expanded [embedder]
+	// endpoint. An explicit [roles.<name>] block is never overwritten.
+	cfg.normalizeRoles()
+
 	return cfg, nil
+}
+
+// normalizeRoles back-fills empty [roles.*] chains from the legacy
+// config surfaces, so operators who never write a [roles] block get the
+// same routing they had before — now with failover available the moment
+// they add a `backup`. Every branch is guarded on IsEmpty(): an
+// explicit [roles.<name>] always wins.
+func (c *Config) normalizeRoles() {
+	// Tuning defaults (also enforced in validate.go; set here so callers
+	// that read the struct directly see coerced values).
+	c.Roles.HealthIntervalSecs = c.Roles.IntervalOrDefault()
+	c.Roles.HealthTimeoutSecs = c.Roles.TimeoutOrDefault()
+	c.Roles.FailThreshold = c.Roles.FailOrDefault()
+	c.Roles.RecoverThreshold = c.Roles.RecoverOrDefault()
+
+	// chat — mirror router.GetChatModelID's precedence at the config
+	// layer: an explicit chat=true model wins over a role-less one, lex
+	// order breaks ties.
+	if c.Roles.Chat.IsEmpty() {
+		if id := c.deriveChatModelID(); id != "" {
+			c.Roles.Chat.Primary = id
+		}
+	}
+
+	c.normalizeSidecarRoles()
+	c.normalizeEmbedderRole()
+
+	// research worker/writer pins fold into their roles (backups can then
+	// be added under [roles.research_worker] / [roles.research_writer]).
+	if c.Roles.ResearchWorker.IsEmpty() && c.Skills.Research.WorkerModel != "" {
+		c.Roles.ResearchWorker.Primary = c.Skills.Research.WorkerModel
+	}
+	if c.Roles.ResearchWriter.IsEmpty() && c.Skills.Research.WriterModel != "" {
+		c.Roles.ResearchWriter.Primary = c.Skills.Research.WriterModel
+	}
+}
+
+// deriveChatModelID replicates router.GetChatModelID's selection at the
+// config layer (which can't import router). chat=true wins; otherwise
+// the first role-less model in lex order.
+func (c *Config) deriveChatModelID() string {
+	var flagged, roleless []string
+	for _, m := range c.Models {
+		if m.Chat {
+			flagged = append(flagged, m.ID)
+		}
+		if m.Role == "" {
+			roleless = append(roleless, m.ID)
+		}
+	}
+	if len(flagged) > 0 {
+		sort.Strings(flagged)
+		return flagged[0]
+	}
+	if len(roleless) > 0 {
+		sort.Strings(roleless)
+		return roleless[0]
+	}
+	return ""
+}
+
+// normalizeSidecarRoles folds the [sidecar] task→model assignment (and
+// the older role="small"/"medium"/"small_async" slot tags) into the
+// per-task role chains, at the model-ID level. Mirrors the resolution
+// order in sidecar.NewClient: explicit <task>_model (with default_model
+// applied) wins, else the legacy slot mapping. The literal
+// router_endpoint fallback has no model ID, so tasks that would only
+// resolve through it are left empty — sidecar keeps that legacy path.
+func (c *Config) normalizeSidecarRoles() {
+	// Legacy slot → model ID (first match; "classifier" aliases small).
+	slotID := map[string]string{}
+	for _, m := range c.Models {
+		switch m.Role {
+		case ModelSlotSmall, ModelRoleClassifier:
+			if slotID[ModelSlotSmall] == "" {
+				slotID[ModelSlotSmall] = m.ID
+			}
+		case ModelSlotMedium:
+			if slotID[ModelSlotMedium] == "" {
+				slotID[ModelSlotMedium] = m.ID
+			}
+		case ModelSlotSmallAsync:
+			if slotID[ModelSlotSmallAsync] == "" {
+				slotID[ModelSlotSmallAsync] = m.ID
+			}
+		}
+	}
+	smallID := slotID[ModelSlotSmall]
+	mediumID := slotID[ModelSlotMedium]
+	if mediumID == "" {
+		mediumID = smallID
+	}
+	asyncID := slotID[ModelSlotSmallAsync]
+	if asyncID == "" {
+		asyncID = mediumID
+	}
+	legacyTaskID := map[string]string{
+		RoleClassify:      smallID,
+		RoleCondense:      smallID,
+		RoleExpandQueries: smallID,
+		RoleExtract:       asyncID,
+		RoleSummarize:     mediumID,
+		RoleConflict:      mediumID,
+		RoleRelationship:  mediumID,
+		RoleEntityGroup:   mediumID,
+	}
+
+	// Explicit task → model (default_model already applied). extract_large
+	// is additive (kept out of SidecarTaskModels) so it's handled apart.
+	explicit := map[string]string{}
+	if c.Sidecar.HasExplicitTaskModels() {
+		for _, tm := range c.Sidecar.SidecarTaskModels() {
+			explicit[tm.Task] = tm.Model
+		}
+	}
+
+	fill := func(role string) {
+		chain := c.Roles.chainPtr(role)
+		if chain == nil || !chain.IsEmpty() {
+			return
+		}
+		if id := explicit[role]; id != "" {
+			chain.Primary = id
+			return
+		}
+		if id := legacyTaskID[role]; id != "" {
+			chain.Primary = id
+		}
+	}
+	for role := range legacyTaskID {
+		fill(role)
+	}
+
+	// extract_large: explicit only, additive, no legacy slot fallback.
+	if c.Roles.ExtractLarge.IsEmpty() && c.Sidecar.ExtractLargeModel != "" {
+		c.Roles.ExtractLarge.Primary = c.Sidecar.ExtractLargeModel
+	}
+}
+
+// legacyEmbedderModelID is the synthetic [[models]] id that carries a
+// pre-roles [embedder] block into the registry so it gets a heartbeat.
+const legacyEmbedderModelID = "embedder/legacy"
+
+// normalizeEmbedderRole promotes a legacy [embedder] block into a real
+// [[models]] entry (provider="embeddings") and points roles.embedder at
+// it — so the embedder the whole memory subsystem depends on finally
+// participates in health checks and can be given a backup. No-op when
+// [roles.embedder] is set explicitly or no [embedder].endpoint exists.
+func (c *Config) normalizeEmbedderRole() {
+	if !c.Roles.Embedder.IsEmpty() || c.Embedder.Endpoint == "" {
+		return
+	}
+	exists := false
+	for _, m := range c.Models {
+		if m.ID == legacyEmbedderModelID {
+			exists = true
+			break
+		}
+	}
+	if !exists {
+		c.Models = append(c.Models, ModelConfig{
+			ID:          legacyEmbedderModelID,
+			Provider:    "embeddings",
+			Endpoint:    c.Embedder.Endpoint,
+			DisplayName: "Embedder (legacy [embedder] block)",
+			Model:       c.Embedder.Model,
+			Dimension:   c.Embedder.Dimension,
+		})
+	}
+	c.Roles.Embedder.Primary = legacyEmbedderModelID
+	log.Printf("[config] embedder: promoted legacy [embedder] endpoint %q to model %q (role=embedder) — now health-checked; add [roles.embedder].backup for failover",
+		c.Embedder.Endpoint, legacyEmbedderModelID)
 }
 
 // expandConfig applies tilde and env var expansion to path-like fields.

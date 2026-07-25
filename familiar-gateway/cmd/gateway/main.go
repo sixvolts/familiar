@@ -17,6 +17,7 @@ import (
 	"github.com/familiar/gateway/internal/admin"
 	"github.com/familiar/gateway/internal/brave"
 	"github.com/familiar/gateway/internal/classifier"
+	"github.com/familiar/gateway/internal/config"
 	"github.com/familiar/gateway/internal/ctxbuild"
 	"github.com/familiar/gateway/internal/db"
 	"github.com/familiar/gateway/internal/engine"
@@ -25,6 +26,7 @@ import (
 	"github.com/familiar/gateway/internal/memengine"
 	"github.com/familiar/gateway/internal/memevents"
 	"github.com/familiar/gateway/internal/memory"
+	"github.com/familiar/gateway/internal/modelrole"
 	"github.com/familiar/gateway/internal/pipeline"
 	"github.com/familiar/gateway/internal/prefetch"
 	"github.com/familiar/gateway/internal/push"
@@ -146,11 +148,33 @@ func main() {
 	reg := router.NewRegistry(cfg.Models)
 	rtr := router.NewRouter(cfg.Router, reg)
 
-	// Maintenance-mode switch: routes chat to an operator-selected
-	// fallback model when the primary is down (auto) or drained
-	// (manual toggle). Selection persists via instance_settings;
-	// rehydrated in the admin block below. Wired into the pipeline
-	// (routing) and the admin handler (toggle + /auth/status banner).
+	// ROLE-FAILOVER: one resolver maps every role (chat, the sidecar
+	// tasks, embedder, rerank, research) to its primary→backup→fallback
+	// chain and picks a live model per call, skipping candidates the
+	// heartbeat has condemned. config.normalizeRoles already folded the
+	// legacy assignment keys into these chains, so this is the single
+	// routing authority for both new and pre-roles configs.
+	roleRes := modelrole.New(cfg.Roles.ResolvedChains(), reg.StatusOf)
+	rtr.SetChatRole(roleRes)
+	rtr.SetChatPrimary(cfg.Roles.Chat.Primary)
+
+	// Heartbeat cadence + failover/failback debounce from [roles]. The
+	// thresholds are what keep a single blip from swinging the whole
+	// chat path onto the backup and back.
+	reg.SetHealthParams(
+		time.Duration(cfg.Roles.IntervalOrDefault())*time.Second,
+		time.Duration(cfg.Roles.TimeoutOrDefault())*time.Second,
+		cfg.Roles.FailOrDefault(),
+		cfg.Roles.RecoverOrDefault(),
+	)
+
+	// Maintenance-mode switch: the last tier of the chat chain — an
+	// operator-selected model used when the configured chain is drained
+	// (manual toggle) or exhausted (auto). Selection persists via
+	// instance_settings; rehydrated in the admin block below. primaryFn
+	// names the *configured* primary while servingFn reports whichever
+	// tier is actually answering, so the banner can tell "on the backup"
+	// apart from "in maintenance".
 	maint := maintenance.New(
 		reg.StatusOf,
 		func(id string) string {
@@ -159,28 +183,35 @@ func main() {
 			}
 			return ""
 		},
-		rtr.GetChatModelID,
-	)
+		rtr.ChatPrimaryID,
+	).WithServing(rtr.ChatServing)
 
 	// Start health checks in background.
 	healthCtx, healthCancel := context.WithCancel(ctx)
 	defer healthCancel()
 	reg.StartHealthChecks(healthCtx, apiKeyFn)
+	log.Printf("[router] heartbeat: every %ds (timeout %ds), demote after %d consecutive fails, recover after %d consecutive oks",
+		cfg.Roles.IntervalOrDefault(), cfg.Roles.TimeoutOrDefault(),
+		cfg.Roles.FailOrDefault(), cfg.Roles.RecoverOrDefault())
+	for _, role := range config.RoleNames {
+		if len(roleRes.Chain(role)) > 0 {
+			log.Printf("[router] role %s", roleRes.FormatChain(role))
+		}
+	}
 
-	// 6b. Start GPU sidecar client (optional).
-	// MODEL-ROLES: pass the registry as the EndpointResolver so a
-	// model tagged role="classifier" / role="embedder" supplies
-	// the slot endpoints. Falls through to the literal config when
-	// no role-tagged model exists.
+	// 6b. Start GPU sidecar client (optional). Task→model resolution runs
+	// through the shared role resolver on every call (the registry
+	// supplies model→endpoint), so a sidecar task follows its role's
+	// failover chain without a separate health loop.
 	var sc *sidecar.Client
 	if cfg.Sidecar.Enabled {
-		sc = sidecar.NewClient(cfg.Sidecar, cfg.Router, reg)
+		sc = sidecar.NewClient(cfg.Sidecar, cfg.Router, reg, roleRes)
 		sc.Start(ctx)
 		defer sc.Stop()
 
 		rtr.SetSidecar(sc)
 		log.Printf("[gateway] sidecar enabled")
-		// Print the resolved task → model → endpoint table so the
+		// Print the resolved task → chain → live model table so the
 		// operator can verify routing without reverse-engineering it.
 		sc.LogRouting()
 	}

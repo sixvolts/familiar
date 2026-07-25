@@ -2,66 +2,117 @@ package sidecar
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/familiar/gateway/internal/config"
+	"github.com/familiar/gateway/internal/modelrole"
 )
 
-// fakeResolver satisfies EndpointResolver from in-memory maps so the
-// routing tests don't need a live registry.
-type fakeResolver struct {
-	roles  map[string]string // role  → endpoint
-	models map[string]string // model → endpoint
+// fakeEndpoints satisfies EndpointResolver from an in-memory model→
+// endpoint map so the routing tests don't need a live registry.
+type fakeEndpoints struct {
+	models map[string]string
 }
 
-func (f fakeResolver) EndpointForRole(role string) string { return f.roles[role] }
-func (f fakeResolver) EndpointForModel(id string) string  { return f.models[id] }
+func (f fakeEndpoints) EndpointForRole(role string) string { return "" }
+func (f fakeEndpoints) EndpointForModel(id string) string  { return f.models[id] }
 
-// routeEndpoint is a test helper: the endpoint a task resolved to,
-// or "" when the task is unconfigured.
-func routeEndpoint(c *Client, task string) string {
-	if r, ok := c.routes[task]; ok {
-		return r.endpoint
+// newTestClient wires a Client from explicit role chains + a health map,
+// mirroring how main.go composes the real resolver over the registry.
+func newTestClient(chains map[string][]string, health map[string]string, endpoints map[string]string) *Client {
+	res := modelrole.New(chains, func(id string) string { return health[id] })
+	return NewClient(config.SidecarConfig{Enabled: true}, config.RouterConfig{},
+		fakeEndpoints{models: endpoints}, res)
+}
+
+// The sidecar task names MUST equal the config role names — the whole
+// call-time resolution path relies on task == role. Lock it so a rename
+// on either side fails loudly instead of silently unrouting every task.
+func TestTaskNamesMatchConfigRoles(t *testing.T) {
+	pairs := map[string]string{
+		TaskClassify:      config.RoleClassify,
+		TaskCondense:      config.RoleCondense,
+		TaskExpandQueries: config.RoleExpandQueries,
+		TaskExtract:       config.RoleExtract,
+		TaskExtractLarge:  config.RoleExtractLarge,
+		TaskSummarize:     config.RoleSummarize,
+		TaskConflict:      config.RoleConflict,
+		TaskRelationship:  config.RoleRelationship,
+		TaskEntityGroup:   config.RoleEntityGroup,
 	}
-	return ""
+	for task, role := range pairs {
+		if task != role {
+			t.Errorf("sidecar task %q must equal config role %q", task, role)
+		}
+	}
 }
 
-// Explicit per-task assignment: each *_model key resolves through the
-// registry to its model's endpoint.
-func TestExplicitTaskRouting(t *testing.T) {
-	resolver := fakeResolver{
-		models: map[string]string{
-			"sidecar/fast":    "http://127.0.0.1:8400",
-			"sidecar/capable": "http://127.0.0.1:8200",
+func TestTaskResolvesToPrimaryEndpoint(t *testing.T) {
+	c := newTestClient(
+		map[string][]string{TaskClassify: {"fast"}},
+		map[string]string{"fast": modelrole.StatusOnline},
+		map[string]string{"fast": "http://127.0.0.1:8400"},
+	)
+	if got := c.TaskEndpoint(TaskClassify); got != "http://127.0.0.1:8400" {
+		t.Fatalf("classify → %q, want fast endpoint", got)
+	}
+	if _, err := c.taskReady(TaskClassify); err != nil {
+		t.Fatalf("healthy primary should be ready: %v", err)
+	}
+}
+
+func TestTaskFailsOverToBackupEndpoint(t *testing.T) {
+	c := newTestClient(
+		map[string][]string{TaskClassify: {"fast", "spare"}},
+		map[string]string{"fast": modelrole.StatusOffline, "spare": modelrole.StatusOnline},
+		map[string]string{"fast": "http://127.0.0.1:8400", "spare": "http://127.0.0.1:8500"},
+	)
+	if got := c.TaskEndpoint(TaskClassify); got != "http://127.0.0.1:8500" {
+		t.Fatalf("primary offline: classify → %q, want backup endpoint", got)
+	}
+	if _, err := c.taskReady(TaskClassify); err != nil {
+		t.Fatalf("backup is online — task should be ready: %v", err)
+	}
+}
+
+func TestTaskWholeChainOfflineUnavailable(t *testing.T) {
+	c := newTestClient(
+		map[string][]string{TaskClassify: {"fast", "spare"}},
+		map[string]string{"fast": modelrole.StatusOffline, "spare": modelrole.StatusOffline},
+		map[string]string{"fast": "http://127.0.0.1:8400", "spare": "http://127.0.0.1:8500"},
+	)
+	_, err := c.taskReady(TaskClassify)
+	if err == nil || errors.Is(err, ErrNoModelConfigured) {
+		t.Fatalf("whole chain offline should be an 'unavailable' error, got %v", err)
+	}
+}
+
+func TestTaskUnconfiguredReturnsErrNoModel(t *testing.T) {
+	c := newTestClient(map[string][]string{}, nil, nil)
+	if _, err := c.taskReady(TaskClassify); !errors.Is(err, ErrNoModelConfigured) {
+		t.Fatalf("unconfigured task err = %v, want ErrNoModelConfigured", err)
+	}
+	// A nil RoleResolver disables everything too.
+	c2 := NewClient(config.SidecarConfig{Enabled: true}, config.RouterConfig{}, nil, nil)
+	if _, err := c2.taskReady(TaskClassify); !errors.Is(err, ErrNoModelConfigured) {
+		t.Fatalf("nil resolver err = %v, want ErrNoModelConfigured", err)
+	}
+}
+
+func TestSharedEndpointSharesRouterAndGate(t *testing.T) {
+	c := newTestClient(
+		map[string][]string{
+			TaskClassify: {"fast"},
+			TaskCondense: {"fast"},
+			TaskExtract:  {"capable"},
 		},
-	}
-	cfg := config.SidecarConfig{
-		Enabled:       true,
-		ClassifyModel: "sidecar/fast",
-		CondenseModel: "sidecar/fast",
-		ExtractModel:  "sidecar/capable",
-	}
-	c := NewClient(cfg, config.RouterConfig{}, resolver)
-
-	if got := routeEndpoint(c, TaskClassify); got != "http://127.0.0.1:8400" {
-		t.Errorf("classify → %q, want fast endpoint", got)
-	}
-	if got := routeEndpoint(c, TaskCondense); got != "http://127.0.0.1:8400" {
-		t.Errorf("condense → %q, want fast endpoint", got)
-	}
-	if got := routeEndpoint(c, TaskExtract); got != "http://127.0.0.1:8200" {
-		t.Errorf("extract → %q, want capable endpoint", got)
-	}
-	// Unassigned tasks (no *_model, no default_model) are skipped.
-	if routeEndpoint(c, TaskSummarize) != "" {
-		t.Error("summarize should be unconfigured")
-	}
-	if c.routerFor(TaskSummarize) != nil {
-		t.Error("routerFor(summarize) should be nil")
-	}
-	// Tasks on the same endpoint share one HTTPRouter + one gate.
-	if c.routes[TaskClassify].router != c.routes[TaskCondense].router {
-		t.Error("classify + condense share an endpoint — expected the same router")
+		map[string]string{"fast": modelrole.StatusOnline, "capable": modelrole.StatusOnline},
+		map[string]string{"fast": "http://127.0.0.1:8400", "capable": "http://127.0.0.1:8200"},
+	)
+	if c.routerFor(TaskClassify) != c.routerFor(TaskCondense) {
+		t.Error("classify + condense resolve to the same endpoint — expected one shared router")
 	}
 	if c.gateForTask(TaskClassify) != c.gateForTask(TaskCondense) {
 		t.Error("classify + condense should share a gate")
@@ -71,161 +122,103 @@ func TestExplicitTaskRouting(t *testing.T) {
 	}
 }
 
-// default_model backs every task with no explicit *_model key.
-func TestDefaultModelFallback(t *testing.T) {
-	resolver := fakeResolver{
-		models: map[string]string{
-			"sidecar/fast":    "http://127.0.0.1:8400",
-			"sidecar/capable": "http://127.0.0.1:8200",
-		},
+func TestExtractLargeGetsLongTimeout(t *testing.T) {
+	c := newTestClient(
+		map[string][]string{TaskExtractLarge: {"big"}},
+		map[string]string{"big": modelrole.StatusOnline},
+		map[string]string{"big": "http://10.0.0.10:8080"},
+	)
+	r := c.routerFor(TaskExtractLarge)
+	if r == nil {
+		t.Fatal("extract_large should resolve to a router")
 	}
-	cfg := config.SidecarConfig{
-		Enabled:      true,
-		DefaultModel: "sidecar/fast",
-		ExtractModel: "sidecar/capable", // one explicit override
+	if r.client.Timeout != largeExtractTimeout {
+		t.Errorf("extract_large router timeout = %v, want %v", r.client.Timeout, largeExtractTimeout)
 	}
-	c := NewClient(cfg, config.RouterConfig{}, resolver)
-
-	for _, task := range []string{TaskClassify, TaskCondense, TaskExpandQueries, TaskSummarize} {
-		if got := routeEndpoint(c, task); got != "http://127.0.0.1:8400" {
-			t.Errorf("%s → %q, want default (fast) endpoint", task, got)
-		}
-	}
-	if got := routeEndpoint(c, TaskExtract); got != "http://127.0.0.1:8200" {
-		t.Errorf("extract override → %q, want capable endpoint", got)
-	}
-}
-
-// extract_large is an additive route: it binds the big-model endpoint
-// without disabling the other tasks' fallback, gets a generous request
-// ceiling, and stays unbound (so ExtractFactsLarge falls back to the
-// extract route) when unconfigured.
-func TestExtractLargeRouting(t *testing.T) {
-	resolver := fakeResolver{
-		models: map[string]string{
-			"sidecar/fast": "http://127.0.0.1:8400",
-			"gpu-host/big": "http://10.0.0.10:8080",
-		},
-	}
-
-	t.Run("bound additively without breaking default fallback", func(t *testing.T) {
-		cfg := config.SidecarConfig{
-			Enabled:           true,
-			DefaultModel:      "sidecar/fast",
-			ExtractLargeModel: "gpu-host/big",
-		}
-		c := NewClient(cfg, config.RouterConfig{}, resolver)
-
-		if got := routeEndpoint(c, TaskExtractLarge); got != "http://10.0.0.10:8080" {
-			t.Errorf("extract_large → %q, want big endpoint", got)
-		}
-		// Setting only extract_large must NOT strand the other tasks:
-		// default_model still backs them.
-		if got := routeEndpoint(c, TaskExtract); got != "http://127.0.0.1:8400" {
-			t.Errorf("extract → %q, want default (fast) endpoint — extract_large must not disable fallback", got)
-		}
-		// The big-model router carries the generous ceiling, not 10s.
-		r := c.routerFor(TaskExtractLarge)
-		if r == nil {
-			t.Fatal("extract_large should have a router")
-		}
-		if r.client.Timeout != largeExtractTimeout {
-			t.Errorf("extract_large router timeout = %v, want %v", r.client.Timeout, largeExtractTimeout)
-		}
-	})
-
-	t.Run("unconfigured stays unbound", func(t *testing.T) {
-		cfg := config.SidecarConfig{Enabled: true, DefaultModel: "sidecar/fast"}
-		c := NewClient(cfg, config.RouterConfig{}, resolver)
-		if routeEndpoint(c, TaskExtractLarge) != "" {
-			t.Error("extract_large should be unconfigured when extract_large_model is unset")
-		}
-	})
-
-	t.Run("typo resolves to no endpoint, stays unbound", func(t *testing.T) {
-		cfg := config.SidecarConfig{
-			Enabled:           true,
-			DefaultModel:      "sidecar/fast",
-			ExtractLargeModel: "gpu-host/typo",
-		}
-		c := NewClient(cfg, config.RouterConfig{}, resolver)
-		if routeEndpoint(c, TaskExtractLarge) != "" {
-			t.Error("extract_large with an unknown model must stay unbound (falls back to extract)")
-		}
-	})
-}
-
-// With no *_model / default_model keys, the legacy role resolution
-// runs: critical-path → role=small, background → role=medium.
-func TestLegacyRoleFallback(t *testing.T) {
-	resolver := fakeResolver{
-		roles: map[string]string{
-			config.ModelSlotSmall:  "http://127.0.0.1:8400",
-			config.ModelSlotMedium: "http://127.0.0.1:8200",
-		},
-	}
-	c := NewClient(config.SidecarConfig{Enabled: true}, config.RouterConfig{}, resolver)
-
-	for _, task := range []string{TaskClassify, TaskCondense, TaskExpandQueries} {
-		if got := routeEndpoint(c, task); got != "http://127.0.0.1:8400" {
-			t.Errorf("%s → %q, want small-role endpoint", task, got)
-		}
-	}
-	for _, task := range []string{TaskSummarize, TaskConflict, TaskRelationship, TaskEntityGroup} {
-		if got := routeEndpoint(c, task); got != "http://127.0.0.1:8200" {
-			t.Errorf("%s → %q, want medium-role endpoint", task, got)
-		}
+	// A critical-path task on a *different* endpoint keeps the short
+	// ceiling — the long timeout is scoped to the large route's key.
+	c2 := newTestClient(
+		map[string][]string{TaskClassify: {"fast"}},
+		map[string]string{"fast": modelrole.StatusOnline},
+		map[string]string{"fast": "http://127.0.0.1:8400"},
+	)
+	if got := c2.routerFor(TaskClassify).client.Timeout; got == largeExtractTimeout {
+		t.Errorf("classify router should not carry the large-extract ceiling, got %v", got)
 	}
 }
 
-// Legacy fallback with only role=small configured: medium-group tasks
-// fall through to the small endpoint so a single-instance deploy
-// keeps working.
-func TestLegacyRoleFallbackMediumFallsToSmall(t *testing.T) {
-	resolver := fakeResolver{
-		roles: map[string]string{config.ModelSlotSmall: "http://127.0.0.1:8400"},
-	}
-	c := NewClient(config.SidecarConfig{Enabled: true}, config.RouterConfig{}, resolver)
+// End-to-end back-compat: a pre-roles [sidecar].*_model config, run
+// through the real config loader, routes each task to the right model
+// through the resolver — proving the legacy keys still work untouched.
+func TestLegacySidecarConfigRoutesThroughRoles(t *testing.T) {
+	cfg := writeAndLoadConfig(t, `
+[[models]]
+id = "sidecar/fast"
+provider = "llama-server"
+endpoint = "http://127.0.0.1:8400"
 
-	if got := routeEndpoint(c, TaskSummarize); got != "http://127.0.0.1:8400" {
-		t.Errorf("summarize → %q, want fall-through to small endpoint", got)
+[[models]]
+id = "sidecar/capable"
+provider = "llama-server"
+endpoint = "http://127.0.0.1:8200"
+
+[sidecar]
+enabled = true
+default_model = "sidecar/fast"
+extract_model = "sidecar/capable"
+`)
+
+	// The chains below come from the loader's own normalization — not
+	// hand-built — so this fails if back-compat folding regresses.
+	endpoints := map[string]string{}
+	health := map[string]string{}
+	for _, m := range cfg.Models {
+		endpoints[m.ID] = m.Endpoint
+		health[m.ID] = modelrole.StatusOnline
+	}
+	c := newTestClient(cfg.Roles.ResolvedChains(), health, endpoints)
+
+	if got := c.TaskEndpoint(TaskClassify); got != "http://127.0.0.1:8400" {
+		t.Errorf("classify → %q, want default_model (fast) endpoint", got)
+	}
+	if got := c.TaskEndpoint(TaskExtract); got != "http://127.0.0.1:8200" {
+		t.Errorf("extract → %q, want extract_model (capable) endpoint", got)
+	}
+	if got := c.TaskEndpoint(TaskSummarize); got != "http://127.0.0.1:8400" {
+		t.Errorf("summarize → %q, want default_model (fast) endpoint", got)
 	}
 }
 
-// Legacy fallback also honors the literal router_endpoint when no
-// model carries a role (pre-MODEL-ROLES configs).
-func TestLegacyRouterEndpointFallback(t *testing.T) {
-	cfg := config.SidecarConfig{Enabled: true, RouterEndpoint: "http://127.0.0.1:9000"}
-	c := NewClient(cfg, config.RouterConfig{}, nil)
-	if got := routeEndpoint(c, TaskClassify); got != "http://127.0.0.1:9000" {
-		t.Errorf("classify → %q, want literal router_endpoint", got)
+// writeAndLoadConfig writes a gateway.toml into a temp dir and loads it
+// through config.Load, so tests exercise the real normalization path.
+func writeAndLoadConfig(t *testing.T, body string) *config.Config {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "gateway.toml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("writing test config: %v", err)
 	}
-}
-
-// An unconfigured task's taskReady returns ErrNoModelConfigured so
-// callers can distinguish "not set up" from "endpoint down".
-func TestTaskReadyUnconfigured(t *testing.T) {
-	c := NewClient(config.SidecarConfig{Enabled: true}, config.RouterConfig{}, nil)
-	if _, err := c.taskReady(TaskClassify); !errors.Is(err, ErrNoModelConfigured) {
-		t.Errorf("taskReady(classify) err = %v, want ErrNoModelConfigured", err)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("loading test config: %v", err)
 	}
-}
-
-// A configured task whose endpoint hasn't passed a health probe
-// returns an "unavailable" error — distinct from ErrNoModelConfigured.
-func TestTaskReadyConfiguredButUnhealthy(t *testing.T) {
-	cfg := config.SidecarConfig{Enabled: true, RouterEndpoint: "http://127.0.0.1:9000"}
-	c := NewClient(cfg, config.RouterConfig{}, nil)
-	_, err := c.taskReady(TaskClassify)
-	if err == nil || errors.Is(err, ErrNoModelConfigured) {
-		t.Errorf("taskReady(classify) err = %v, want a non-nil 'unavailable' error", err)
-	}
+	return cfg
 }
 
 func TestAvailableDefault(t *testing.T) {
 	c := &Client{stopCh: make(chan struct{})}
 	if c.Available() {
-		t.Error("new client should not be available")
+		t.Error("new client with no resolver should not be available")
+	}
+}
+
+func TestAvailableTrueWhenATaskResolves(t *testing.T) {
+	c := newTestClient(
+		map[string][]string{TaskClassify: {"fast"}},
+		map[string]string{"fast": modelrole.StatusOnline},
+		map[string]string{"fast": "http://127.0.0.1:8400"},
+	)
+	if !c.Available() {
+		t.Error("a resolvable, online task should make the client available")
 	}
 }
 

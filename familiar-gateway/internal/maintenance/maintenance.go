@@ -3,18 +3,23 @@
 // chat to a slower fallback model instead, surfacing a banner to
 // every user.
 //
-// The fallback model is chosen at runtime from the admin panel (a
-// dropdown of the registered models) — there is no config key. State
-// is held in memory here and persisted by the admin layer (instance
-// settings) so a restart mid-maintenance doesn't silently revert.
+// Since ROLE-FAILOVER this is the *last* tier of the chat role's
+// failover chain, not a parallel mechanism. [roles.chat] already fails
+// over primary → backup → global fallback automatically on health, and
+// the router resolves it per turn. Maintenance adds the two things the
+// chain can't express:
 //
-// Two ways in (the operator picked "both"):
-//   - manual: an admin toggles it on (Enabled).
-//   - auto:   the primary model's health check goes offline.
+//   - manual drain: an admin toggles it on to pull the big model out
+//     even while it is perfectly healthy (Enabled).
+//   - an operator-chosen, runtime-selected model that isn't in the
+//     config chain at all — picked from a dropdown of registered
+//     models, persisted via instance settings so a restart
+//     mid-maintenance doesn't silently revert.
 //
-// Either way the pipeline routes the trusted chat path to the
-// selected fallback model. Auto only engages once a fallback model
-// has been selected — there's nothing to fall back to otherwise.
+// Auto-engage remains for the case where the chat chain is exhausted
+// (every configured candidate offline): the admin-selected model is
+// tried before giving up. It only engages once a fallback model has
+// been selected — there's nothing to fall back to otherwise.
 package maintenance
 
 import "sync"
@@ -32,9 +37,18 @@ type Controller struct {
 	// labelOf returns a model's human display label, or "" if the id
 	// is not a registered model (also used to validate selections).
 	labelOf func(string) string
-	// primaryFn returns the id of the primary chat model (the one
-	// maintenance replaces) — typically router.GetChatModelID.
+	// primaryFn returns the id of the chat role's configured primary —
+	// the model maintenance replaces. This is tier 0 of the chat chain,
+	// NOT whatever is currently serving (see servingFn).
 	primaryFn func() string
+
+	// servingFn returns the model id currently serving the chat role and
+	// its tier in the chain (0 = primary). Optional: when nil the
+	// controller assumes the primary is serving, which is the pre-roles
+	// behavior. Lets the banner distinguish "running on the configured
+	// backup" (handled by the chain, no maintenance needed) from
+	// "running on the admin-selected maintenance model".
+	servingFn func() (string, int)
 }
 
 // State is the JSON-friendly snapshot handed to the admin panel and
@@ -50,12 +64,34 @@ type State struct {
 	PrimaryModel   string `json:"primary_model,omitempty"`
 	PrimaryOffline bool   `json:"primary_offline"`
 	Message        string `json:"message,omitempty"`
+
+	// ServingID / ServingModel / ServingTier describe what is actually
+	// answering chat right now, which since ROLE-FAILOVER may be a
+	// configured backup (tier > 0) rather than the primary or the
+	// maintenance model. FailoverActive is true when the chat role has
+	// fallen off its primary — the signal the banner uses to tell users
+	// "running on the backup" without maintenance being engaged.
+	ServingID      string `json:"serving_id,omitempty"`
+	ServingModel   string `json:"serving_model,omitempty"`
+	ServingTier    int    `json:"serving_tier"`
+	FailoverActive bool   `json:"failover_active"`
 }
 
 // New builds a controller. statusOf/labelOf resolve against the model
-// registry; primaryFn returns the current primary chat model id.
+// registry; primaryFn returns the chat role's configured primary id.
+// Use WithServing to teach it which tier is actually serving.
 func New(statusOf, labelOf func(string) string, primaryFn func() string) *Controller {
 	return &Controller{statusOf: statusOf, labelOf: labelOf, primaryFn: primaryFn}
+}
+
+// WithServing attaches the "who is serving chat right now" probe (model
+// id + chain tier), typically router.GetChatModelID + ChatModelTier.
+// Returns the controller for chaining at wiring time.
+func (c *Controller) WithServing(fn func() (string, int)) *Controller {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.servingFn = fn
+	return c
 }
 
 // SetState updates the manual toggle and selected fallback model. A
@@ -119,20 +155,63 @@ func (c *Controller) State() State {
 		s.PrimaryOffline = c.status(p) == "offline"
 	}
 
+	// Who is actually answering chat, per the chat role's chain.
+	if c.servingFn != nil {
+		id, tier := c.servingFn()
+		if id != "" {
+			s.ServingID = id
+			s.ServingModel = c.labelOrID(id)
+			s.ServingTier = tier
+			s.FailoverActive = tier > 0
+		}
+	}
+
 	// Active needs a chosen fallback in either mode.
+	//
+	// Auto engages only when the chat role's chain is EXHAUSTED — i.e.
+	// the model currently serving is itself offline — not merely when the
+	// primary is down. That ordering matters: maintenance is the last
+	// tier, so a healthy configured backup must get the traffic before
+	// the admin-selected maintenance model does. With no serving probe
+	// wired (pre-roles behavior) fall back to "primary offline".
 	if c.modelID != "" {
-		if c.enabled {
+		switch {
+		case c.enabled:
 			s.Active = true
 			s.Reason = "manual"
-		} else if s.PrimaryOffline {
+		case c.chainExhausted(s):
 			s.Active = true
 			s.Reason = "auto"
 		}
 	}
-	if s.Active {
+	switch {
+	case s.Active:
 		s.Message = "Maintenance mode — using " + s.Model
+	case s.FailoverActive:
+		// The chain handled it on its own; say so rather than staying
+		// silent, since answers are coming from a different model than
+		// the operator's primary.
+		s.Message = "Primary model unavailable — using " + s.ServingModel
 	}
 	return s
+}
+
+// chainExhausted reports whether the chat role has no usable model left
+// — the condition for auto-engaging maintenance. Called with the read
+// lock held (from State), so it must not re-lock.
+func (c *Controller) chainExhausted(s State) bool {
+	if c.servingFn == nil {
+		// No serving probe: pre-roles behavior, where "primary offline"
+		// is the only signal available.
+		return s.PrimaryOffline
+	}
+	if s.ServingID == "" {
+		// The chat role resolves to nothing at all.
+		return true
+	}
+	// The chain returned a model but it's offline too → every tier is
+	// down, so the admin-selected model is the only thing left to try.
+	return c.status(s.ServingID) == "offline"
 }
 
 // Active reports whether maintenance is currently in effect and, if

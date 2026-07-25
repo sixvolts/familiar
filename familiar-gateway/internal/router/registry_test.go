@@ -73,6 +73,59 @@ func TestRegistryGetProviderOpenAI(t *testing.T) {
 	}
 }
 
+// A single failed probe must NOT demote an online model when the fail
+// threshold is 2 — that's the anti-flap guarantee failover relies on.
+func TestRecordProbeDebouncesFailover(t *testing.T) {
+	r := NewRegistry([]config.ModelConfig{{ID: "m1", Provider: "openai"}})
+	r.SetHealthParams(0, 0, 2, 2) // failN=2, recoverN=2
+	r.recordProbe("m1", true)     // unknown → online immediately
+	if r.StatusOf("m1") != "online" {
+		t.Fatalf("first ok should bring unknown → online, got %q", r.StatusOf("m1"))
+	}
+	r.recordProbe("m1", false) // one blip — must stay online
+	if r.StatusOf("m1") != "online" {
+		t.Fatalf("one fail under threshold 2 must not demote, got %q", r.StatusOf("m1"))
+	}
+	r.recordProbe("m1", false) // second consecutive fail — now offline
+	if r.StatusOf("m1") != "offline" {
+		t.Fatalf("two consecutive fails should demote to offline, got %q", r.StatusOf("m1"))
+	}
+}
+
+// A recovering fail streak resets on any ok, so an alternating
+// up/down/up model never crosses the fail threshold.
+func TestRecordProbeStreakResets(t *testing.T) {
+	r := NewRegistry([]config.ModelConfig{{ID: "m1", Provider: "openai"}})
+	r.SetHealthParams(0, 0, 2, 2)
+	r.recordProbe("m1", true)
+	r.recordProbe("m1", false) // fail streak 1
+	r.recordProbe("m1", true)  // resets fail streak
+	r.recordProbe("m1", false) // fail streak 1 again
+	if r.StatusOf("m1") != "online" {
+		t.Fatalf("alternating probes must not demote, got %q", r.StatusOf("m1"))
+	}
+}
+
+// offline → online needs recoverThreshold consecutive oks (failback
+// debounce), but unknown → online is immediate (cold start).
+func TestRecordProbeDebouncesFailback(t *testing.T) {
+	r := NewRegistry([]config.ModelConfig{{ID: "m1", Provider: "openai"}})
+	r.SetHealthParams(0, 0, 1, 3) // failN=1, recoverN=3
+	r.recordProbe("m1", false)    // unknown → offline (failN=1)
+	if r.StatusOf("m1") != "offline" {
+		t.Fatalf("failN=1 should demote immediately, got %q", r.StatusOf("m1"))
+	}
+	r.recordProbe("m1", true) // 1 ok
+	r.recordProbe("m1", true) // 2 oks — still under recoverN=3
+	if r.StatusOf("m1") != "offline" {
+		t.Fatalf("2 oks under recover threshold 3 must stay offline, got %q", r.StatusOf("m1"))
+	}
+	r.recordProbe("m1", true) // 3 oks — recover
+	if r.StatusOf("m1") != "online" {
+		t.Fatalf("3 consecutive oks should recover to online, got %q", r.StatusOf("m1"))
+	}
+}
+
 func TestResolveAPIKeyVaultPriority(t *testing.T) {
 	cfg := config.ModelConfig{
 		APIKey:   "config-key",

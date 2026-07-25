@@ -110,5 +110,10 @@ func maintenanceResponse(s maintenance.State) map[string]any {
 		"primary_model":   s.PrimaryModel,
 		"primary_offline": s.PrimaryOffline,
 		"message":         s.Message,
+		// Which tier of the chat role's failover chain is answering.
+		"serving_id":      s.ServingID,
+		"serving_model":   s.ServingModel,
+		"serving_tier":    s.ServingTier,
+		"failover_active": s.FailoverActive,
 	}
 }

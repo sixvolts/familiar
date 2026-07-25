@@ -17,12 +17,30 @@ type ModelEntry struct {
 	Config      config.ModelConfig
 	Status      string // "online", "offline", "unknown"
 	LastHealthy time.Time
+
+	// Consecutive-probe streaks backing the debounce in recordProbe.
+	// A single blip no longer flips Status; the transition only fires
+	// after failThreshold consecutive fails (→ offline) or
+	// recoverThreshold consecutive oks (offline → online). This is the
+	// whole anti-flap mechanism, and it serves failover and failback
+	// symmetrically.
+	failStreak int
+	okStreak   int
 }
 
 // Registry tracks model availability and constructs providers on demand.
 type Registry struct {
 	entries map[string]*ModelEntry
 	mu      sync.RWMutex
+
+	// Heartbeat tuning. Zero values fall back to the historical
+	// hardcoded constants / single-probe behavior via the *OrDefault
+	// accessors, so a registry built without SetHealthParams behaves
+	// exactly as before.
+	interval         time.Duration
+	timeout          time.Duration
+	failThreshold    int
+	recoverThreshold int
 }
 
 // NewRegistry initialises a registry from a slice of model configs.
@@ -38,6 +56,31 @@ func NewRegistry(models []config.ModelConfig) *Registry {
 		}
 	}
 	return r
+}
+
+// SetHealthParams configures the heartbeat cadence and debounce
+// thresholds (typically from [roles]). Call before StartHealthChecks.
+func (r *Registry) SetHealthParams(interval, timeout time.Duration, failThreshold, recoverThreshold int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.interval = interval
+	r.timeout = timeout
+	r.failThreshold = failThreshold
+	r.recoverThreshold = recoverThreshold
+}
+
+func (r *Registry) intervalOrDefault() time.Duration {
+	if r.interval > 0 {
+		return r.interval
+	}
+	return 30 * time.Second
+}
+
+func (r *Registry) timeoutOrDefault() time.Duration {
+	if r.timeout > 0 {
+		return r.timeout
+	}
+	return 15 * time.Second
 }
 
 // GetProvider returns a live Provider for the given model ID.
@@ -143,13 +186,14 @@ func (r *Registry) StartHealthChecks(ctx context.Context, apiKeyFn func(string) 
 	}
 	r.mu.RUnlock()
 
+	interval := r.intervalOrDefault()
 	for _, id := range ids {
 		id := id
 		go func() {
 			// Run initial check immediately.
 			r.checkOne(ctx, id, apiKeyFn)
 
-			ticker := time.NewTicker(30 * time.Second)
+			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
 			for {
 				select {
@@ -174,23 +218,24 @@ func (r *Registry) checkOne(ctx context.Context, modelID string, apiKeyFn func(s
 	apiKey := resolveAPIKey(entry.Config, apiKeyFn)
 	provider, err := buildProvider(entry.Config, apiKey)
 	if err != nil {
-		r.setStatus(modelID, "offline")
+		r.recordProbe(modelID, false)
 		return
 	}
 
-	checkCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	checkCtx, cancel := context.WithTimeout(ctx, r.timeoutOrDefault())
 	defer cancel()
 
 	if err := provider.HealthCheck(checkCtx); err != nil {
-		log.Printf("[router] model %s health check failed: %v", modelID, err)
-		r.setStatus(modelID, "offline")
+		r.recordProbe(modelID, false)
 		return
 	}
 
-	r.setStatus(modelID, "online")
+	r.recordProbe(modelID, true)
 }
 
-// SetStatusForTest is an exported wrapper around setStatus for use in tests.
+// SetStatusForTest is an exported wrapper around setStatus for use in
+// tests. It forces the status directly and resets the debounce streaks
+// so a subsequent recordProbe starts from a clean slate.
 func (r *Registry) SetStatusForTest(modelID, status string) {
 	r.setStatus(modelID, status)
 }
@@ -200,10 +245,71 @@ func (r *Registry) setStatus(modelID, status string) {
 	defer r.mu.Unlock()
 	if e, ok := r.entries[modelID]; ok {
 		e.Status = status
+		e.failStreak = 0
+		e.okStreak = 0
 		if status == "online" {
 			e.LastHealthy = time.Now()
 		}
 	}
+}
+
+// recordProbe folds one health-probe result into a model's status
+// through the debounce thresholds. The risky transitions are debounced;
+// the safe ones are immediate:
+//   - unknown → online: immediate (fast, honest cold-start UX).
+//   - online/unknown → offline: only after failThreshold consecutive
+//     fails (a single blip won't demote a primary and trigger failover).
+//   - offline → online: only after recoverThreshold consecutive oks
+//     (a marginal model won't flap back and forth).
+//
+// LastHealthy tracks the most recent ok regardless of the status flip.
+func (r *Registry) recordProbe(modelID string, ok bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, exists := r.entries[modelID]
+	if !exists {
+		return
+	}
+	failN := r.failThreshold
+	if failN < 1 {
+		failN = 1
+	}
+	recoverN := r.recoverThreshold
+	if recoverN < 1 {
+		recoverN = 1
+	}
+
+	if ok {
+		e.failStreak = 0
+		e.okStreak++
+		e.LastHealthy = time.Now()
+		switch e.Status {
+		case "online":
+			// already up
+		case "offline":
+			if e.okStreak >= recoverN {
+				r.logTransition(modelID, e.Status, "online")
+				e.Status = "online"
+			}
+		default: // unknown
+			r.logTransition(modelID, e.Status, "online")
+			e.Status = "online"
+		}
+		return
+	}
+
+	e.okStreak = 0
+	e.failStreak++
+	if e.Status != "offline" && e.failStreak >= failN {
+		r.logTransition(modelID, e.Status, "offline")
+		e.Status = "offline"
+	}
+}
+
+// logTransition prints a status change once (called under the write
+// lock). Kept terse — the operator wants to see failover happen.
+func (r *Registry) logTransition(modelID, from, to string) {
+	log.Printf("[router] model %s health %s → %s", modelID, from, to)
 }
 
 // resolveAPIKey picks the best API key for a model config.

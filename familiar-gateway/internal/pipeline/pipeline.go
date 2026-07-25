@@ -2158,17 +2158,21 @@ func (p *Pipeline) classifyRequest(ctx context.Context, sess *session.Session, u
 		return r, nil
 	}
 
-	// Trusted path. CHAT-REARCH single-chat-model architecture:
-	//   1. chat model is the registry's only non-role-tagged entry
-	//      (rule-based fallback if multiple are registered)
-	//   2. classification comes from the sidecar's small slot via
-	//      Client.Classify, returning ordinal effort levels
+	// Trusted path:
+	//   1. the chat model comes from the [roles.chat] failover chain —
+	//      GetChatModelID resolves primary → backup → global fallback
+	//      against live health, so an offline primary is already handled
+	//      here without any maintenance involvement;
+	//   2. classification comes from the sidecar's classify role via
+	//      Client.Classify, returning ordinal effort levels.
 	chatID := p.router.GetChatModelID()
-	// Maintenance mode: the big model is down / drained — route this
-	// turn to the operator-selected fallback model instead. The
-	// classifier (sidecar small slot) still runs unchanged; only the
-	// answering model changes. If the fallback isn't a usable provider
-	// we fall through to the normal path rather than failing the turn.
+	// Maintenance mode is the LAST tier: it engages only when the
+	// operator drained the chain manually or every configured candidate
+	// is offline (see maintenance.chainExhausted), and routes this turn
+	// to the admin-selected model instead. The classifier still runs
+	// unchanged; only the answering model changes. If that model isn't a
+	// usable provider we fall through to the normal (chain-resolved)
+	// route rather than failing the turn.
 	if p.maintenance != nil {
 		if active, fallbackID := p.maintenance.Active(); active && fallbackID != "" {
 			if provider, err := p.router.GetRegistry().GetProvider(fallbackID, p.apiKeyFn); err == nil {

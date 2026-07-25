@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,281 +43,251 @@ var allTasks = []string{
 // ceiling costs nothing on the user's path.
 const largeExtractTimeout = 5 * time.Minute
 
-// criticalPathTasks block time-to-first-token: they run before the
-// model can start generating. They enter their endpoint's sync gate
-// so a slow background call yields to them when the two share a
-// model. The remaining tasks are background / post-turn.
-var criticalPathTasks = map[string]bool{
-	TaskClassify:      true,
-	TaskCondense:      true,
-	TaskExpandQueries: true,
-}
+// Critical-path tasks (classify, condense, expand_queries) block
+// time-to-first-token — they run before the model can start
+// generating, so their methods syncEnter the endpoint's gate to take
+// priority over background work sharing the same model. The remaining
+// tasks are background / post-turn and acquireAsync instead. The
+// distinction is applied per-method (see Classify vs ExtractFacts),
+// not from a lookup table.
 
 // ErrNoModelConfigured is returned by a Client method whose task has
-// no model assigned (no <task>_model, no default_model, no legacy
-// role fallback). Callers treat it like any other sidecar miss —
-// the feature the task powers is an optimization, never required.
+// no model assigned (its role chain names no model). Callers treat it
+// like any other sidecar miss — the feature the task powers is an
+// optimization, never required.
 var ErrNoModelConfigured = errors.New("sidecar: no model configured for this task")
-
-// taskRoute is a resolved task → model → endpoint binding.
-type taskRoute struct {
-	modelID  string
-	endpoint string
-	router   *HTTPRouter
-}
 
 // Client manages the connection to the GPU sidecar services.
 //
-// SIDECAR-SLOT-FIXES.md: each sidecar task (classify, condense,
-// extract, …) is assigned a model ID via [sidecar].<task>_model,
-// falling back to default_model, falling back to the legacy
-// role-tagged endpoints. The Client resolves each task to an
-// HTTPRouter once at construction; methods just look up their task.
+// ROLE-FAILOVER: each sidecar task name IS a role name (classify,
+// condense, extract, …). The Client resolves a task to a live model ID
+// on every call by walking that role's primary→backup→fallback chain
+// and skipping any candidate the shared model registry reports offline,
+// then turns the model ID into an endpoint. There is no frozen route
+// table and no separate sidecar health loop — health comes from the one
+// registry heartbeat that also drives chat failover and maintenance
+// mode, so a task follows its role's failover the moment a probe
+// condemns the primary.
 type Client struct {
 	cfg  config.SidecarConfig
 	rCfg config.RouterConfig
 
-	// routes maps a task name to its resolved binding. A missing key
-	// means the task is unconfigured — its method returns
-	// ErrNoModelConfigured.
-	routes map[string]taskRoute
-	// gates serialize background (async) work against critical-path
-	// (sync) work, keyed by endpoint. Two tasks on the same model
-	// share a gate; tasks on distinct models never contend.
-	gates map[string]*slotGate
+	// roles resolves a task/role name to a live model ID + health;
+	// endpoints turns a model ID into its HTTP endpoint. A nil roles
+	// resolver disables every task (taskReady → ErrNoModelConfigured).
+	roles     RoleResolver
+	endpoints EndpointResolver
 
-	mu        sync.RWMutex
-	healthy   map[string]bool // endpoint → last health-probe result
-	available bool            // any task endpoint healthy
+	mu sync.Mutex
+	// routers caches one HTTPRouter per endpoint (extract_large's
+	// long-timeout router is cached under "large:"+endpoint); gates
+	// cache one sync/async gate per endpoint. Both are lazily built
+	// as tasks resolve, and reused across tasks that land on the same
+	// endpoint.
+	routers map[string]*HTTPRouter
+	gates   map[string]*slotGate
 
 	stopOnce sync.Once
 	stopCh   chan struct{}
 }
 
-// EndpointResolver lets the sidecar Client resolve a model ID — or a
-// legacy role tag — to the HTTP endpoint of the [[models]] entry that
-// carries it. *router.Registry satisfies this; wire it in main.go
-// after the registry is built.
+// EndpointResolver turns a model ID into the HTTP endpoint of the
+// [[models]] entry that carries it. *router.Registry satisfies this.
 //
-// EndpointForModel("") and EndpointForRole("") return "". A nil
-// resolver is tolerated (every lookup yields "") so tests can
-// construct a Client without a registry.
+// EndpointForModel("") returns "". A nil resolver is tolerated (every
+// lookup yields "") so tests can construct a Client without a registry.
+//
+// EndpointForRole is retained for the (now config-normalized) role tags
+// but is no longer consulted on the routing path — task→model→endpoint
+// resolution goes through the RoleResolver + EndpointForModel.
 type EndpointResolver interface {
 	EndpointForRole(role string) string
 	EndpointForModel(modelID string) string
 }
 
-// NewClient creates a sidecar client. Call Start() to begin health
-// checking.
-//
-// Task → endpoint resolution, per task, in order:
-//  1. [sidecar].<task>_model  → resolver.EndpointForModel
-//  2. [sidecar].default_model → resolver.EndpointForModel
-//  3. Legacy role fallback (only when NO *_model / default_model key
-//     is set anywhere): critical-path tasks → role="small", extract
-//     → role="small_async" (then medium, then small), the remaining
-//     background tasks → role="medium" (then small). Role endpoints
-//     fall back to the literal sidecar.router_endpoint.
-//  4. Unresolved → task skipped; its method returns
-//     ErrNoModelConfigured.
-func NewClient(sidecarCfg config.SidecarConfig, routerCfg config.RouterConfig, resolver EndpointResolver) *Client {
-	c := &Client{
-		cfg:     sidecarCfg,
-		rCfg:    routerCfg,
-		routes:  make(map[string]taskRoute),
-		gates:   make(map[string]*slotGate),
-		healthy: make(map[string]bool),
-		stopCh:  make(chan struct{}),
-	}
+// RoleResolver resolves a role name (== a sidecar task name) to the
+// live model ID to use, walking the role's failover chain and skipping
+// offline candidates, and reports a model's current health. It is the
+// same resolver that drives chat failover. *modelrole.Resolver
+// satisfies it. A nil RoleResolver disables every sidecar task.
+type RoleResolver interface {
+	Resolve(role string) (modelID string, tier int, ok bool)
+	Status(modelID string) string
+	Chain(role string) []string
+}
 
-	endpointForModel := func(id string) string {
-		if id == "" || resolver == nil {
-			return ""
-		}
-		return resolver.EndpointForModel(id)
+// NewClient creates a sidecar client. The task→model chains come from
+// [roles] (config.normalizeRoles folds the legacy [sidecar].*_model
+// keys, role= tags, and router_endpoint into them at load), so the
+// client itself holds no routing config — it resolves every task
+// through the RoleResolver on each call. Start() is a no-op kept for
+// caller symmetry; health is driven by the shared registry heartbeat.
+func NewClient(sidecarCfg config.SidecarConfig, routerCfg config.RouterConfig, endpoints EndpointResolver, roles RoleResolver) *Client {
+	return &Client{
+		cfg:       sidecarCfg,
+		rCfg:      routerCfg,
+		roles:     roles,
+		endpoints: endpoints,
+		routers:   make(map[string]*HTTPRouter),
+		gates:     make(map[string]*slotGate),
+		stopCh:    make(chan struct{}),
 	}
+}
 
-	// extract_large is bound additively (in either routing mode) so it
-	// never disables the other tasks' fallback: setting only it must not
-	// leave classify/extract/… unbound. Unset → the route stays absent
-	// and ExtractFactsLarge falls back to the normal extract route.
-	if sidecarCfg.ExtractLargeModel != "" {
-		if ep := endpointForModel(sidecarCfg.ExtractLargeModel); ep != "" {
-			c.bindTask(TaskExtractLarge, sidecarCfg.ExtractLargeModel, ep)
-		}
+// endpointFor resolves a model ID to its endpoint via the injected
+// EndpointResolver, tolerating a nil resolver.
+func (c *Client) endpointFor(modelID string) string {
+	if modelID == "" || c.endpoints == nil {
+		return ""
 	}
+	return c.endpoints.EndpointForModel(modelID)
+}
 
-	if sidecarCfg.HasExplicitTaskModels() {
-		// Explicit task → model assignment (with default_model
-		// fallback already applied by SidecarTaskModels).
-		for _, tm := range sidecarCfg.SidecarTaskModels() {
-			ep := endpointForModel(tm.Model)
-			if ep == "" {
-				continue // task skipped — logged by LogRouting
-			}
-			c.bindTask(tm.Task, tm.Model, ep)
-		}
+// resolveTask walks a task's role chain to the model that should serve
+// it right now and returns (modelID, endpoint, err):
+//   - ErrNoModelConfigured when the role names no model (or resolves to
+//     an endpoint the registry doesn't know) — callers treat this like
+//     any sidecar miss (the feature it powers is an optimization).
+//   - a non-nil "unavailable" error when every candidate in the chain is
+//     currently offline (distinct from unconfigured so callers can tell
+//     "not set up" from "down right now").
+func (c *Client) resolveTask(task string) (modelID, endpoint string, err error) {
+	if c.roles == nil {
+		return "", "", ErrNoModelConfigured
+	}
+	modelID, _, ok := c.roles.Resolve(task)
+	if !ok || modelID == "" {
+		return "", "", ErrNoModelConfigured
+	}
+	endpoint = c.endpointFor(modelID)
+	if endpoint == "" {
+		return "", "", ErrNoModelConfigured
+	}
+	// Resolve already prefers a non-offline candidate; a returned model
+	// still marked offline means the whole chain is down.
+	if c.roles.Status(modelID) == "offline" {
+		return modelID, endpoint, fmt.Errorf("sidecar: %s: model %s (%s) offline", task, modelID, endpoint)
+	}
+	return modelID, endpoint, nil
+}
+
+// routerForEndpoint returns the cached HTTPRouter for an endpoint,
+// building it on first use. extract_large gets its own long-timeout
+// router (cached under a distinct key) so co-locating it on a shared
+// endpoint doesn't hand a critical-path task the 5-minute ceiling.
+func (c *Client) routerForEndpoint(endpoint string, large bool) *HTTPRouter {
+	key := endpoint
+	if large {
+		key = "large:" + endpoint
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if r := c.routers[key]; r != nil {
+		return r
+	}
+	var r *HTTPRouter
+	if large {
+		r = NewHTTPRouterWithTimeout(endpoint, largeExtractTimeout)
 	} else {
-		// Legacy role fallback — no explicit task assignment present.
-		smallEP, mediumEP, asyncEP := "", "", ""
-		if resolver != nil {
-			smallEP = resolver.EndpointForRole(config.ModelSlotSmall)
-			mediumEP = resolver.EndpointForRole(config.ModelSlotMedium)
-			asyncEP = resolver.EndpointForRole(config.ModelSlotSmallAsync)
-		}
-		if smallEP == "" {
-			smallEP = sidecarCfg.RouterEndpoint
-		}
-		if mediumEP == "" {
-			mediumEP = smallEP
-		}
-		if asyncEP == "" {
-			asyncEP = mediumEP
-		}
-		legacy := map[string]string{
-			TaskClassify:      smallEP,
-			TaskCondense:      smallEP,
-			TaskExpandQueries: smallEP,
-			TaskExtract:       asyncEP,
-			TaskSummarize:     mediumEP,
-			TaskConflict:      mediumEP,
-			TaskRelationship:  mediumEP,
-			TaskEntityGroup:   mediumEP,
-		}
-		for _, task := range allTasks {
-			if ep := legacy[task]; ep != "" {
-				c.bindTask(task, "(legacy role)", ep)
-			}
-		}
+		r = NewHTTPRouter(endpoint)
 	}
-
-	return c
+	c.routers[key] = r
+	return r
 }
 
-// bindTask wires a task to an endpoint, de-duplicating HTTPRouters
-// and sync/async gates by endpoint so tasks sharing a model also
-// share one client + one gate.
-func (c *Client) bindTask(task, modelID, endpoint string) {
-	gate := c.gates[endpoint]
-	var router *HTTPRouter
-	for _, r := range c.routes {
-		if r.endpoint == endpoint {
-			router = r.router
-			break
-		}
-	}
-	if router == nil {
-		// extract_large reads a whole multi-KB document in one pass on a
-		// big model — far past the default 10s ceiling. The timeout is
-		// per-endpoint (routers de-dup by endpoint), which is correct
-		// when the big model has its own endpoint (the intended setup);
-		// don't co-locate a critical-path task on it or it inherits this
-		// ceiling.
-		if task == TaskExtractLarge {
-			router = NewHTTPRouterWithTimeout(endpoint, largeExtractTimeout)
-		} else {
-			router = NewHTTPRouter(endpoint)
-		}
-	}
-	if gate == nil {
-		gate = &slotGate{}
-		c.gates[endpoint] = gate
-	}
-	c.routes[task] = taskRoute{modelID: modelID, endpoint: endpoint, router: router}
-}
-
-// LogRouting prints the resolved task → model → endpoint table at
-// startup so the operator can verify routing without reverse-
-// engineering the config. Unconfigured tasks are listed as skipped.
+// LogRouting prints, per task, the configured role chain and the model
+// it resolves to right now, so the operator can verify failover routing
+// without reverse-engineering the config.
 func (c *Client) LogRouting() {
-	log.Printf("[sidecar] task routing:")
+	log.Printf("[sidecar] task routing (task → chain → live model):")
 	for _, task := range allTasks {
-		if r, ok := c.routes[task]; ok {
-			log.Printf("[sidecar]   %-14s → %s  (%s)", task, r.modelID, r.endpoint)
-		} else {
+		chain := ""
+		if c.roles != nil {
+			chain = strings.Join(c.roles.Chain(task), " → ")
+		}
+		switch modelID, ep, err := c.resolveTask(task); {
+		case err == nil:
+			log.Printf("[sidecar]   %-14s [%s] → %s (%s)", task, chain, modelID, ep)
+		case errors.Is(err, ErrNoModelConfigured):
 			log.Printf("[sidecar]   %-14s → (skipped — no model configured)", task)
+		default:
+			log.Printf("[sidecar]   %-14s [%s] → (currently unavailable: %v)", task, chain, err)
 		}
 	}
 }
 
-// routerFor returns the HTTPRouter for a task, or nil when the task
-// has no model assigned.
+// routerFor returns the HTTPRouter for a task's currently-resolved
+// endpoint regardless of health, or nil when the task names no model.
+// Used by callers that only need the wired router, not a readiness gate.
 func (c *Client) routerFor(task string) *HTTPRouter {
-	if r, ok := c.routes[task]; ok {
-		return r.router
+	if c.roles == nil {
+		return nil
 	}
-	return nil
+	modelID, _, ok := c.roles.Resolve(task)
+	if !ok || modelID == "" {
+		return nil
+	}
+	ep := c.endpointFor(modelID)
+	if ep == "" {
+		return nil
+	}
+	return c.routerForEndpoint(ep, task == TaskExtractLarge)
 }
 
-// TaskEndpoint returns the resolved HTTP endpoint for a task, or ""
-// when the task is unconfigured. Used by callers that need a raw
+// TaskEndpoint returns the currently-resolved HTTP endpoint for a task,
+// or "" when the task is unconfigured. Used by callers that need a raw
 // endpoint URL outside the routed-method path — e.g. the pipeline's
 // preamble generator, which posts directly to /v1/chat/completions.
 func (c *Client) TaskEndpoint(task string) string {
-	if r, ok := c.routes[task]; ok {
-		return r.endpoint
+	if _, ep, err := c.resolveTask(task); err == nil {
+		return ep
+	}
+	// Even when the resolved model is offline, hand back the endpoint so
+	// the preamble path can still attempt it (best-effort, like before).
+	if c.roles != nil {
+		if modelID, _, ok := c.roles.Resolve(task); ok {
+			return c.endpointFor(modelID)
+		}
 	}
 	return ""
 }
 
-// endpointHealthy reports the last health-probe result for an
-// endpoint. Unknown endpoints (never probed) read as false.
-func (c *Client) endpointHealthy(endpoint string) bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.healthy[endpoint]
-}
-
-// taskReady resolves a task to its router and confirms the endpoint
-// is healthy. Returns (nil, error) when the task is unconfigured or
-// its endpoint is currently unreachable.
+// taskReady resolves a task to its router and confirms the resolved
+// model is not offline. Returns (nil, ErrNoModelConfigured) when the
+// task names no model, or (nil, error) when its whole chain is down.
 func (c *Client) taskReady(task string) (*HTTPRouter, error) {
-	r, ok := c.routes[task]
-	if !ok || r.router == nil {
-		return nil, ErrNoModelConfigured
+	_, ep, err := c.resolveTask(task)
+	if err != nil {
+		return nil, err
 	}
-	if !c.endpointHealthy(r.endpoint) {
-		return nil, fmt.Errorf("sidecar: %s endpoint %s unavailable", task, r.endpoint)
-	}
-	return r.router, nil
+	return c.routerForEndpoint(ep, task == TaskExtractLarge), nil
 }
 
-// distinctEndpoints returns the unique set of endpoints across all
-// configured tasks — the set the health loop probes.
-func (c *Client) distinctEndpoints() []string {
-	seen := make(map[string]struct{})
-	for _, r := range c.routes {
-		seen[r.endpoint] = struct{}{}
-	}
-	out := make([]string, 0, len(seen))
-	for ep := range seen {
-		out = append(out, ep)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// Start begins the health check loop in the background.
-func (c *Client) Start(ctx context.Context) {
-	go c.healthLoop(ctx)
-}
+// Start is a no-op retained for caller symmetry. Health is driven by
+// the shared model registry's heartbeat (router.Registry.
+// StartHealthChecks), which probes every sidecar task model along with
+// the chat models — there is no separate sidecar health loop anymore.
+func (c *Client) Start(ctx context.Context) {}
 
 // Stop shuts down the client.
 func (c *Client) Stop() {
 	c.stopOnce.Do(func() {
 		close(c.stopCh)
-		c.mu.Lock()
-		c.available = false
-		c.mu.Unlock()
 	})
 }
 
-// Available reports whether at least one sidecar task endpoint is
-// currently reachable.
+// Available reports whether at least one sidecar task currently
+// resolves to a reachable (non-offline) model.
 func (c *Client) Available() bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.available
+	if c.roles == nil {
+		return false
+	}
+	for _, task := range allTasks {
+		if _, _, err := c.resolveTask(task); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // Summarize produces a rolling summary of a conversation using the
@@ -461,76 +431,25 @@ func (c *Client) Embed(ctx context.Context, text string) (*EmbedResult, error) {
 	return nil, fmt.Errorf("sidecar embed: use pipeline embedder with [embedder] endpoint config instead")
 }
 
-// gateForTask returns the sync/async gate guarding a task's endpoint.
-// Critical-path tasks syncEnter it; the async extract task
-// acquireAsync it. Tasks on distinct endpoints get distinct gates and
-// never contend. Returns nil when the task is unconfigured.
+// gateForTask returns the sync/async gate guarding a task's currently-
+// resolved endpoint, building it on first use. Critical-path tasks
+// syncEnter it; the async extract task acquireAsync it. Tasks that
+// resolve to the same endpoint share a gate and contend; tasks on
+// distinct endpoints never do. Returns nil when the task is
+// unconfigured or its chain is down.
 func (c *Client) gateForTask(task string) *slotGate {
-	r, ok := c.routes[task]
-	if !ok {
+	_, ep, err := c.resolveTask(task)
+	if err != nil {
 		return nil
 	}
-	return c.gates[r.endpoint]
-}
-
-// healthLoop periodically probes every distinct task endpoint.
-func (c *Client) healthLoop(ctx context.Context) {
-	retryInterval := time.Duration(c.cfg.RetryIntervalSecs) * time.Second
-	if retryInterval == 0 {
-		retryInterval = 10 * time.Second
-	}
-
-	c.checkHealth(ctx)
-
-	ticker := time.NewTicker(retryInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-c.stopCh:
-			return
-		case <-ticker.C:
-			c.checkHealth(ctx)
-		}
-	}
-}
-
-// checkHealth probes each distinct task endpoint and updates the
-// per-endpoint health map. available is true when any endpoint
-// responds.
-func (c *Client) checkHealth(ctx context.Context) {
-	endpoints := c.distinctEndpoints()
-	if len(endpoints) == 0 {
-		return
-	}
-
-	// Probe outside the lock — one router per endpoint, reused.
-	results := make(map[string]bool, len(endpoints))
-	for _, ep := range endpoints {
-		checkCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		err := NewHTTPRouter(ep).HealthCheck(checkCtx)
-		cancel()
-		results[ep] = err == nil
-	}
-
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	anyUp := false
-	for ep, up := range results {
-		was := c.healthy[ep]
-		if up && !was {
-			log.Printf("[sidecar] endpoint %s available", ep)
-		} else if !up && was {
-			log.Printf("[sidecar] endpoint %s became unavailable", ep)
-		}
-		c.healthy[ep] = up
-		if up {
-			anyUp = true
-		}
+	g := c.gates[ep]
+	if g == nil {
+		g = &slotGate{}
+		c.gates[ep] = g
 	}
-	c.available = anyUp
+	return g
 }
 
 func slotStateString(s SlotState) string {

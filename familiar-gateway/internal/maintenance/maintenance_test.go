@@ -90,6 +90,81 @@ func TestAutoActivationOnPrimaryOffline(t *testing.T) {
 	}
 }
 
+// With a role chain wired, a healthy configured BACKUP must serve
+// before the admin-selected maintenance model. Maintenance is the last
+// tier — auto must not hijack the turn just because tier 0 is down.
+func TestAutoDefersToHealthyChainBackup(t *testing.T) {
+	c, reg := newTestController()
+	reg.status["gpu-host/qwen-30b"] = "online"
+	reg.labels["gpu-host/qwen-30b"] = "Backup (Qwen 30B)"
+	// The chat chain has failed over to the backup (tier 1).
+	c.WithServing(func() (string, int) { return "gpu-host/qwen-30b", 1 })
+	c.SetState(false, "sidecar/gemma")
+
+	reg.status["gpu-host/qwen"] = "offline" // primary down
+	if active, _ := c.Active(); active {
+		t.Fatal("a healthy configured backup must serve before maintenance auto-engages")
+	}
+	st := c.State()
+	if !st.FailoverActive || st.ServingTier != 1 || st.ServingModel != "Backup (Qwen 30B)" {
+		t.Fatalf("expected failover state naming the backup, got %+v", st)
+	}
+	if st.Message != "Primary model unavailable — using Backup (Qwen 30B)" {
+		t.Fatalf("unexpected failover message: %q", st.Message)
+	}
+}
+
+// When the whole chain is exhausted (the serving model is offline too),
+// maintenance auto-engages as the final tier.
+func TestAutoEngagesWhenChainExhausted(t *testing.T) {
+	c, reg := newTestController()
+	reg.status["gpu-host/qwen-30b"] = "offline"
+	c.WithServing(func() (string, int) { return "gpu-host/qwen-30b", 1 })
+	c.SetState(false, "sidecar/gemma")
+
+	reg.status["gpu-host/qwen"] = "offline"
+	active, id := c.Active()
+	if !active || id != "sidecar/gemma" {
+		t.Fatalf("exhausted chain should auto-engage maintenance, got active=%v id=%q", active, id)
+	}
+	if st := c.State(); st.Reason != "auto" {
+		t.Fatalf("want reason=auto, got %q", st.Reason)
+	}
+}
+
+// A chat role that resolves to nothing at all counts as exhausted.
+func TestAutoEngagesWhenChatRoleResolvesToNothing(t *testing.T) {
+	c, _ := newTestController()
+	c.WithServing(func() (string, int) { return "", 0 })
+	c.SetState(false, "sidecar/gemma")
+	if active, _ := c.Active(); !active {
+		t.Fatal("an unresolvable chat role should auto-engage maintenance")
+	}
+}
+
+// Serving the primary (tier 0) is the quiet path: no banner, no
+// maintenance, nothing to report.
+func TestNoBannerWhenServingPrimary(t *testing.T) {
+	c, _ := newTestController()
+	c.WithServing(func() (string, int) { return "gpu-host/qwen", 0 })
+	c.SetState(false, "sidecar/gemma")
+	st := c.State()
+	if st.Active || st.FailoverActive || st.Message != "" {
+		t.Fatalf("serving the primary should be silent, got %+v", st)
+	}
+}
+
+// Manual drain still wins over an otherwise-healthy chain.
+func TestManualWinsOverHealthyChain(t *testing.T) {
+	c, _ := newTestController()
+	c.WithServing(func() (string, int) { return "gpu-host/qwen", 0 })
+	c.SetState(true, "sidecar/gemma")
+	active, id := c.Active()
+	if !active || id != "sidecar/gemma" {
+		t.Fatalf("manual drain must win even with a healthy primary, got active=%v id=%q", active, id)
+	}
+}
+
 func TestUnknownStatusIsNotOffline(t *testing.T) {
 	c, reg := newTestController()
 	c.SetState(false, "sidecar/gemma")

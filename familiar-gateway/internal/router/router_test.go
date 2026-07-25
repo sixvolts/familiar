@@ -137,3 +137,89 @@ func TestRouterSelectFirstOnline(t *testing.T) {
 		t.Fatalf("expected model-a or model-b, got %q", modelID)
 	}
 }
+
+// stubChatRole is a minimal ChatRoleResolver for the chat-failover tests.
+type stubChatRole struct {
+	chain  []string
+	health map[string]string
+}
+
+func (s stubChatRole) Resolve(role string) (string, int, bool) {
+	if role != config.RoleChat || len(s.chain) == 0 {
+		return "", 0, false
+	}
+	for i, id := range s.chain {
+		if s.health[id] != "offline" {
+			return id, i, true
+		}
+	}
+	return s.chain[0], 0, true
+}
+
+// With a chat-role resolver attached, GetChatModelID follows the chain
+// instead of the chat=true / lex-order config selection.
+func TestGetChatModelIDUsesRoleChain(t *testing.T) {
+	reg := makeRegistryWithModels(
+		config.ModelConfig{ID: "primary", Provider: "openai", Endpoint: "https://e", Chat: true},
+		config.ModelConfig{ID: "backup", Provider: "openai", Endpoint: "https://e"},
+	)
+	rtr := NewRouter(config.RouterConfig{}, reg)
+	health := map[string]string{"primary": "online", "backup": "online"}
+	rtr.SetChatRole(stubChatRole{chain: []string{"primary", "backup"}, health: health})
+	rtr.SetChatPrimary("primary")
+
+	if got := rtr.GetChatModelID(); got != "primary" {
+		t.Fatalf("healthy primary should serve, got %q", got)
+	}
+	if tier, ok := rtr.ChatModelTier(); !ok || tier != 0 {
+		t.Fatalf("want tier 0, got %d (ok=%v)", tier, ok)
+	}
+
+	// Primary demoted → chat follows the chain to the backup, but
+	// ChatPrimaryID still names the configured primary.
+	health["primary"] = "offline"
+	if got := rtr.GetChatModelID(); got != "backup" {
+		t.Fatalf("offline primary should fail over to backup, got %q", got)
+	}
+	if tier, _ := rtr.ChatModelTier(); tier != 1 {
+		t.Fatalf("want tier 1 while on backup, got %d", tier)
+	}
+	if got := rtr.ChatPrimaryID(); got != "primary" {
+		t.Fatalf("ChatPrimaryID must keep naming the configured primary, got %q", got)
+	}
+
+	// Primary recovers → auto-failback.
+	health["primary"] = "online"
+	if got := rtr.GetChatModelID(); got != "primary" {
+		t.Fatalf("recovered primary should take traffic back, got %q", got)
+	}
+}
+
+// No resolver wired → the historical selection still applies, so a
+// pre-roles deployment behaves exactly as before.
+func TestGetChatModelIDFallsBackToConfigSelection(t *testing.T) {
+	reg := makeRegistryWithModels(
+		config.ModelConfig{ID: "zeta", Provider: "openai", Endpoint: "https://e"},
+		config.ModelConfig{ID: "alpha", Provider: "openai", Endpoint: "https://e", Chat: true},
+	)
+	rtr := NewRouter(config.RouterConfig{}, reg)
+	if got := rtr.GetChatModelID(); got != "alpha" {
+		t.Fatalf("chat=true model should win with no resolver, got %q", got)
+	}
+	if _, ok := rtr.ChatModelTier(); ok {
+		t.Fatal("ChatModelTier should report ok=false with no resolver")
+	}
+}
+
+// An unconfigured chat role falls through to the config selection
+// rather than returning empty.
+func TestGetChatModelIDUnconfiguredRoleFallsThrough(t *testing.T) {
+	reg := makeRegistryWithModels(
+		config.ModelConfig{ID: "only", Provider: "openai", Endpoint: "https://e"},
+	)
+	rtr := NewRouter(config.RouterConfig{}, reg)
+	rtr.SetChatRole(stubChatRole{}) // resolves nothing
+	if got := rtr.GetChatModelID(); got != "only" {
+		t.Fatalf("empty chat chain should fall through to config selection, got %q", got)
+	}
+}

@@ -1316,12 +1316,22 @@ func (h *Handler) authStatus(w http.ResponseWriter, r *http.Request) {
 	// 90s watchdog re-probe), so the warning shows/hides live — and
 	// auto-clears when the primary model recovers — without a
 	// dedicated poll.
+	// Also fires on a plain role failover (Active=false,
+	// FailoverActive=true): the chat chain silently moved to its backup,
+	// which users should still know about since a different model is
+	// answering. Reason distinguishes the two for the frontend.
 	if h.maintenance != nil {
-		if st := h.maintenance.State(); st.Active {
+		if st := h.maintenance.State(); st.Active || st.FailoverActive {
+			reason := st.Reason
+			model := st.Model
+			if !st.Active {
+				reason = "failover"
+				model = st.ServingModel
+			}
 			resp["maintenance"] = map[string]any{
-				"active":  true,
-				"reason":  st.Reason,
-				"model":   st.Model,
+				"active":  st.Active,
+				"reason":  reason,
+				"model":   model,
 				"message": st.Message,
 			}
 		}

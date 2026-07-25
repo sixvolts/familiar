@@ -333,6 +333,9 @@ func main() {
 	var identityResolver *identitypkg.Resolver
 	var sharedPool *db.Pool
 	var skillPkgStore *skillpkg.Store
+	// Drains pending_embeds once an embedder is reachable; also surfaces
+	// queue depth on the admin memory-health card.
+	var reembedSweeper *memengine.ReembedSweeper
 	if cfg.Memory.LocalDSN != "" {
 		pool, poolErr := db.Open(cfg.Memory.LocalDSN)
 		if poolErr != nil {
@@ -397,6 +400,23 @@ func main() {
 				sc.Start(ctx)
 				inProcMem.SetSleepCycle(sc)
 				log.Printf("[sleep] consolidation cycle started (interval=%ds)", cfg.Sleep.IntervalSecs)
+
+				// Re-embed sweep: facts committed while every embedder in
+				// the chain was offline land with a NULL vector (durable
+				// and FTS-findable, but invisible to semantic search) and
+				// get queued in pending_embeds. This drains that queue
+				// once an embedder is reachable, so an outage degrades
+				// retrieval temporarily instead of permanently. Runs
+				// independently of [sleep] — it must work with
+				// consolidation disabled, on a tighter cadence.
+				if embedder != nil {
+					reembed := memengine.NewReembedSweeper(pool,
+						memengine.EmbedFunc(embedder), 0, 0)
+					reembed.Start(ctx)
+					defer reembed.Stop()
+					reembedSweeper = reembed
+					log.Printf("[reembed] sweep started (drains pending_embeds when an embedder is reachable)")
+				}
 			}
 
 			if rs, relErr := memory.NewPgRelationshipStore(pool); relErr != nil {
@@ -708,6 +728,7 @@ func main() {
 			sc:               sc,
 			promptStore:      promptStore,
 			memEvents:        memEvents,
+			reembedSweeper:   reembedSweeper,
 			adapterErrs:      adapterErrs,
 		}, &adminH)
 	}

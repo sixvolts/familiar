@@ -45,6 +45,18 @@ func (h *Handler) AttachMemoryBrowser(mb MemoryBrowser) {
 	h.memoryBrowser = mb
 }
 
+// ReembedQueue is the narrow surface the memory-health card needs from
+// the re-embed sweeper: how many memories are waiting for a vector.
+// memengine.ReembedSweeper satisfies it; an interface keeps the admin
+// package independent of memengine.
+type ReembedQueue interface {
+	PendingCount(ctx context.Context) (int, error)
+}
+
+// AttachReembedQueue wires the re-embed backlog onto the handler.
+// Optional — without it the health card simply omits pending_embeds.
+func (h *Handler) AttachReembedQueue(q ReembedQueue) { h.reembed = q }
+
 // AttachMemoryEmbedder wires the embedding function PATCH uses to
 // re-embed edited content. Optional — without it, edits clear the
 // stored vector (better than keeping one that describes the old
@@ -432,13 +444,23 @@ func (h *Handler) memoryHealth(w http.ResponseWriter, r *http.Request) {
 			orphans = n
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"chunks":             stats.Chunks,
 		"oldest_chunk_days":  stats.OldestChunkDays,
 		"missing_embeddings": stats.MissingEmbeddings,
 		"superseded_rows":    stats.SupersededRows,
 		"orphan_edges":       orphans,
-	})
+	}
+	// Re-embed backlog: how many of those missing embeddings are queued
+	// for automatic back-fill. A non-zero depth with a healthy embedder
+	// means the sweep is catching up; a growing depth means the embedder
+	// chain is down.
+	if h.reembed != nil {
+		if n, err := h.reembed.PendingCount(r.Context()); err == nil {
+			resp["pending_embeds"] = n
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // memoryVersions serves GET /admin/api/memories/{id}/versions.

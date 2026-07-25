@@ -51,6 +51,7 @@ var migrationTables = []string{
 	"skill_packages",
 	"shard_skills",
 	"chat_folders",
+	"pending_embeds",
 }
 
 func TestMigrateFreshDatabase(t *testing.T) {

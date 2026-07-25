@@ -20,6 +20,7 @@ import (
 	identitypkg "github.com/familiar/gateway/internal/identity"
 	"github.com/familiar/gateway/internal/maintenance"
 	"github.com/familiar/gateway/internal/media"
+	"github.com/familiar/gateway/internal/memengine"
 	"github.com/familiar/gateway/internal/memevents"
 	"github.com/familiar/gateway/internal/memory"
 	"github.com/familiar/gateway/internal/pageevents"
@@ -89,6 +90,11 @@ func runHTTPAdapter(ctx context.Context, d httpAdapterDeps, adminHOut **admin.Ha
 						// Console PATCH re-embeds edited content so
 						// the stored vector matches the new text.
 						adminH.AttachMemoryEmbedder(embedder)
+					}
+					if d.reembedSweeper != nil {
+						// Health card reports how many memories are
+						// queued for automatic embedding back-fill.
+						adminH.AttachReembedQueue(d.reembedSweeper)
 					}
 					log.Printf("[admin] memory browser attached")
 				}
@@ -902,5 +908,6 @@ type httpAdapterDeps struct {
 	sc               *sidecar.Client
 	promptStore      *ctxbuild.PromptStore
 	memEvents        *memevents.Bus
+	reembedSweeper   *memengine.ReembedSweeper
 	adapterErrs      chan error
 }

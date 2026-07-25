@@ -227,7 +227,15 @@ func (e *MemEngine) CommitFacts(ctx context.Context, sessionID string, facts []*
 		if f.UserId != "" {
 			userID = f.UserId
 		}
-		_, err := e.pool.ExecContext(ctx, `
+		// RETURNING gives us the id that actually landed (on the
+		// ON CONFLICT path that's the pre-existing row, not `id`) plus
+		// whether it ended up without a vector. The DO UPDATE doesn't
+		// touch `embedding`, so needsEmbed also correctly reports a
+		// duplicate arriving against a row that was stored during an
+		// earlier embedder outage.
+		var storedID string
+		var needsEmbed bool
+		err := e.pool.QueryRowContext(ctx, `
 			INSERT INTO memories (
 				id, agent_id, scope, content, content_hash, embedding,
 				source_type, source_ref, source_description,
@@ -245,12 +253,13 @@ func (e *MemEngine) CommitFacts(ctx context.Context, sessionID string, facts []*
 				updated_at    = NOW(),
 				last_accessed = GREATEST(memories.last_accessed, EXCLUDED.last_accessed),
 				access_count  = memories.access_count + 1,
-				scope_tag     = COALESCE(memories.scope_tag, EXCLUDED.scope_tag)`,
+				scope_tag     = COALESCE(memories.scope_tag, EXCLUDED.scope_tag)
+			RETURNING id::text, (embedding IS NULL)`,
 			id, e.agentID, scopeOr(f.Scope, "session"), f.Content, hash, vectorParam(f.Embedding),
 			f.SourceType, f.SourceRef, f.SourceDescription,
 			float64(f.Confidence), f.ConfidenceBasis,
 			createdAt, lastAccessed, int(f.AccessCount),
-			tagsParam(f.Tags), supersedes, userID, scopeTag)
+			tagsParam(f.Tags), supersedes, userID, scopeTag).Scan(&storedID, &needsEmbed)
 		if err != nil {
 			// Single-row failures don't abort the batch — same as
 			// the previous implementation which logs and continues. Surface the
@@ -259,10 +268,32 @@ func (e *MemEngine) CommitFacts(ctx context.Context, sessionID string, facts []*
 			log.Printf("[memengine] commit fact %s failed: %v", id, err)
 			continue
 		}
+		// A fact with no vector is invisible to semantic search, so queue
+		// it for the re-embed sweep rather than leaving it half-indexed
+		// forever. Best-effort: a failed enqueue must not fail the commit
+		// (the fact itself is safely stored and FTS-findable).
+		if needsEmbed {
+			e.enqueuePendingEmbed(ctx, storedID)
+		}
 		committed++
 	}
 	out.Committed = committed
 	return out, nil
+}
+
+// enqueuePendingEmbed records a memory as awaiting an embedding. Called
+// when a commit lands with a NULL vector (no embedder reachable). The PK
+// on memory_id makes this idempotent, so re-committing the same content
+// during a long outage doesn't pile up rows.
+func (e *MemEngine) enqueuePendingEmbed(ctx context.Context, memoryID string) {
+	if e.pool == nil || memoryID == "" {
+		return
+	}
+	if _, err := e.pool.ExecContext(ctx, `
+		INSERT INTO pending_embeds (memory_id) VALUES ($1::uuid)
+		ON CONFLICT (memory_id) DO NOTHING`, memoryID); err != nil {
+		log.Printf("[memengine] warning: could not queue memory %s for re-embed: %v", memoryID, err)
+	}
 }
 
 // DeleteFact removes a memory row by id. Mirrors the previous implementation's
@@ -326,6 +357,12 @@ func (e *MemEngine) UpdateFact(ctx context.Context, sessionID, factID, newConten
 	}
 	n, _ := res.RowsAffected()
 	out.Updated = n > 0
+	// An edit whose re-embed failed (embedder down) just cleared this
+	// row's vector, so queue it for the sweep — otherwise the edited text
+	// stays out of semantic search until someone edits it again.
+	if out.Updated && len(newEmbedding) == 0 {
+		e.enqueuePendingEmbed(ctx, factID)
+	}
 	return out, nil
 }
 

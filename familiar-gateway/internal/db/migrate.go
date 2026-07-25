@@ -1509,6 +1509,28 @@ ALTER TABLE research_runs
     ADD COLUMN IF NOT EXISTS input_tokens  BIGINT NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS output_tokens BIGINT NOT NULL DEFAULT 0;`,
 	},
+	{
+		// Work queue for facts committed while no embedder was reachable.
+		// Such a row lands in `memories` with a NULL embedding, which
+		// means FTS can still match it but semantic search never will —
+		// so without this queue an embedder outage permanently degraded
+		// every fact written during it. A sweep drains this table once an
+		// embedder is back (see memengine.ReembedPending).
+		//
+		// PK on memory_id makes re-enqueueing idempotent; the CASCADE
+		// means deleting or collapsing a memory drops its pending row
+		// with no extra bookkeeping.
+		name: "pending_embeds",
+		ddl: `
+CREATE TABLE IF NOT EXISTS pending_embeds (
+    memory_id   UUID PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+    enqueued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    attempts    INTEGER     NOT NULL DEFAULT 0,
+    last_error  TEXT
+);
+CREATE INDEX IF NOT EXISTS pending_embeds_enqueued_idx
+    ON pending_embeds (enqueued_at);`,
+	},
 }
 
 // migrateLockKey is the pg_advisory_lock key that serializes Migrate

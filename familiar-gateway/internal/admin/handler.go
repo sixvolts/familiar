@@ -86,6 +86,7 @@ type Handler struct {
 	sessionMaxAge      time.Duration
 	memoryBrowser      MemoryBrowser                                             // optional; wired via AttachMemoryBrowser
 	memoryEmbed        func(ctx context.Context, text string) ([]float32, error) // optional; re-embeds PATCHed content
+	reembed            ReembedQueue                                              // optional; re-embed backlog depth for the health card
 	users              UserManager                                               // optional; wired via AttachUserManager
 	status             StatusProvider                                            // optional; wired via AttachStatusProvider
 	shards             ShardStore                                                // optional; wired via AttachShardStore (Phase 1 shards)

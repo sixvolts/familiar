@@ -35,6 +35,20 @@
             $("action-target-kind").addEventListener("change", updateTargetInputs);
             $("action-target-book").addEventListener("change", loadPageChoices);
             $("action-trigger").addEventListener("change", updateTriggerInputs);
+            // Picking "webhook" moves "Run as" to Ephemeral, because a
+            // webhook body is third-party text: whoever can reach the URL
+            // supplies it, and "Run as you" would hand that text every tool
+            // plus memory. The owner can set it back deliberately — the
+            // point is that full trust stops being the default.
+            //
+            // Only on a real user change: the edit path assigns
+            // .value programmatically, which does not fire "change", so
+            // opening an existing action never downgrades what it stored.
+            $("action-trigger").addEventListener("change", () => {
+                if ($("action-trigger").value !== "webhook") return;
+                const sel = $("action-shard");
+                if (sel && sel.value === "user") sel.value = "ephemeral";
+            });
             for (const a of document.querySelectorAll(".action-cron-preset")) {
                 a.addEventListener("click", (e) => {
                     e.preventDefault();
@@ -247,7 +261,9 @@
         $("action-interval").value = "60";
         $("action-watch-book").value = "personal";
         $("action-webhook-hint").textContent =
-            "A secret webhook URL is generated when you save; POST to it to fire this action.";
+            "A secret webhook URL is generated when you save; POST to it to fire this action. " +
+            "The request body is passed to the model as untrusted data — anyone who has the URL " +
+            "controls that text, so leave \u201cRun as\u201d on Ephemeral unless this action needs tools.";
         updateTriggerInputs();
         for (const id of ["action-run-now", "action-enable", "action-disable", "action-delete"]) {
             $(id).hidden = true;

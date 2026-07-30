@@ -193,10 +193,26 @@ func Validate(a *Action) error {
 	// deleted out from under an action leaves envelope=shard with no
 	// shard_id; re-enabling that row fails here until the owner picks
 	// a new envelope (the existing shard_deleted contract).
+	//
+	// Webhook triggers default to `ephemeral`, not `user`. A webhook body
+	// is third-party text (a GitHub hook carries issue titles written by
+	// strangers), and the user envelope hands the turn the entire tool
+	// registry plus memory retrieval and post-turn extraction against a
+	// session that persists across runs. Defaulting that combination on
+	// makes "expose my notes to anyone who can file an issue" the path of
+	// least resistance. An owner who wants tools can still ask for
+	// envelope=user explicitly — the point is that it is now a choice
+	// rather than a default.
+	//
+	// Only the DEFAULT changes; existing rows keep whatever envelope they
+	// were stored with (see the runner's exposure warning).
 	if a.Envelope == "" {
-		if a.ShardID != "" {
+		switch {
+		case a.ShardID != "":
 			a.Envelope = EnvelopeShard
-		} else {
+		case a.TriggerKind == TriggerWebhook:
+			a.Envelope = EnvelopeEphemeral
+		default:
 			a.Envelope = EnvelopeUser
 		}
 	}

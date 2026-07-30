@@ -13,6 +13,7 @@ import (
 
 	"github.com/familiar/gateway/internal/pageevents"
 	"github.com/familiar/gateway/internal/pipeline"
+	"github.com/familiar/gateway/internal/safego"
 	"github.com/familiar/gateway/internal/session"
 	"github.com/familiar/gateway/internal/shards"
 )
@@ -174,7 +175,12 @@ func (r *Runner) Start(ctx context.Context) error {
 		go func() {
 			for e := range ch {
 				if e.Kind == pageevents.KindPageSaved {
-					r.onPageSaved(e)
+					// Per-event recovery: this subscriber is the only thing
+					// driving page_saved actions, so it must survive one bad
+					// event. (The run itself is separately guarded inside
+					// execute, which owns the ledger row.)
+					ev := e
+					safego.Do("page_saved dispatch", func() { r.onPageSaved(ev) })
 				}
 			}
 		}()
@@ -336,7 +342,7 @@ func (r *Runner) Reload(ctx context.Context) error {
 			if delay < 0 {
 				// Missed one-shots don't fire late (spec: no
 				// catch-up); disable so it stops reloading forever.
-				go r.disableOneShot(a.ID, "missed")
+				safego.Go("disable missed one-shot "+a.ID, func() { r.disableOneShot(a.ID, "missed") })
 				continue
 			}
 			timer := time.AfterFunc(delay, func() { r.fire(a.ID, "run_at") })
@@ -444,6 +450,21 @@ func (r *Runner) execute(actionID, runID, trigger, eventNote string) {
 		delete(r.inFlight, actionID)
 		r.mu.Unlock()
 	}()
+
+	// Contain a panic HERE rather than at the three goroutine call sites,
+	// because this is where `finish` is in scope. An action run drives a
+	// full turn over model-authored output on a detached goroutine, so an
+	// unrecovered panic takes the gateway down; and skipping `finish` would
+	// leave the ledger row stuck in "running" until the next boot's
+	// MarkInterruptedRuns, so the action would look permanently in-flight.
+	// Recording it as a real failure also lets the breaker see it.
+	//
+	// Registered after the in-flight defer so it runs FIRST on unwind and
+	// stops the panic; the in-flight release then happens on the normal
+	// return path.
+	defer safego.RecoverWith(fmt.Sprintf("action %s run %s", actionID, runID), func(rec any) {
+		finish(RunResult{Status: RunStatusError, Error: fmt.Sprintf("panicked: %v", rec)})
+	})
 
 	loadCtx, cancelLoad := context.WithTimeout(context.Background(), 10*time.Second)
 	a, err := r.deps.Store.Get(loadCtx, actionID, "", true)

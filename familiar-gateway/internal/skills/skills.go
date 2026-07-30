@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"runtime/debug"
 	"sort"
 	"sync"
 )
@@ -263,7 +264,7 @@ func (r *Registry) Execute(ctx context.Context, toolName string, params json.Raw
 		return ToolResult{}, fmt.Errorf("skills: unknown tool %q", toolName)
 	}
 	log.Printf("[skills] dispatch: tool=%s skill=%s params=%dB", toolName, skillName, len(params))
-	result, err := s.Execute(ctx, toolName, params)
+	result, err := r.dispatch(ctx, s, toolName, params)
 	switch {
 	case err != nil:
 		log.Printf("[skills] dispatch failed: tool=%s err=%v", toolName, err)
@@ -273,6 +274,34 @@ func (r *Registry) Execute(ctx context.Context, toolName string, params json.Raw
 		log.Printf("[skills] dispatch ok: tool=%s content_len=%d", toolName, len(result.Content))
 	}
 	return result, err
+}
+
+// dispatch calls one skill's Execute with a panic guard, converting a
+// panic into an ordinary error.
+//
+// This is the single most valuable guard in the gateway. Execute hands
+// raw, model-authored JSON to thirteen skill packages, and the caller
+// decides whether a panic there is survivable: on /api/chat net/http
+// recovers it, but a research worker, a scheduled action, a page-saved
+// hook and the pipeline's own tool goroutine all run detached — so the
+// same malformed tool argument that produces a tidy 500 on one path takes
+// the whole process down on another. Guarding here fixes every path at
+// once, and guarding at the dispatch boundary (rather than inside each
+// skill) means a newly added skill is covered without remembering to.
+//
+// Returning an error rather than re-panicking is deliberate: the tool loop
+// already knows how to show the model a failed tool call
+// (pipeline.runToolLoop turns it into a synthetic tool result), so the turn
+// degrades to "that tool didn't work" instead of dying.
+func (r *Registry) dispatch(ctx context.Context, s Skill, toolName string, params json.RawMessage) (result ToolResult, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("[skills] PANIC in tool=%s: %v\n%s", toolName, rec, debug.Stack())
+			result = ToolResult{}
+			err = fmt.Errorf("skills: tool %q panicked: %v", toolName, rec)
+		}
+	}()
+	return s.Execute(ctx, toolName, params)
 }
 
 // Close calls Close on every registered skill. The first error is

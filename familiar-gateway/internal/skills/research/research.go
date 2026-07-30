@@ -37,6 +37,7 @@ import (
 
 	"github.com/familiar/gateway/internal/admin"
 	"github.com/familiar/gateway/internal/pipeline"
+	"github.com/familiar/gateway/internal/safego"
 	"github.com/familiar/gateway/internal/session"
 	"github.com/familiar/gateway/internal/skillpkg"
 	"github.com/familiar/gateway/internal/skills"
@@ -1039,6 +1040,22 @@ func (s *Skill) dispatch(userID string, book *admin.Book, page *admin.WikiPage, 
 		// line's "n/total" framing.
 		go func(n int, t taskSpec) {
 			defer wg.Done()
+			// A worker runs a full tool loop over model-authored input on a
+			// detached goroutine, so an unrecovered panic here kills the
+			// gateway. Recovery alone is not enough though: this goroutine
+			// owns the worker's terminal state, and a worker left in
+			// "active" is never retried by gap-fill (§6.7 retries only the
+			// recorded failures) and never stamped on the page — the run
+			// would just report fewer areas than it claimed. So a panic has
+			// to land in exactly the same bookkeeping as a returned error.
+			defer safego.RecoverWith(
+				fmt.Sprintf("research run %s worker %d", runID, n),
+				func(rec any) {
+					s.reportWorkerFailure(userID, book, page, n, t.Question,
+						fmt.Errorf("worker panicked: %v", rec))
+					recordFailure(t)
+					s.setWorkerState(runDBID, t.idx, admin.WorkerFailed)
+				})
 			select {
 			case sem <- struct{}{}:
 			case <-runCtx.Done():
@@ -1107,6 +1124,9 @@ func (s *Skill) dispatch(userID string, book *admin.Book, page *admin.WikiPage, 
 	// §6.7). The batch's own goroutine owns this so each round chains to
 	// the next without a user turn.
 	go func() {
+		// The supervisor chains gap-fill and synthesis; a panic here would
+		// kill the gateway and strand the run mid-flight.
+		defer safego.Recover("research run " + runID + " supervisor")
 		wg.Wait()
 		cancelRun()
 		n := int(succeeded.Load())

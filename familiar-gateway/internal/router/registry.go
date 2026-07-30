@@ -10,6 +10,7 @@ import (
 
 	"github.com/familiar/gateway/internal/config"
 	"github.com/familiar/gateway/internal/llm"
+	"github.com/familiar/gateway/internal/safego"
 )
 
 // ModelEntry holds runtime state for a model.
@@ -196,8 +197,13 @@ func (r *Registry) StartHealthChecks(ctx context.Context, apiKeyFn func(string) 
 	for _, id := range ids {
 		id := id
 		go func() {
-			// Run initial check immediately.
-			r.checkOne(ctx, id, apiKeyFn)
+			// Per-probe recovery, NOT a recover at the goroutine top. This
+			// loop is what drives role failover: if it returns, the model is
+			// never probed again, its status freezes, and failover quietly
+			// stops working for the rest of the process lifetime. One bad
+			// probe should be skipped, not fatal to the heartbeat.
+			label := "health probe " + id
+			safego.Do(label, func() { r.checkOne(ctx, id, apiKeyFn) })
 
 			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
@@ -206,7 +212,7 @@ func (r *Registry) StartHealthChecks(ctx context.Context, apiKeyFn func(string) 
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					r.checkOne(ctx, id, apiKeyFn)
+					safego.Do(label, func() { r.checkOne(ctx, id, apiKeyFn) })
 				}
 			}
 		}()

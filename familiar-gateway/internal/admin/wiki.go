@@ -46,6 +46,7 @@ import (
 	"time"
 
 	"github.com/familiar/gateway/internal/db"
+	"github.com/familiar/gateway/internal/safego"
 	"github.com/familiar/gateway/internal/textmerge"
 )
 
@@ -262,28 +263,21 @@ func (s *WikiStore) firePageSaved(page WikiPage, bookSlug, userID, shardID strin
 	if s.pageSaved == nil {
 		return
 	}
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				fmt.Printf("[wiki] page-saved hook panic: %v\n", r)
-			}
-		}()
+	// Note this only covers the hook body itself; a hook that spawns its
+	// OWN goroutine is outside this recover (see cmd/gateway's page-saved
+	// wiring, which uses safego.Go for exactly that reason).
+	safego.Go("wiki page-saved hook", func() {
 		s.pageSaved(page, bookSlug, userID, shardID, links)
-	}()
+	})
 }
 
 func (s *WikiStore) firePageDeleted(bookID, bookSlug, pageID, pageSlug string) {
 	if s.pageDeleted == nil {
 		return
 	}
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				fmt.Printf("[wiki] page-deleted hook panic: %v\n", r)
-			}
-		}()
+	safego.Go("wiki page-deleted hook", func() {
 		s.pageDeleted(bookID, bookSlug, pageID, pageSlug)
-	}()
+	})
 }
 
 // AttachWikiStore wires the store onto the handler.

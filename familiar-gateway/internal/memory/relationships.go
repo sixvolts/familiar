@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/familiar/gateway/internal/db"
+	"github.com/familiar/gateway/internal/safego"
 )
 
 // Relationship is one (subject, predicate, object) triple extracted
@@ -505,11 +506,15 @@ func (v *EntityVocab) refreshLoop(ctx context.Context) {
 		case <-v.stopCh:
 			return
 		case <-ticker.C:
-			refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			if err := v.Refresh(refreshCtx); err != nil {
-				log.Printf("[entity-vocab] refresh failed (continuing): %v", err)
-			}
-			cancel()
+			// Per-tick recovery so one bad refresh doesn't retire the
+			// cache's only updater.
+			safego.Do("entity-vocab refresh", func() {
+				refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				defer cancel()
+				if err := v.Refresh(refreshCtx); err != nil {
+					log.Printf("[entity-vocab] refresh failed (continuing): %v", err)
+				}
+			})
 		}
 	}
 }

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/familiar/gateway/internal/db"
+	"github.com/familiar/gateway/internal/safego"
 )
 
 // errEmptyVector marks an embedder that answered without erroring but
@@ -119,7 +120,11 @@ func (s *ReembedSweeper) loop(ctx context.Context) {
 		case <-s.stopCh:
 			return
 		case <-ticker.C:
-			s.RunOnce(ctx)
+			// Per-tick recovery: the sweep calls the embedder closure,
+			// which resolves a role, does HTTP and parses a response. A
+			// recover at the goroutine top would retire the sweep and
+			// pending_embeds would grow forever in silence.
+			safego.Do("re-embed sweep", func() { s.RunOnce(ctx) })
 		}
 	}
 }

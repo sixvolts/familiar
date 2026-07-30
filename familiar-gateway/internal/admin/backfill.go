@@ -3,10 +3,12 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/familiar/gateway/internal/backfill"
 	"github.com/familiar/gateway/internal/memory"
+	"github.com/familiar/gateway/internal/safego"
 )
 
 // backfillAdapter bridges PgVectorStore's BackfillItem to the
@@ -92,6 +94,20 @@ func (h *Handler) startBackfill(w http.ResponseWriter, r *http.Request) {
 	// cancelled as soon as we return the response, but the backfill
 	// itself needs to outlive that.
 	go func() {
+		// Detached, so a panic here would kill the gateway. And recovery
+		// alone would not be enough: the 409 guard above is keyed on
+		// backfillState.Running, which only the completion path below
+		// clears — a panicking run would leave it set for the process
+		// lifetime and the endpoint would refuse every retry with
+		// "backfill already running". Clear it and record why.
+		defer safego.RecoverWith("admin relationship backfill", func(rec any) {
+			h.backfillMu.Lock()
+			defer h.backfillMu.Unlock()
+			h.backfillState = &backfill.Progress{
+				Running:   false,
+				LastError: fmt.Sprintf("backfill panicked: %v", rec),
+			}
+		})
 		ctx := context.Background()
 		final, err := backfill.Run(ctx, deps, opts, func(p backfill.Progress) {
 			h.backfillMu.Lock()

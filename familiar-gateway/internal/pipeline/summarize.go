@@ -22,6 +22,12 @@ import (
 // a panic there — unlike one inside an http handler, which net/http
 // absorbs — takes the entire gateway down. Log it (with the stack) and
 // let the goroutine die; the next turn re-summarizes/re-extracts fresh.
+//
+// This calls recover() itself rather than delegating to safego.Recover:
+// recover() only works when invoked DIRECTLY by the deferred function, so
+// `defer recoverBackground(...)` -> safego.Recover() would sit one frame too
+// deep and the panic would escape. Kept as a named wrapper because the two
+// call sites read better with the label baked in.
 func recoverBackground(label string) {
 	if r := recover(); r != nil {
 		log.Printf("[pipeline] %s panic recovered: %v\n%s", label, r, debug.Stack())

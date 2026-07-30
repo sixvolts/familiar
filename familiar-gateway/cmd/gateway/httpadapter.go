@@ -28,6 +28,7 @@ import (
 	"github.com/familiar/gateway/internal/pipeline"
 	"github.com/familiar/gateway/internal/push"
 	"github.com/familiar/gateway/internal/router"
+	"github.com/familiar/gateway/internal/safego"
 	"github.com/familiar/gateway/internal/session"
 	"github.com/familiar/gateway/internal/shards"
 	"github.com/familiar/gateway/internal/sidecar"
@@ -294,12 +295,23 @@ func runHTTPAdapter(ctx context.Context, d httpAdapterDeps, adminHOut **admin.Ha
 							// extract sidecar, pushing the turn past the 300s
 							// cap. The SSE publish above stays synchronous so
 							// the live evidence view still updates instantly.
-							go kp.OnPageSaved(context.Background(), wikiknowledge.SaveEvent{
+							// safego.Go, not a bare `go`: the wiki store already
+							// wraps this hook in a recovering goroutine
+							// (admin/wiki.go firePageSaved), but this spawns a
+							// CHILD goroutine and a parent's deferred recover
+							// cannot cover one. OnPageSaved parses model output
+							// to extract wiki knowledge, so an unrecovered panic
+							// here kills the gateway — on the one path that was
+							// explicitly built to be panic-safe.
+							ev := wikiknowledge.SaveEvent{
 								BookID: page.BookID, BookSlug: bookSlug,
 								PageID: page.ID, PageSlug: page.Slug,
 								UserID: userID,
 								Title:  page.Title, Content: page.Content,
 								Links: links,
+							}
+							safego.Go("wiki knowledge extraction "+page.Slug, func() {
+								kp.OnPageSaved(context.Background(), ev)
 							})
 						}
 					})

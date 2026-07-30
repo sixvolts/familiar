@@ -60,7 +60,37 @@ type Output struct {
 	MemoryDepth MemoryDepth   `json:"memory_depth"`
 	SearchDepth SearchDepth   `json:"search_depth"`
 	Tools       []string      `json:"tools"`
+
+	// Source records where this verdict came from. Never decoded from
+	// the model (json:"-") — the classifier stamps it. Two reasons it
+	// exists: the turn log needs to distinguish a real verdict from a
+	// fallback (otherwise the fallback rate is unknowable), and a
+	// consumer must be able to tell "the model said don't search" from
+	// "we never got an answer", which are very different facts.
+	Source Source `json:"-"`
 }
+
+// Source is the provenance of a classifier verdict.
+type Source string
+
+const (
+	// SourceModel — the classifier answered and the verdict parsed.
+	SourceModel Source = "model"
+	// SourceStatic — we learned nothing about this turn: no classifier
+	// wired, its chain offline, or the request never completed. Carries
+	// StaticDefault.
+	SourceStatic Source = "static"
+	// SourceUnparsed — the model answered but the output was unusable.
+	// Distinct from SourceStatic because a responding-but-confused
+	// classifier is evidence the turn may be unusual, so this one keeps
+	// ConservativeFallback.
+	SourceUnparsed Source = "unparsed"
+)
+
+// FromModel reports whether the verdict reflects an actual classifier
+// decision. Consumers that would otherwise treat a fallback's level as
+// an affirmative instruction should gate on this.
+func (o Output) FromModel() bool { return o.Source == SourceModel }
 
 // ConservativeFallback is what the pipeline uses when the classifier
 // is unreachable, returns malformed JSON, or otherwise fails. Per
@@ -75,6 +105,38 @@ func ConservativeFallback() Output {
 		MemoryDepth: MemoryDeep,
 		SearchDepth: SearchNone,
 		Tools:       nil,
+		Source:      SourceUnparsed,
+	}
+}
+
+// StaticDefault is what to use when we learned NOTHING about the turn —
+// no classifier configured, its chain offline, or the request failed or
+// timed out.
+//
+// ConservativeFallback is the wrong answer for those cases. It is the
+// most expensive configuration in the system, so using it on a timeout
+// means a saturated box responds to "we're too busy to classify" by
+// demanding maximum work from itself: widest retrieval, largest token
+// ceiling, heaviest prompt overlay. That is an amplifying loop, and it
+// fires exactly when the box can least afford it. Reserve
+// ConservativeFallback for the one case where it is justified — the
+// model DID answer and we couldn't read it, which is weak evidence the
+// turn is unusual.
+//
+// Search is Shallow, not None, and that is deliberate: SearchNone is a
+// hard veto (it sets webSearchDisabled), so defaulting to None means a
+// classifier outage silently makes web search impossible — and "look up
+// the latest X" then gets answered from stale weights with full
+// confidence. One permitted call lets the chat model decide for itself;
+// it does not force a search. A wasted Brave call is a much better
+// failure than a confidently stale answer.
+func StaticDefault() Output {
+	return Output{
+		Thinking:    ThinkingMedium,
+		MemoryDepth: MemoryShallow,
+		SearchDepth: SearchShallow,
+		Tools:       nil,
+		Source:      SourceStatic,
 	}
 }
 

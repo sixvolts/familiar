@@ -303,6 +303,31 @@ func (p *Pipeline) turnContext(reqCtx context.Context, sessID string) (context.C
 	}
 }
 
+// prepContext derives the context for the PREPARATION phase of a turn —
+// classification and context assembly, everything before we commit to
+// generating. It is cancelled when EITHER the turn context is (user
+// Stop, turn hard cap, gateway shutdown) OR the originating request is
+// (the SSE client hung up).
+//
+// Both halves matter and neither alone is right. The production context
+// is deliberately detached from the request so an abandoned stream still
+// finishes and persists its answer — but applying that detachment to
+// preparation would mean a client that disconnects before any token
+// exists still pays for a full classification and retrieval pass.
+// Conversely, running preparation on the bare request context — which is
+// what happened before this existed — puts it outside the turn registry,
+// so the Stop button could not cut a turn still stuck in classification.
+//
+// The caller must defer the returned cancel.
+func prepContext(turnCtx, reqCtx context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(turnCtx)
+	stopOnDisconnect := context.AfterFunc(reqCtx, cancel)
+	return ctx, func() {
+		stopOnDisconnect()
+		cancel()
+	}
+}
+
 // maintenanceSwitch is the slice of the maintenance controller the
 // pipeline needs: "are we in maintenance, and if so which model?".
 // An interface keeps the pipeline decoupled from the controller's
@@ -1415,16 +1440,20 @@ func (p *Pipeline) Handle(ctx context.Context, sess *session.Session, userMsg st
 // on anything except the parts the overrides struct explicitly controls.
 func (p *Pipeline) handle(ctx context.Context, sess *session.Session, userMsg string, convCtx *sidecar.ConversationContext, overrides *ShardOverrides) (string, *RouteInfo, error) {
 	p.augmentShardOverrides(ctx, overrides)
-	route, info, err := p.beginTurn(ctx, sess, userMsg, convCtx, overrides)
+
+	// Establish the turn context (and its Stop registration) BEFORE
+	// classification, so a turn stuck in the classifier is cancellable.
+	// Preparation itself runs on prepContext, which additionally honours
+	// a client disconnect. See turnContext / prepContext.
+	turnCtx, turnCancel := p.turnContext(ctx, sess.ID)
+	defer turnCancel()
+
+	prepCtx, prepCancel := prepContext(turnCtx, ctx)
+	route, info, err := p.beginTurn(prepCtx, sess, userMsg, convCtx, overrides)
+	prepCancel()
 	if err != nil {
 		return "", nil, err
 	}
-
-	// Same detach as the streaming path: once we start producing the
-	// turn, a client that hangs up shouldn't cost us the generated
-	// answer (and its extraction). See turnContext.
-	turnCtx, turnCancel := p.turnContext(ctx, sess.ID)
-	defer turnCancel()
 
 	// Shards skip pre-execution tool orchestration — their tools are in
 	// the allowlist attached to the LLM request, not prefetched by the
@@ -1473,10 +1502,6 @@ func (p *Pipeline) handleStream(
 	overrides *ShardOverrides,
 ) (string, *RouteInfo, error) {
 	p.augmentShardOverrides(ctx, overrides)
-	route, info, err := p.beginTurn(ctx, sess, userMsg, convCtx, overrides)
-	if err != nil {
-		return "", nil, err
-	}
 
 	// From here on we produce the actual turn. Detach from the request
 	// context so an SSE client that disconnects mid-stream gets the
@@ -1484,8 +1509,19 @@ func (p *Pipeline) handleStream(
 	// stream writes become best-effort no-ops, but generation, tools,
 	// and the commit run to completion (bounded by turnHardCap /
 	// shutdown). See turnContext.
+	//
+	// Created BEFORE beginTurn so the Stop button can cut a turn that is
+	// still classifying; preparation runs on prepCtx, which also honours
+	// a client disconnect (nothing has been produced yet at that point).
 	turnCtx, turnCancel := p.turnContext(ctx, sess.ID)
 	defer turnCancel()
+
+	prepCtx, prepCancel := prepContext(turnCtx, ctx)
+	route, info, err := p.beginTurn(prepCtx, sess, userMsg, convCtx, overrides)
+	prepCancel()
+	if err != nil {
+		return "", nil, err
+	}
 
 	// Tool execution and preamble run concurrently on the trusted path.
 	// Shards skip both: their tools are attached to the LLM request
@@ -2064,6 +2100,23 @@ func (r *routeResult) complexityLabel() string {
 	return "knowledge"
 }
 
+// classifierSourceLabel renders a verdict's provenance for the turn log,
+// defaulting to "none" for the synthesized shard verdicts that never go
+// through the classifier at all.
+func classifierSourceLabel(s classifier.Source) string {
+	if s == "" {
+		return "none"
+	}
+	return string(s)
+}
+
+func orNone(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
 // classifyRequest resolves the per-turn classifier output + the chat
 // model that will generate the response. Two paths:
 //
@@ -2143,8 +2196,10 @@ func (p *Pipeline) classifyRequest(ctx context.Context, sess *session.Session, u
 		}
 	}
 
-	// Classify. Sidecar Client.Classify always returns a valid
-	// Output (failures fall back to ConservativeFallback per spec).
+	// Classify. Always returns a valid Output; the Source field records
+	// whether it is a real verdict or a default, and stats carry the
+	// latency + token cost so this call stops being unmeasurable.
+	var cstats sidecar.ClassifyStats
 	if p.sidecarClient != nil {
 		// Build the 2-3 turn history slice the classifier prompt
 		// expects, in chronological order. Spec is explicit about
@@ -2154,10 +2209,15 @@ func (p *Pipeline) classifyRequest(ctx context.Context, sess *session.Session, u
 		for _, t := range recent {
 			history = append(history, sidecar.Turn{Role: t.Role, Content: t.Content})
 		}
-		r.classifier = p.sidecarClient.Classify(ctx, history, userMsg)
+		r.classifier, cstats = p.sidecarClient.ClassifyWithStats(ctx, history, userMsg)
 	} else {
-		// No sidecar wired: conservative fallback.
-		r.classifier = classifier.ConservativeFallback()
+		// No classifier configured at all. Take the cheap middle setting,
+		// NOT ConservativeFallback: running deliberately without a
+		// classifier should not mean every turn pays maximum effort
+		// forever (widest retrieval, largest ceiling, heaviest overlay).
+		// This is also the baseline you can compare the classifier
+		// against — it did not exist before.
+		r.classifier = classifier.StaticDefault()
 	}
 	r.toolsNeeded = append([]string(nil), r.classifier.Tools...)
 
@@ -2167,12 +2227,20 @@ func (p *Pipeline) classifyRequest(ctx context.Context, sess *session.Session, u
 	// since SetLastClassifier handles a nil receiver.
 	sess.SetLastClassifier(r.classifier)
 
-	// Per-turn verdict log — makes the classifier observable. Shows
-	// the raw ordinal levels alongside the resolved tier so a
-	// "everything is knowledge" pattern is visible at a glance.
-	log.Printf("[pipeline] classified: thinking=%s memory=%s search=%s tools=%v → tier=%s",
+	// Per-turn verdict log — makes the classifier observable. Shows the
+	// raw ordinal levels alongside the resolved tier so an "everything is
+	// knowledge" pattern is visible at a glance, plus the cost and
+	// provenance of the verdict itself.
+	//
+	// src= is the one field that answers "is this thing working?": grep
+	// `src=static` to get the fallback rate, and dur= to get the tail
+	// latency. Those are the two numbers that decide whether classifying
+	// up front is worth its place on the critical path.
+	log.Printf("[pipeline] classified: thinking=%s memory=%s search=%s tools=%v → tier=%s (src=%s dur=%s in=%d out=%d model=%s)",
 		r.classifier.Thinking, r.classifier.MemoryDepth, r.classifier.SearchDepth,
-		r.classifier.Tools, r.complexityLabel())
+		r.classifier.Tools, r.complexityLabel(),
+		classifierSourceLabel(r.classifier.Source), cstats.Duration.Round(time.Millisecond),
+		cstats.InputTokens, cstats.OutputTokens, orNone(cstats.ModelID))
 
 	return r, nil
 }
@@ -2226,23 +2294,44 @@ func (p *Pipeline) buildLLMRequest(messages []llm.Message, route *routeResult, i
 	// On local llama-server (and any OpenAI-compatible reasoning model)
 	// the <think> tokens come out of the SAME output allowance as the
 	// answer — there's no separate thinking budget field, it's all
-	// max_tokens / n_predict. So a thinking budget larger than the
-	// answer budget (e.g. deep_reasoning's 8000 vs the 4096 default)
-	// could be spent entirely inside <think>, leaving zero tokens for
-	// the reply — the empty-response failure commitAndExtract has to
-	// defend against. Reserve max_tokens for the ANSWER and add the
-	// thinking budget on top. See EXTERNAL-READINESS-REVIEW.md.
-	maxTokens := answerTokens
-	if thinkingBudget.Enabled && thinkingBudget.TokenBudget > 0 {
-		maxTokens += thinkingBudget.TokenBudget
+	// max_tokens / n_predict. So the thinking budget has to be added on
+	// top of the answer budget rather than shared with it, or a long
+	// reasoning pass leaves zero tokens for the reply (the empty-response
+	// failure commitAndExtract defends against). See
+	// EXTERNAL-READINESS-REVIEW.md.
+	//
+	// But note what that makes the number: a CEILING, not a target. It can
+	// truncate a model that wanted to reason further; it can never make one
+	// reason more. The error cases are wildly asymmetric — guessing HIGH
+	// costs nothing but unused permission, while guessing LOW cuts the model
+	// off mid-<think> and degrades the answer. Since the level comes from a
+	// small model's one-shot guess, we do not let it set the ceiling on the
+	// trusted path: grant the maximum configured headroom every time, and
+	// keep the level for whether to think at all plus tier/prompt selection,
+	// which is where its real authority lies.
+	//
+	// Shard envelopes keep their level-derived budget: their MaxTokens is
+	// set server-side deliberately, and a research worker must not be able
+	// to spend the deep-reasoning allowance.
+	thinkingHeadroom := 0
+	if thinkingBudget.Enabled {
+		thinkingHeadroom = thinkingBudget.TokenBudget
+		if overrides == nil {
+			thinkingHeadroom = p.effort.ThinkingFor(classifier.ThinkingHigh).TokenBudget
+		}
 	}
+	maxTokens := answerTokens + thinkingHeadroom
 	req := llm.CompletionRequest{
-		Model:             modelIDToProviderModel(route.modelID),
-		Messages:          messages,
-		MaxTokens:         maxTokens,
-		Stream:            stream,
-		EnableThinking:    thinkingBudget.Enabled,
-		MaxThinkingTokens: thinkingBudget.TokenBudget,
+		Model:          modelIDToProviderModel(route.modelID),
+		Messages:       messages,
+		MaxTokens:      maxTokens,
+		Stream:         stream,
+		EnableThinking: thinkingBudget.Enabled,
+		// Advisory: no provider reads this today (the ceiling above is
+		// what actually bounds reasoning). Carried so it reflects the
+		// headroom we really granted rather than the level's nominal
+		// budget, for whenever a provider does gain a separate knob.
+		MaxThinkingTokens: thinkingHeadroom,
 		OnReasoningChunk:  onReasoningChunk,
 	}
 	if overrides != nil {

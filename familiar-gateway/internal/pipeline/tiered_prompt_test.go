@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/familiar/gateway/internal/classifier"
 	"github.com/familiar/gateway/internal/config"
 	"github.com/familiar/gateway/internal/ctxbuild"
 	"github.com/familiar/gateway/internal/memory"
@@ -133,11 +134,12 @@ func writeTierPromptFixtures(t *testing.T) string {
 // must include the base identity, that tier's overlay, and the tool
 // policy, and the pgvector search must honor the tier's memory config.
 //
-// The test pipeline has no sidecar, so classifyRequest falls back to
-// classifier.ConservativeFallback() — thinking=high — which resolves to
-// the deep tier. (Pre-fix this silently became "knowledge": complexity
-// "deep" missed the tiers-table key "deep_reasoning" and TierFor fell
-// back. The classifier→tier mapping now emits real keys.)
+// The verdict is driven explicitly through a fake classifier (thinking=high
+// → deep tier) rather than inherited from a fallback, so this test asserts
+// tier wiring and nothing else. (Pre-fix the tier silently became
+// "knowledge": complexity "deep" missed the tiers-table key
+// "deep_reasoning" and TierFor fell back. The classifier→tier mapping now
+// emits real keys.)
 func TestTierDeepInjectsOverlayAndToolPolicy(t *testing.T) {
 	dir := writeTierPromptFixtures(t)
 	store, err := ctxbuild.NewPromptStore(dir, "FALLBACK_SHOULD_NOT_APPEAR")
@@ -154,6 +156,11 @@ func TestTierDeepInjectsOverlayAndToolPolicy(t *testing.T) {
 	eng := &mockEngine{}
 	pl := makePipeline(eng, srv)
 	pl.promptStore = store
+	attachClassifier(t, pl, classifier.Output{
+		Thinking:    classifier.ThinkingHigh,
+		MemoryDepth: classifier.MemoryDeep,
+		SearchDepth: classifier.SearchNone,
+	})
 
 	// Seed a recording memstore and point the pipeline at it. Give it a
 	// fake embedder so the pgvector search path actually runs.
@@ -175,7 +182,7 @@ func TestTierDeepInjectsOverlayAndToolPolicy(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 
-	// No sidecar → ConservativeFallback (thinking=high) → deep tier.
+	// Verdict is thinking=high → deep tier.
 	// If the classifier→tier mapping regresses, this catches it before
 	// the rest of the test runs.
 	if info.Tier.Name != "deep" {
@@ -194,11 +201,9 @@ func TestTierDeepInjectsOverlayAndToolPolicy(t *testing.T) {
 	}
 
 	// Memory store was called at least once with a vector (embedder
-	// supplies one). With CHAT-REARCH the effort resolver is now the
-	// authority on memory budgets — the test pipeline has no sidecar,
-	// so classifyRequest returns classifier.ConservativeFallback() which
-	// pins MemoryDepth=deep, resolving to TopK=20 / threshold=0.40 from
-	// the spec defaults.
+	// supplies one). The effort resolver is the authority on memory
+	// budgets, and the injected verdict pins MemoryDepth=deep, which
+	// resolves to TopK=20 / threshold=0.40 from the spec defaults.
 	if len(rec.searches) == 0 {
 		t.Fatal("expected pgvector Search to be called")
 	}

@@ -34,10 +34,6 @@ claim to have forgotten without calling this tool.
 **correct_fact** — Use when the user says something you remember is
 wrong and provides the correction ("actually it's X, not Y").
 
-**core_memory_update** — Update the user's always-in-prompt working
-context (name, preferences, active goals). Use when their goals,
-projects, or preferences change during conversation.
-
 ## Wiki & Page Tools
 
 You have full read/write access to the user's wiki pages and notes.

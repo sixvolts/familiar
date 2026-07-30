@@ -640,9 +640,19 @@ func main() {
 			}
 			return skillpkg.PromptBlock(ps)
 		},
-		Embedder:    embedder,
-		APIKeyFn:    apiKeyFn,
-		MemoryStore: memStore,
+		Embedder: embedder,
+		APIKeyFn: apiKeyFn,
+		// Same nil-into-interface guard as RelationshipStore/Versioner
+		// below: assigning a nil *PgVectorStore straight into a
+		// memory.MemoryStore field yields an interface that is non-nil
+		// while its pointer is nil, so every `p.memStore != nil` guard
+		// downstream passes and then dereferences nothing.
+		MemoryStore: func() memory.MemoryStore {
+			if memStore == nil {
+				return nil
+			}
+			return memStore
+		}(),
 		RelationshipStore: func() memory.RelationshipStore {
 			if relStore == nil {
 				return nil
@@ -675,7 +685,17 @@ func main() {
 		ToolOrchestrator: toolOrch,
 		SkillRegistry:    skillRegForPipeline,
 		SessionStore:     sessStore,
-		Conversations:    convStore,
+		// Guarded for the same reason as MemoryStore above — and this one
+		// was not theoretical: without it, booting with no
+		// [memory].local_dsn panicked on the first turn, because
+		// hydrateSession's `p.conversations != nil` check passed on a
+		// typed-nil and called LoadRecentTurns on a nil receiver.
+		Conversations: func() pipeline.ConversationStore {
+			if convStore == nil {
+				return nil
+			}
+			return convStore
+		}(),
 		IdentityResolver: identityResolver,
 		EffortResolver:   classifier.ResolverFromConfig(cfg.Effort),
 		Events:           memEvents,

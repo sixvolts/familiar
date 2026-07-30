@@ -9,9 +9,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/familiar/gateway/internal/classifier"
 	"github.com/familiar/gateway/internal/config"
 	"github.com/familiar/gateway/internal/router"
 	"github.com/familiar/gateway/internal/session"
+	"github.com/familiar/gateway/internal/sidecar"
 	pb "github.com/familiar/gateway/proto/engine"
 )
 
@@ -361,3 +363,72 @@ func TestPostTurnExtract_SkipsWhenNoIdentity(t *testing.T) {
 // route_override session-meta path. Behavior they pinned —
 // "thinking off for tier 3, on for tier 4" — moves to the new
 // classifier's effort-level output in a later sprint.
+
+// --- classifier test seam -------------------------------------------------
+//
+// Before this existed, tests that wanted a non-trivial tier relied on the
+// no-sidecar path falling back to the most expensive verdict. That made
+// them assertions about fallback behaviour rather than about tier wiring,
+// and they broke the moment the fallback got cheaper. These helpers let a
+// test drive a REAL classify roundtrip with a chosen verdict.
+
+// fakeClassifierServer serves one fixed classifier verdict on
+// /v1/chat/completions, and 200 on anything else (health probes).
+func fakeClassifierServer(verdict classifier.Output) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		body, _ := json.Marshal(map[string]string{
+			"thinking":     string(verdict.Thinking),
+			"memory_depth": string(verdict.MemoryDepth),
+			"search_depth": string(verdict.SearchDepth),
+		})
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]string{"role": "assistant", "content": string(body)}},
+			},
+			"usage": map[string]int{"prompt_tokens": 42, "completion_tokens": 17},
+		})
+	}))
+}
+
+// classifyOnlyRoutes satisfies both sidecar resolver interfaces, routing
+// the classify role (and nothing else) to one endpoint.
+type classifyOnlyRoutes struct{ endpoint string }
+
+const testClassifyModelID = "test/classifier"
+
+func (c classifyOnlyRoutes) Resolve(role string) (string, int, bool) {
+	if role == sidecar.TaskClassify {
+		return testClassifyModelID, 0, true
+	}
+	return "", 0, false
+}
+func (c classifyOnlyRoutes) Status(string) string { return "online" }
+func (c classifyOnlyRoutes) Chain(role string) []string {
+	if role == sidecar.TaskClassify {
+		return []string{testClassifyModelID}
+	}
+	return nil
+}
+func (c classifyOnlyRoutes) EndpointForRole(string) string { return "" }
+func (c classifyOnlyRoutes) EndpointForModel(id string) string {
+	if id == testClassifyModelID {
+		return c.endpoint
+	}
+	return ""
+}
+
+// attachClassifier points pl's sidecar client at a server that returns
+// the given verdict, so the turn exercises the real classify path.
+func attachClassifier(t *testing.T, pl *Pipeline, verdict classifier.Output) {
+	t.Helper()
+	srv := fakeClassifierServer(verdict)
+	t.Cleanup(srv.Close)
+	routes := classifyOnlyRoutes{endpoint: srv.URL}
+	pl.sidecarClient = sidecar.NewClient(
+		config.SidecarConfig{Enabled: true}, config.RouterConfig{}, routes, routes)
+}

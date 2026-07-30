@@ -5,49 +5,134 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/familiar/gateway/internal/memory"
 	"github.com/familiar/gateway/internal/sidecar"
 	pb "github.com/familiar/gateway/proto/engine"
 )
 
-// resolveDecision is the index/fallback logic at the heart of the
-// post-turn extract path — the seam the review flagged as untested and
-// bug-prone. These lock in the two invariants: past-the-end indices
-// default to ADD (never silently drop a fact), and an UPDATE with no
-// explicit target falls back to the nearest neighbor.
-func TestResolveDecision(t *testing.T) {
-	decisions := []sidecar.BatchDecision{
-		{Action: "ADD"},
-		{Action: "UPDATE", TargetID: "explicit-target"},
-		{Action: "UPDATE"}, // no target → neighbor fallback
-		{Action: "DUPLICATE"},
-		{Action: "UPDATE"}, // no target AND no neighbor → stays empty
-	}
+// resolveDecision decides what a batch-classifier verdict is allowed to
+// do. Every read path HIDES a superseded row, so a wrong target here is
+// silent data loss — and the classifier is a small local model shown
+// exactly one existing fact per candidate, so the only id it may name is
+// that neighbour's.
+//
+// These cases previously asserted the opposite contract: an explicit target
+// was honoured verbatim, an UPDATE with no target superseded the neighbour
+// at any similarity, and a DUPLICATE with no neighbour dropped the write.
+// Each is now a rejection, and each rejection is a fact that stays visible.
+const testFloor = 0.75
 
+func nbr(id string, sim float64) memory.NearestFact {
+	return memory.NearestFact{ID: id, Content: "existing fact", Similarity: sim}
+}
+
+func TestResolveDecision(t *testing.T) {
 	cases := []struct {
 		name        string
-		i           int
+		decision    sidecar.BatchDecision
+		neighbor    memory.NearestFact
 		hasNeighbor bool
-		neighborID  string
 		wantAction  string
 		wantTarget  string
+		why         string
 	}{
-		{"add", 0, false, "", "ADD", ""},
-		{"update explicit target wins over neighbor", 1, true, "nbr-1", "UPDATE", "explicit-target"},
-		{"update no target falls back to neighbor", 2, true, "nbr-2", "UPDATE", "nbr-2"},
-		{"duplicate", 3, false, "", "DUPLICATE", ""},
-		{"update no target no neighbor stays empty", 4, false, "", "UPDATE", ""},
-		{"index past end defaults to ADD", 99, true, "nbr-x", "ADD", ""},
+		{
+			name: "add passes through", decision: sidecar.BatchDecision{Action: "ADD"},
+			wantAction: "ADD", wantTarget: "",
+		},
+		{
+			name:     "update naming the neighbour is honoured",
+			decision: sidecar.BatchDecision{Action: "UPDATE", TargetID: "nbr-1"},
+			neighbor: nbr("nbr-1", 0.90), hasNeighbor: true,
+			wantAction: "UPDATE", wantTarget: "nbr-1",
+			why: "the neighbour is the one row the model was shown",
+		},
+		{
+			name:     "update naming a DIFFERENT id is refused",
+			decision: sidecar.BatchDecision{Action: "UPDATE", TargetID: "some-other-uuid"},
+			neighbor: nbr("nbr-1", 0.90), hasNeighbor: true,
+			wantAction: "ADD", wantTarget: "",
+			why: "a hallucinated or cross-candidate target would bury a row nobody looked at",
+		},
+		{
+			name:        "update naming a target with no neighbour at all is refused",
+			decision:    sidecar.BatchDecision{Action: "UPDATE", TargetID: "invented"},
+			hasNeighbor: false,
+			wantAction:  "ADD", wantTarget: "",
+		},
+		{
+			name:     "update with no target supersedes only above the floor",
+			decision: sidecar.BatchDecision{Action: "UPDATE"},
+			neighbor: nbr("nbr-2", 0.88), hasNeighbor: true,
+			wantAction: "UPDATE", wantTarget: "nbr-2",
+		},
+		{
+			name:     "update with no target below the floor adds instead",
+			decision: sidecar.BatchDecision{Action: "UPDATE"},
+			neighbor: nbr("dog-fact", 0.20), hasNeighbor: true,
+			wantAction: "ADD", wantTarget: "",
+			why: "this is the reported bug: dark-mode preference burying the dog's name",
+		},
+		{
+			name:        "update with no target and no neighbour adds",
+			decision:    sidecar.BatchDecision{Action: "UPDATE"},
+			hasNeighbor: false,
+			wantAction:  "ADD", wantTarget: "",
+		},
+		{
+			name:     "duplicate of the neighbour is honoured",
+			decision: sidecar.BatchDecision{Action: "DUPLICATE", TargetID: "nbr-3"},
+			neighbor: nbr("nbr-3", 0.80), hasNeighbor: true,
+			wantAction: "DUPLICATE", wantTarget: "nbr-3",
+		},
+		{
+			name:     "duplicate naming a different id keeps the write",
+			decision: sidecar.BatchDecision{Action: "DUPLICATE", TargetID: "invented"},
+			neighbor: nbr("nbr-3", 0.80), hasNeighbor: true,
+			wantAction: "ADD", wantTarget: "",
+			why: "dropping a write on a hallucinated id contradicts this path's prefer-a-duplicate rule",
+		},
+		{
+			name:        "duplicate with no neighbour keeps the write",
+			decision:    sidecar.BatchDecision{Action: "DUPLICATE"},
+			hasNeighbor: false,
+			wantAction:  "ADD", wantTarget: "",
+			why: "a duplicate of nothing is not a duplicate",
+		},
+		{
+			name:     "unrecognised action carrying a bad target loses it",
+			decision: sidecar.BatchDecision{Action: "CONTRADICTS", TargetID: "invented"},
+			neighbor: nbr("nbr-4", 0.90), hasNeighbor: true,
+			wantAction: "CONTRADICTS", wantTarget: "",
+			why: "supersedesFor only acts on UPDATE, but the target must not survive either",
+		},
 	}
+
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			action, target := resolveDecision(c.i, decisions, c.hasNeighbor, c.neighborID)
-			if action != c.wantAction {
-				t.Errorf("action = %q, want %q", action, c.wantAction)
-			}
-			if target != c.wantTarget {
-				t.Errorf("targetID = %q, want %q", target, c.wantTarget)
+			action, target := resolveDecision(0, []sidecar.BatchDecision{c.decision},
+				c.neighbor, c.hasNeighbor, testFloor)
+			if action != c.wantAction || target != c.wantTarget {
+				t.Errorf("got (%q, %q), want (%q, %q)%s",
+					action, target, c.wantAction, c.wantTarget,
+					func() string {
+						if c.why != "" {
+							return " — " + c.why
+						}
+						return ""
+					}())
 			}
 		})
+	}
+}
+
+// A missing decision (the model returned fewer than len(prep)) must never
+// silently drop a fact.
+func TestResolveDecisionPastEndDefaultsToAdd(t *testing.T) {
+	action, target := resolveDecision(99, []sidecar.BatchDecision{{Action: "UPDATE", TargetID: "x"}},
+		nbr("nbr", 0.99), true, testFloor)
+	if action != "ADD" || target != "" {
+		t.Errorf("got (%q, %q), want (ADD, \"\")", action, target)
 	}
 }
 

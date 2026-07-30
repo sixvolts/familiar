@@ -42,7 +42,7 @@ type MemoryStore interface {
 	Search(ctx context.Context, vector []float32, limit int, threshold float64, userID string) ([]MemoryResult, error)
 	HybridSearch(ctx context.Context, queryText string, vector []float32, limit int, threshold float64, userID string) ([]MemoryResult, error)
 	NearestSimilarity(ctx context.Context, vector []float32, scope string, userID string) (float64, bool, error)
-	NearestLiveFact(ctx context.Context, vector []float32, userID string) (NearestFact, bool, error)
+	NearestLiveFact(ctx context.Context, vector []float32, userID, scopeTag string) (NearestFact, bool, error)
 	Close() error
 }
 
@@ -362,11 +362,29 @@ func (s *PgVectorStore) NearestSimilarity(ctx context.Context, vector []float32,
 // supersedes pointer that the page's next clean-replace then trips over
 // (23503), and superseding a raw chunk is meaningless. Mirrors the
 // retrieval + sleep-dedup exclusions.
-func (s *PgVectorStore) NearestLiveFact(ctx context.Context, vector []float32, userID string) (NearestFact, bool, error) {
+// scopeTag is the caller's shard scope, or "" on the trusted path.
+//
+// The isolation predicate is a DISJUNCTION rather than plain equality, and
+// the distinction matters in both directions. Requiring
+// scope_tag = callerScope would leave an isolated shard's own write path
+// with no candidate at all (so no dedup and no supersede, ever), and would
+// newly refuse to supersede *promoted* shard facts, which top-level
+// retrieval does surface. What must not happen is the reverse: a trusted
+// turn reaching into some isolated shard's private rows. So: rows sharing
+// the caller's own scope_tag are always fair game, and beyond that only
+// rows that belong to no isolated shard.
+func (s *PgVectorStore) NearestLiveFact(ctx context.Context, vector []float32, userID, scopeTag string) (NearestFact, bool, error) {
 	if len(vector) == 0 {
 		return NearestFact{}, false, nil
 	}
 	vecStr := vectorToString(vector)
+
+	// Bind NULL rather than '' so IS NOT DISTINCT FROM behaves for the
+	// trusted path, where rows carry a NULL scope_tag.
+	var scopeParam any
+	if scopeTag != "" {
+		scopeParam = scopeTag
+	}
 
 	var nf NearestFact
 	err := s.db.QueryRowContext(ctx,
@@ -376,9 +394,15 @@ func (s *PgVectorStore) NearestLiveFact(ctx context.Context, vector []float32, u
 		   AND m.source_type NOT IN ('conversation', 'wiki_page')
 		   AND NOT EXISTS (SELECT 1 FROM memories s WHERE s.supersedes = m.id)
 		   AND (m.user_id IS NULL OR m.user_id = $2)
+		   AND (m.scope_tag IS NOT DISTINCT FROM $3
+		        OR NOT EXISTS (
+		          SELECT 1 FROM shards sh
+		          WHERE sh.scope_tag = m.scope_tag
+		            AND sh.visibility = 'isolated'
+		        ))
 		 ORDER BY m.embedding <=> $1::vector
 		 LIMIT 1`,
-		vecStr, userID).Scan(&nf.ID, &nf.Content, &nf.Similarity)
+		vecStr, userID, scopeParam).Scan(&nf.ID, &nf.Content, &nf.Similarity)
 	if err == sql.ErrNoRows {
 		return NearestFact{}, false, nil
 	}

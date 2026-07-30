@@ -51,7 +51,7 @@ func (m *recordingMemStore) NearestSimilarity(ctx context.Context, vector []floa
 	return 0, false, nil
 }
 
-func (m *recordingMemStore) NearestLiveFact(ctx context.Context, vector []float32, userID string) (memory.NearestFact, bool, error) {
+func (m *recordingMemStore) NearestLiveFact(ctx context.Context, vector []float32, userID, scopeTag string) (memory.NearestFact, bool, error) {
 	return memory.NearestFact{}, false, nil
 }
 

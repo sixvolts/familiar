@@ -220,7 +220,7 @@ func TestNearestLiveFact_ExcludesWikiAndChunks(t *testing.T) {
 	insertTyped("raw chunk about the sky", "conversation", q)           // exact match, excluded
 	insertTyped("the sky is blue", "explicit", mixVec(1, 2, 0.9, 0.44)) // knowledge, slightly off
 
-	nf, ok, err := s.NearestLiveFact(ctx, q, "u1")
+	nf, ok, err := s.NearestLiveFact(ctx, q, "u1", "")
 	if err != nil {
 		t.Fatalf("NearestLiveFact: %v", err)
 	}

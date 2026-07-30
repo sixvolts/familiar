@@ -145,7 +145,7 @@ func (stubMemStore) HybridSearch(ctx context.Context, queryText string, vector [
 func (stubMemStore) NearestSimilarity(ctx context.Context, vector []float32, scope string, userID string) (float64, bool, error) {
 	return 0, false, nil
 }
-func (stubMemStore) NearestLiveFact(ctx context.Context, vector []float32, userID string) (memory.NearestFact, bool, error) {
+func (stubMemStore) NearestLiveFact(ctx context.Context, vector []float32, userID, scopeTag string) (memory.NearestFact, bool, error) {
 	return memory.NearestFact{}, false, nil
 }
 func (stubMemStore) Close() error { return nil }

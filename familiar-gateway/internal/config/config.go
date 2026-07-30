@@ -549,6 +549,41 @@ type MemoryConfig struct {
 	RelevanceThreshold float64 `toml:"relevance_threshold"`
 	MaxInjected        int     `toml:"max_injected_memories"`
 	DedupThreshold     float64 `toml:"dedup_threshold"`
+
+	// SupersedeThreshold is how similar an extracted fact must be to an
+	// existing one before it is allowed to SUPERSEDE it — which hides the
+	// old row from every retrieval path.
+	//
+	// This needs its own floor because the write-time neighbour lookup has
+	// no threshold of its own: any non-empty store always yields a nearest
+	// fact, however unrelated. Without a floor, a batch classifier that
+	// answers UPDATE without naming a target lets "I prefer dark mode"
+	// bury "the dog is named Rex" at cosine ~0.2, and the admin timeline
+	// records it as deliberate.
+	//
+	// Deliberately well below DedupThreshold (identical-enough to skip)
+	// and well above RelevanceThreshold (worth showing in a prompt):
+	// superseding is destructive, so it wants more confidence than
+	// retrieval and less than exact duplication. Default 0.75.
+	SupersedeThreshold float64 `toml:"supersede_threshold"`
+}
+
+// SupersedeThresholdOrDefault returns the configured floor, or the 0.75
+// default when unset.
+func (m MemoryConfig) SupersedeThresholdOrDefault() float64 {
+	if m.SupersedeThreshold > 0 {
+		return m.SupersedeThreshold
+	}
+	return 0.75
+}
+
+// DedupThresholdOrDefault returns the configured identical-enough cutoff,
+// or 0.92 — the value the extraction path used to hardcode.
+func (m MemoryConfig) DedupThresholdOrDefault() float64 {
+	if m.DedupThreshold > 0 {
+		return m.DedupThreshold
+	}
+	return 0.92
 }
 
 // RerankConfig controls the cross-encoder reranking stage that runs

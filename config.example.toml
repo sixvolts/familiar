@@ -303,6 +303,21 @@ local_dsn = ""                        # postgresql://familiar:pw@localhost:5432/
 relevance_threshold = 0.55            # cosine floor for retrieval (dense arm)
 max_injected_memories = 5             # top-k into context
 dedup_threshold = 0.95                # cosine above this = duplicate
+                                      # (skipped without asking the classifier)
+
+# How similar an extracted fact must be to an existing one before it may
+# SUPERSEDE it — which hides the old fact from every retrieval path.
+#
+# This exists because the write-time neighbour lookup has no threshold of
+# its own: any non-empty store always returns a nearest fact, however
+# unrelated. Without a floor, a batch classifier answering "UPDATE" without
+# naming a target could let "I prefer dark mode" bury "the dog is named
+# Rex" at cosine ~0.2, recorded in the admin timeline as deliberate.
+#
+# Must sit between relevance_threshold and dedup_threshold: superseding is
+# destructive, so it needs more confidence than merely retrieving a fact
+# and less than treating it as an outright duplicate. Validated at boot.
+supersede_threshold = 0.75
 
 # DEPRECATED, parsed but ignored: use_sidecar_embedder. It routed
 # embedding through a sidecar method that always returned an error, so

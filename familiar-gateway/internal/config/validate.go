@@ -61,6 +61,22 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("memory.dedup_threshold (%v) must be >= memory.relevance_threshold (%v)",
 			c.Memory.DedupThreshold, c.Memory.RelevanceThreshold)
 	}
+	if c.Memory.SupersedeThreshold < 0 || c.Memory.SupersedeThreshold > 1 {
+		return fmt.Errorf("memory.supersede_threshold must be in [0,1] (got %v)", c.Memory.SupersedeThreshold)
+	}
+	// Superseding hides a row, so it must demand at least as much
+	// confidence as merely retrieving one. A floor below the retrieval
+	// threshold would let an extraction bury facts it would not even have
+	// been shown.
+	if c.Memory.SupersedeThreshold > 0 && c.Memory.SupersedeThreshold < c.Memory.RelevanceThreshold {
+		return fmt.Errorf("memory.supersede_threshold (%v) must be >= memory.relevance_threshold (%v) — superseding hides a fact, so it needs more confidence than retrieving one",
+			c.Memory.SupersedeThreshold, c.Memory.RelevanceThreshold)
+	}
+	if c.Memory.SupersedeThreshold > 0 && c.Memory.DedupThreshold > 0 &&
+		c.Memory.SupersedeThreshold > c.Memory.DedupThreshold {
+		return fmt.Errorf("memory.supersede_threshold (%v) must be <= memory.dedup_threshold (%v) — a fact similar enough to be a duplicate is skipped before it can supersede anything",
+			c.Memory.SupersedeThreshold, c.Memory.DedupThreshold)
+	}
 
 	// At least one model must be configured and each entry must have an
 	// id and endpoint. An empty Models slice would leave the router

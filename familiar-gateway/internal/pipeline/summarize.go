@@ -54,12 +54,12 @@ const (
 	// against the next trigger.
 	SummarizeBatch = 8
 
-	// noopDedupThreshold is the cosine similarity above which an extracted
-	// fact is treated as an outright duplicate and skipped without asking
-	// the medium slot. Above this we trust the embedding alone — paying
-	// for a batch-classify call to confirm a near-perfect-match neighbor
-	// is wasted latency.
-	noopDedupThreshold = 0.92
+	// The identical-enough cutoff (above which an extracted fact is
+	// skipped without asking the medium slot) and the supersede floor now
+	// come from [memory].dedup_threshold / supersede_threshold via
+	// MemoryConfig's *OrDefault accessors. dedup_threshold was previously
+	// declared, validated, and read by nothing while this path hardcoded
+	// 0.92 — the knob existed and did not work.
 )
 
 // maybeSummarize fires an async summarization pass if the session has
@@ -285,7 +285,7 @@ func (p *Pipeline) runPostTurnExtract(sess *session.Session, userMsg, responseTe
 		var ok bool
 		if p.memStore != nil && len(emb) > 0 {
 			lookupCtx, lookupCancel := context.WithTimeout(ctx, 2*time.Second)
-			n, found, lerr := p.memStore.NearestLiveFact(lookupCtx, emb, sess.UserID())
+			n, found, lerr := p.memStore.NearestLiveFact(lookupCtx, emb, sess.UserID(), scopeTagFor(overrides))
 			lookupCancel()
 			if lerr == nil && found {
 				nf = n
@@ -299,7 +299,7 @@ func (p *Pipeline) runPostTurnExtract(sess *session.Session, userMsg, responseTe
 		// Cheap dedupe before paying for the medium-slot call: if a
 		// candidate is essentially identical to its nearest neighbor,
 		// skip it without asking the model.
-		if ok && nf.Similarity >= noopDedupThreshold {
+		if ok && nf.Similarity >= p.memoryCfg.DedupThresholdOrDefault() {
 			continue
 		}
 
@@ -351,7 +351,8 @@ func (p *Pipeline) runPostTurnExtract(sess *session.Session, userMsg, responseTe
 	var skipped, updated int
 
 	for i, p2 := range prep {
-		action, targetID := resolveDecision(i, batch.Decisions, p2.hasNbr, p2.neighbor.ID)
+		action, targetID := resolveDecision(i, batch.Decisions, p2.neighbor, p2.hasNbr,
+			p.memoryCfg.SupersedeThresholdOrDefault())
 		switch action {
 		case "DUPLICATE":
 			skipped++
@@ -504,14 +505,78 @@ func supersedesFor(action, targetID string) string {
 	return ""
 }
 
-func resolveDecision(i int, decisions []sidecar.BatchDecision, hasNeighbor bool, neighborID string) (action, targetID string) {
+// resolveDecision turns one batch-classifier verdict into the action and
+// supersede target actually applied, refusing anything the model was not
+// entitled to say.
+//
+// The classifier is a small local model shown exactly ONE existing fact per
+// candidate — that candidate's nearest neighbour. So the only target it can
+// legitimately name is that neighbour's id. It used to be taken at its
+// word: decisions[i].TargetID was applied verbatim, with no check that it
+// was that neighbour, a UUID, or even a row that exists, and an UPDATE with
+// no target silently fell back to the neighbour whatever the similarity.
+//
+// Both halves were destructive, because every read path HIDES a pointed-at
+// row. The neighbour lookup has no similarity threshold of its own, so any
+// non-empty store always yields one: "I prefer dark mode" would be handed
+// "the dog is named Rex" at cosine ~0.2, and one UPDATE with an empty
+// target made the dog fact permanently invisible — recorded in the admin
+// timeline as intentional.
+//
+// Two rules now:
+//
+//   - A NAMED target must be this candidate's neighbour. Anything else is a
+//     hallucination, a stale id, or a target meant for a different
+//     candidate in the batch; the write degrades to ADD rather than
+//     superseding a row nobody looked at.
+//   - An UNNAMED target on an UPDATE only falls back to the neighbour when
+//     the neighbour clears supersedeFloor. Below that they are not the same
+//     fact, so the honest outcome is two facts, not a hidden one.
+//
+// DUPLICATE gets the same target check, because dropping a write is also
+// lossy: a DUPLICATE naming a hallucinated id used to discard the candidate
+// entirely, which contradicts this path's own preference for a redundant
+// fact over a lost one. It still requires a neighbour to exist — a
+// duplicate of nothing is not a duplicate — but not the floor, since the
+// model judged the content and that is more informative than cosine.
+func resolveDecision(i int, decisions []sidecar.BatchDecision, nbr memory.NearestFact, hasNeighbor bool, supersedeFloor float64) (action, targetID string) {
 	action = "ADD"
 	if i < len(decisions) {
 		action = decisions[i].Action
 		targetID = decisions[i].TargetID
 	}
-	if action == "UPDATE" && targetID == "" && hasNeighbor {
-		targetID = neighborID
+
+	// Rule 1: a named target must be the neighbour we actually showed.
+	if targetID != "" && (!hasNeighbor || targetID != nbr.ID) {
+		log.Printf("[pipeline] conflict resolver: %s named target %q which is not this candidate's neighbour (%q) — downgrading to ADD",
+			action, previewString(targetID, 64), previewString(nbr.ID, 64))
+		if action == "UPDATE" || action == "DUPLICATE" {
+			action = "ADD"
+		}
+		return action, ""
+	}
+
+	switch action {
+	case "UPDATE":
+		if targetID != "" {
+			return action, targetID // validated against the neighbour above
+		}
+		// Rule 2: only supersede on an unnamed target when the neighbour is
+		// close enough to plausibly BE the same fact.
+		if hasNeighbor && nbr.Similarity >= supersedeFloor {
+			return action, nbr.ID
+		}
+		if hasNeighbor {
+			log.Printf("[pipeline] conflict resolver: UPDATE with no target and nearest fact at %.2f < %.2f floor — adding instead of superseding",
+				nbr.Similarity, supersedeFloor)
+		}
+		return "ADD", ""
+	case "DUPLICATE":
+		if !hasNeighbor {
+			// Nothing to be a duplicate OF; keep the write.
+			return "ADD", ""
+		}
+		return action, targetID
 	}
 	return action, targetID
 }

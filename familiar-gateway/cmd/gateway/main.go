@@ -776,6 +776,42 @@ func main() {
 		}
 	}
 
+	// Cross-check the system prompts against the tools that actually exist.
+	//
+	// The prompts instruct the model to call tools by name, in prose, and
+	// nothing validated those names — so a rename on the Go side left the
+	// prompt pointing at a tool that isn't there, and the failure was
+	// nearly silent: the model emits the phantom name, gets an
+	// unknown-tool error, and either guesses or quietly does without.
+	// That shipped. `memory_search` was instructed in four files while the
+	// real tool was `search_memory`, and `core_memory_update` was
+	// documented in four files and implemented nowhere.
+	//
+	// Deliberately here, after the builtin sync: the registry is only
+	// complete once runHTTPAdapter has wired the late skills (research,
+	// scheduled), and tool_policy.md references recent_scheduled_runs from
+	// that group. Checking earlier would report false phantoms.
+	//
+	// A notice, not a fatal: an operator's custom prompt_dir is their
+	// business, this runs on every boot, and refusing to start over a
+	// prose mismatch would be a worse failure than the one it prevents.
+	//
+	// Note this compares against what is registered ON THIS INSTANCE, so
+	// it has two causes and the message must not pretend otherwise: the
+	// name is wrong (the bug — a typo or a rename), or the name is right
+	// but the feature providing it is not configured here (no Brave key →
+	// no web_search, no DB → no recent_scheduled_runs). Both are worth
+	// knowing, since either way the model is told to call something it
+	// cannot. The strict "this name exists nowhere" check lives in
+	// internal/ctxbuild's TestShippedPromptsReferenceOnlyRealTools, which
+	// runs against the full first-party tool set.
+	if issues := ctxbuild.AuditToolRefs(promptStore.AuditedPromptText(), skillReg.KnownToolNames()); len(issues) > 0 {
+		log.Printf("[prompts] %d tool name(s) in the system prompts are not registered on this instance — the model will be told to call them and get an unknown-tool error. Either the name is wrong, or the feature that provides it is not configured:", len(issues))
+		for _, is := range issues {
+			log.Printf("[prompts]   %q — referenced near: %s", is.Name, strings.Join(is.Contexts, " | "))
+		}
+	}
+
 	// Auto-start Slack when tokens are configured — no flag needed.
 	slackReady := cfg.Adapter.Slack.BotToken != "" && cfg.Adapter.Slack.AppToken != ""
 	if *useSlack || slackReady {

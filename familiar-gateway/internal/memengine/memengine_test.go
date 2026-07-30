@@ -110,18 +110,25 @@ func TestAssembleContextDegradesWithoutVector(t *testing.T) {
 	}
 }
 
-func TestCommitFactsNoPoolDegrades(t *testing.T) {
-	// Operator running without memory.local_dsn shouldn't crash
-	// commits — the response carries an error string and the
-	// caller proceeds. Same shape the gateway already accepts
-	// from the gRPC engine on a transient outage.
+func TestCommitFactsNoPoolReturnsError(t *testing.T) {
+	// A commit with no pool stores nothing, so it must SAY so. The old
+	// contract here returned (resp, nil) with the reason only on
+	// resp.Error — a field no call site reads — which is how `remember`
+	// came to answer "Got it, I'll remember that" for writes that never
+	// happened. Callers all branch on err, so err is what has to carry it.
 	e := New(nil, nil, nil, "")
 	resp, err := e.CommitFacts(context.Background(), "sess", []*pb.FactProto{{Content: "x"}})
-	if err != nil {
-		t.Fatalf("commit: %v", err)
+	if err == nil {
+		t.Fatal("expected an error when the pool is unwired — a silent no-op lets callers confirm a phantom save")
+	}
+	if resp == nil {
+		t.Fatal("response must still be non-nil so callers can read Committed")
 	}
 	if resp.Error == "" {
-		t.Error("expected non-empty error when pool is unwired")
+		t.Error("expected the reason on resp.Error too (kept for the admin surfaces)")
+	}
+	if resp.Committed != 0 {
+		t.Errorf("Committed = %d, want 0", resp.Committed)
 	}
 }
 

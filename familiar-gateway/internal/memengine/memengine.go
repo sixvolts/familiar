@@ -200,9 +200,10 @@ func (e *MemEngine) CommitFacts(ctx context.Context, sessionID string, facts []*
 	out := &pb.CommitFactsResponse{}
 	if e.pool == nil {
 		out.Error = "memengine: no db pool wired"
-		return out, nil
+		return out, fmt.Errorf("memengine: no db pool wired")
 	}
 	var committed uint32
+	var failed []string
 	for _, f := range facts {
 		if f == nil {
 			continue
@@ -261,10 +262,11 @@ func (e *MemEngine) CommitFacts(ctx context.Context, sessionID string, facts []*
 			createdAt, lastAccessed, int(f.AccessCount),
 			tagsParam(f.Tags), supersedes, userID, scopeTag).Scan(&storedID, &needsEmbed)
 		if err != nil {
-			// Single-row failures don't abort the batch — same as
-			// the previous implementation which logs and continues. Surface the
-			// last error on the response so the gateway logs it.
+			// Single-row failures don't abort the batch: one bad fact should
+			// not discard the others. But they MUST reach the caller — see
+			// the return below.
 			out.Error = fmt.Sprintf("commit %s: %v", id, err)
+			failed = append(failed, fmt.Sprintf("%s: %v", id, err))
 			log.Printf("[memengine] commit fact %s failed: %v", id, err)
 			continue
 		}
@@ -278,6 +280,22 @@ func (e *MemEngine) CommitFacts(ctx context.Context, sessionID string, facts []*
 		committed++
 	}
 	out.Committed = committed
+
+	// Report failure to the caller.
+	//
+	// This used to return (out, nil) unconditionally, with the reason only
+	// on out.Error — a field no caller reads (verified across all five call
+	// sites; out.Committed is unread too). So a 5s context expiring on a
+	// busy Postgres, a constraint violation, or a malformed `supersedes`
+	// UUID made the write vanish behind one internal log line, while the
+	// `remember` tool still told the user "Got it, I'll remember that" and
+	// save_fact still returned an id that was never inserted. Every call
+	// site already branches on err, so returning one is what makes those
+	// confirmations honest.
+	if len(failed) > 0 {
+		return out, fmt.Errorf("memengine: %d of %d fact(s) failed to commit: %s",
+			len(failed), len(facts), strings.Join(failed, "; "))
+	}
 	return out, nil
 }
 

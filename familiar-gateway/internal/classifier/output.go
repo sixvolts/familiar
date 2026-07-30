@@ -92,13 +92,19 @@ const (
 // an affirmative instruction should gate on this.
 func (o Output) FromModel() bool { return o.Source == SourceModel }
 
-// ConservativeFallback is what the pipeline uses when the classifier
-// is unreachable, returns malformed JSON, or otherwise fails. Per
-// the spec: prefer wasted tokens over a degraded answer (so thinking
-// + memory both go to their highest non-search settings; search
-// stays off because a hallucinated query is worse than no search).
+// ConservativeFallback is the EXPENSIVE fallback: thinking and memory
+// both at their highest non-search settings, search off.
 //
-// CHAT-REARCH §"Classifier — Behavior".
+// Its scope is now narrow. It applies only when the classifier actually
+// responded and its levels failed Validate() — a model that answered but
+// could not be read is weak evidence the turn is unusual, so paying more
+// is defensible. Every other failure (no client, chain offline, transport
+// error, timeout, unparseable body) uses StaticDefault instead: see the
+// reasoning there for why "we could not classify" must not mean "spend
+// maximum effort".
+//
+// Original rationale, from CHAT-REARCH §"Classifier — Behavior": prefer
+// wasted tokens over a degraded answer.
 func ConservativeFallback() Output {
 	return Output{
 		Thinking:    ThinkingHigh,

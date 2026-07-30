@@ -2,8 +2,14 @@ package pipeline
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/familiar/gateway/internal/config"
+	"github.com/familiar/gateway/internal/sidecar"
 )
 
 type tcKey struct{}
@@ -99,5 +105,136 @@ func TestStopTurn_DeregistersOnTeardown(t *testing.T) {
 	cancel()
 	if p.StopTurn("sess-teardown") {
 		t.Fatal("StopTurn succeeded after the turn was torn down")
+	}
+}
+
+// A turn parked in CLASSIFICATION must be stoppable. Before the turn
+// context was created ahead of beginTurn, classification ran outside the
+// stop registry entirely, so the Stop button could not cut a turn stuck
+// waiting on a hung classifier — the exact case a user would press it in.
+//
+// Note this test fails if the ordering in handleStream is reverted, which
+// is the point: the fix was previously unverified in either direction.
+func TestStopTurn_CancelsTurnStuckInClassification(t *testing.T) {
+	// A classifier that blocks until the test releases it, so the turn is
+	// guaranteed to be inside classification when Stop arrives.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	clf := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		once.Do(func() { close(entered) })
+		select {
+		case <-release:
+		case <-r.Context().Done(): // cancelled by the Stop we are testing
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"message":{"content":"{\"thinking\":\"low\",\"memory_depth\":\"none\",\"search_depth\":\"none\"}"}}]}`))
+	}))
+	defer clf.Close()
+	defer close(release)
+
+	srv := fakeOpenAIServer("done")
+	defer srv.Close()
+
+	pl := makePipeline(&mockEngine{}, srv)
+	routes := classifyOnlyRoutes{endpoint: clf.URL}
+	pl.sidecarClient = sidecar.NewClient(
+		config.SidecarConfig{Enabled: true, RequestTimeoutMs: 30000}, // long, so Stop is what cuts it
+		config.RouterConfig{}, routes, routes)
+
+	sess := pl.sessions.GetOrCreate("cli", "stop-user")
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _, _ = pl.HandleStream(context.Background(), sess, "hello",
+			nil, func(string) {}, nil, nil)
+	}()
+
+	// Wait until we are demonstrably inside the classifier call.
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("classifier was never reached")
+	}
+
+	// The turn must already be registered — this is what the reordering buys.
+	if !pl.StopTurn(sess.ID) {
+		t.Fatal("StopTurn returned false for a turn parked in classification: " +
+			"the turn context is not registered until after beginTurn")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("turn did not unwind after StopTurn")
+	}
+}
+
+// A client disconnect during classification must also cut it: nothing has
+// been produced yet, so there is no answer worth finishing. This is the
+// half of prepContext that the turn context alone would not give us —
+// turnContext is deliberately detached from the request.
+//
+// The classifier handler here blocks until the test releases it and never
+// watches its own request context, so the ONLY thing that can free the
+// client is prepContext honouring reqCtx. If it does not, the call sits
+// there until the sidecar timeout and this test fails on the deadline.
+func TestPrepContext_ClientDisconnectCancelsClassification(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	clf := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		once.Do(func() { close(entered) })
+		<-release // deliberately NOT watching r.Context()
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"message":{"content":"{\"thinking\":\"low\",\"memory_depth\":\"none\",\"search_depth\":\"none\"}"}}]}`))
+	}))
+	// LIFO: release the handler before Close waits on it.
+	defer clf.Close()
+	defer close(release)
+
+	srv := fakeOpenAIServer("done")
+	defer srv.Close()
+
+	pl := makePipeline(&mockEngine{}, srv)
+	routes := classifyOnlyRoutes{endpoint: clf.URL}
+	pl.sidecarClient = sidecar.NewClient(
+		// Long enough that the sidecar deadline is not what frees us.
+		config.SidecarConfig{Enabled: true, RequestTimeoutMs: 30000},
+		config.RouterConfig{}, routes, routes)
+
+	sess := pl.sessions.GetOrCreate("cli", "disc-user")
+	reqCtx, disconnect := context.WithCancel(context.Background())
+
+	classifyReturned := make(chan struct{})
+	go func() {
+		defer close(classifyReturned)
+		_, _, _ = pl.HandleStream(reqCtx, sess, "hello", nil, func(string) {}, nil, nil)
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("classifier was never reached")
+	}
+	disconnect()
+
+	// The turn itself is detached and still finishes (that is by design),
+	// but it can only get past classification if the disconnect cut the
+	// call — the handler is still parked.
+	select {
+	case <-classifyReturned:
+	case <-time.After(8 * time.Second):
+		t.Fatal("classification did not unwind on client disconnect — " +
+			"prepContext is not honouring the request context")
 	}
 }

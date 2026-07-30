@@ -2,6 +2,8 @@ package sidecar
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -108,27 +110,86 @@ func TestClassifySuccessRecordsStats(t *testing.T) {
 
 // The classifier answers a four-field multiple-choice question; it must
 // not be made to prefill a pasted document to do it.
+//
+// Asserts on the DECODED messages, not on a single Body.Read — net/http
+// serves that from a 4096-byte buffer, so a length check on it passes
+// whether or not the caps exist (this test previously did exactly that
+// and could not fail).
 func TestClassifyCapsInput(t *testing.T) {
-	var gotBody string
+	type gotMsg struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	var got []gotMsg
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b := make([]byte, 1<<20)
-		n, _ := r.Body.Read(b)
-		gotBody = string(b[:n])
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+		}
+		var req struct {
+			Messages []gotMsg `json:"messages"`
+		}
+		if err := json.Unmarshal(raw, &req); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		got = req.Messages
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"choices":[{"message":{"content":"{\"thinking\":\"low\",\"memory_depth\":\"none\",\"search_depth\":\"none\"}"}}]}`))
 	}))
 	defer srv.Close()
 
-	huge := strings.Repeat("x", 50000)
+	pasted := strings.Repeat("x", 50000)
+	// A realistic paste-then-ask turn: the REQUEST is at the end.
+	userMsg := pasted + " so what is causing this? look up the latest fix"
 	c := classifyClient(t, srv.URL, config.SidecarConfig{Enabled: true})
-	c.ClassifyWithStats(context.Background(), []Turn{{Role: "user", Content: huge}}, huge)
+	c.ClassifyWithStats(context.Background(), []Turn{{Role: "user", Content: pasted}}, userMsg)
 
-	if len(gotBody) > 20000 {
-		t.Errorf("classify request body is %d bytes for a 100KB input — caps are not applied", len(gotBody))
+	if len(got) < 3 {
+		t.Fatalf("expected system + history + user messages, got %d", len(got))
 	}
-	if !strings.Contains(gotBody, "[…]") {
+	var history, current *gotMsg
+	for i := range got {
+		if got[i].Role == "user" {
+			if history == nil {
+				history = &got[i]
+			} else {
+				current = &got[i]
+			}
+		}
+	}
+	if history == nil || current == nil {
+		t.Fatalf("expected two user messages (history + current), got %d", len(got))
+	}
+
+	// Each is capped, in runes, at its own budget (plus the marker).
+	if n := len([]rune(history.Content)); n > maxClassifyTurnChars+8 {
+		t.Errorf("history turn is %d runes, want <= %d — the history cap is not applied",
+			n, maxClassifyTurnChars)
+	}
+	if n := len([]rune(current.Content)); n > maxClassifyUserChars+8 {
+		t.Errorf("current message is %d runes, want <= %d — the user cap is not applied",
+			n, maxClassifyUserChars)
+	}
+	if !strings.Contains(current.Content, "[…]") {
 		t.Error("expected truncated text to be marked")
 	}
+
+	// The regression that matters: head+tail must preserve the trailing
+	// request. Head-only truncation would drop it, and because the
+	// resulting verdict parses cleanly it would be stamped SourceModel —
+	// a silent hard veto on web search that no src=static grep can find.
+	if !strings.Contains(current.Content, "look up the latest fix") {
+		t.Errorf("trailing request was truncated away; classifier cannot see the intent.\ngot tail: %q",
+			lastRunes(current.Content, 80))
+	}
+}
+
+func lastRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[len(r)-n:])
 }
 
 // No classifier configured at all must not mean max effort forever.
@@ -144,5 +205,41 @@ func TestClassifyNoModelUsesStaticDefault(t *testing.T) {
 	var nilClient *Client
 	if got, _ := nilClient.ClassifyWithStats(context.Background(), nil, "hi"); got.Source != classifier.SourceStatic {
 		t.Errorf("nil client Source = %q, want static", got.Source)
+	}
+}
+
+// The general sidecar request timeout can TIGHTEN the classify deadline
+// but must not lift it. The shipped example config sets
+// request_timeout_ms = 10000, which is exactly the HTTPRouter's own
+// http.Client ceiling — honouring that verbatim would leave the deadline
+// buying nothing for anyone who copied the example.
+func TestClassifyTimeoutIsClamped(t *testing.T) {
+	cases := []struct {
+		name string
+		ms   int
+		want time.Duration
+	}{
+		{"unset falls to the ceiling", 0, maxClassifyTimeout},
+		{"example config is clamped", 10000, maxClassifyTimeout},
+		{"absurd value is clamped", 600000, maxClassifyTimeout},
+		{"tighter value wins", 1500, 1500 * time.Millisecond},
+		{"default 5s wins (under the ceiling)", 5000, 5 * time.Second},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cl := &Client{cfg: config.SidecarConfig{RequestTimeoutMs: c.ms}}
+			if got := cl.classifyTimeout(); got != c.want {
+				t.Errorf("classifyTimeout() = %v, want %v", got, c.want)
+			}
+		})
+	}
+	// Must never exceed the router's own client ceiling, or the deadline
+	// is decorative.
+	if maxClassifyTimeout >= 10*time.Second {
+		t.Errorf("maxClassifyTimeout %v must be below the HTTPRouter client ceiling", maxClassifyTimeout)
+	}
+	var nilClient *Client
+	if got := nilClient.classifyTimeout(); got != maxClassifyTimeout {
+		t.Errorf("nil client classifyTimeout() = %v, want %v", got, maxClassifyTimeout)
 	}
 }

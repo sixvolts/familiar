@@ -2214,9 +2214,13 @@ func (p *Pipeline) classifyRequest(ctx context.Context, sess *session.Session, u
 		// No classifier configured at all. Take the cheap middle setting,
 		// NOT ConservativeFallback: running deliberately without a
 		// classifier should not mean every turn pays maximum effort
-		// forever (widest retrieval, largest ceiling, heaviest overlay).
-		// This is also the baseline you can compare the classifier
-		// against — it did not exist before.
+		// forever (widest retrieval, heaviest prompt overlay). This is
+		// also the baseline you can compare the classifier against — it
+		// did not exist before.
+		//
+		// Retrieval here is whatever [effort.memory_depth.shallow]
+		// resolves to (5 @0.60 by default), so it is tunable without
+		// wiring a classifier.
 		r.classifier = classifier.StaticDefault()
 	}
 	r.toolsNeeded = append([]string(nil), r.classifier.Tools...)

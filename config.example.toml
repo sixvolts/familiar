@@ -151,6 +151,52 @@ endpoint = ""                         # e.g., "http://127.0.0.1:8100"
 model = "nomic-embed-text"
 dimension = 768                       # nomic = 768; bge-large / mxbai = 1024
 
+# ─── Effort levels ──────────────────────────────────────────────────
+# The classifier picks an ordinal LEVEL per turn; these blocks decide what
+# each level MEANS. Tune here rather than re-prompting the classifier.
+#
+# Two things worth knowing before you touch these:
+#
+#  1. thinking.high.token_budget sizes the output ceiling for EVERY chat
+#     turn that thinks, not just the "high" ones. The ceiling can only
+#     truncate a model mid-reasoning, never make it reason more, so the
+#     trusted chat path grants the maximum at every enabled level rather
+#     than letting a one-shot guess cut a hard turn short. The level still
+#     selects the prompt overlay and history width. (Research workers and
+#     other shard envelopes keep their own level-derived budgets.)
+#
+#  2. memory_depth.shallow is the default when the classifier is
+#     unavailable or not configured, so it governs retrieval on a
+#     sidecar-less install.
+#
+# [effort.thinking.off]
+# enabled = false
+# [effort.thinking.low]
+# enabled = true
+# token_budget = 500
+# [effort.thinking.medium]
+# enabled = true
+# token_budget = 2000
+# [effort.thinking.high]
+# enabled = true
+# token_budget = 8000               # also the flat trusted-path ceiling
+#
+# [effort.memory_depth.none]
+# skip = true
+# [effort.memory_depth.shallow]
+# top_k = 5
+# similarity_threshold = 0.60
+# [effort.memory_depth.deep]
+# top_k = 20
+# similarity_threshold = 0.40
+#
+# [effort.search_depth.none]
+# skip = true
+# [effort.search_depth.shallow]
+# max_searches = 1
+# [effort.search_depth.deep]
+# max_searches = 5
+
 # ─── Router ─────────────────────────────────────────────────────────
 # Tier selection: sidecar (tier 1-2) for cheap/chat work, backend
 # (tier 3-4) for reasoning/code. Rule-based router is the fast default;
@@ -185,6 +231,13 @@ confidence_threshold = 0.6            # below this, fall through to rule-based s
 [sidecar]
 enabled = false
 connect_timeout_ms = 500
+# General per-request ceiling for sidecar tasks.
+#
+# NOTE the classifier clamps this to 6s for its own call. It runs before
+# the model can start generating, so "how hard should I try" must never
+# cost more than a few seconds — and when it does time out the fallback is
+# now cheap (medium/shallow), not maximum effort. Lower this to tighten the
+# classifier's deadline; raising it will not loosen it.
 request_timeout_ms = 10000
 fallback_on_failure = true            # route to backend if sidecar dies
 

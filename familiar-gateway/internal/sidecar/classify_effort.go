@@ -19,19 +19,6 @@ import (
 	"github.com/familiar/gateway/internal/classifier"
 )
 
-// Classify returns the classifier's per-turn ordinal-effort
-// verdict for the current user message, considering up to 2-3
-// recent turns of context. Always returns a valid Output —
-// failures fall back to ConservativeFallback per spec.
-//
-// Caller responsibility: trim `history` to the most recent few
-// turns before calling. The classifier prompt advertises 2-3
-// turns; passing 50 wastes tokens without changing the verdict.
-func (c *Client) Classify(ctx context.Context, history []Turn, userMsg string) classifier.Output {
-	out, _ := c.ClassifyWithStats(ctx, history, userMsg)
-	return out
-}
-
 // ClassifyStats is the per-call telemetry the turn log needs. Without
 // it the two numbers that decide whether this call earns its place on
 // the critical path — its tail latency and how often it falls back —
@@ -51,10 +38,22 @@ type ClassifyStats struct {
 	Err error
 }
 
-// ClassifyWithStats is Classify plus telemetry. Always returns a valid
-// Output; every failure path is stamped with its Source so the caller
-// can log the fallback rate and distinguish a real verdict from a
-// guess.
+// ClassifyWithStats returns the classifier's per-turn ordinal-effort
+// verdict, plus telemetry. This is the only entry point.
+//
+// Always returns a VALID Output, and stamps Source so the caller can tell
+// a real decision from a guess:
+//   - SourceModel    the classifier answered and the verdict parsed
+//   - SourceStatic   we learned nothing (no client, chain offline, transport
+//     failure, timeout, unparseable body) -> StaticDefault,
+//     which is deliberately CHEAP
+//   - SourceUnparsed a response arrived but its levels failed Validate()
+//     -> ConservativeFallback, the one case where erring
+//     expensive is defensible
+//
+// Caller responsibility: trim `history` to the most recent few turns. The
+// prompt advertises 2-3; passing 50 wastes tokens without changing the
+// verdict. Per-message length is capped here regardless.
 func (c *Client) ClassifyWithStats(ctx context.Context, history []Turn, userMsg string) (classifier.Output, ClassifyStats) {
 	start := time.Now()
 	var st ClassifyStats
@@ -86,8 +85,12 @@ func (c *Client) ClassifyWithStats(ctx context.Context, history []Turn, userMsg 
 	// Bound the call. This is the last blocking step before the turn can
 	// start assembling, and it used to have no deadline of its own — its
 	// only ceiling was the shared 10s http.Client, which is far too long
-	// to spend deciding how hard to try. [sidecar].request_timeout_ms was
-	// parsed and read by nothing; this is now its meaning.
+	// to spend deciding how hard to try.
+	//
+	// Note the deadline starts HERE, after syncEnter, so it bounds the
+	// request and not the queue wait ahead of it. st.Duration measures
+	// both, which is the number worth watching: a p99 far above this
+	// timeout means the gate is the bottleneck, not the model.
 	classifyCtx, cancel := context.WithTimeout(ctx, c.classifyTimeout())
 	defer cancel()
 
@@ -113,20 +116,32 @@ func (c *Client) ClassifyWithStats(ctx context.Context, history []Turn, userMsg 
 	return out, st
 }
 
-// defaultClassifyTimeout bounds one classify attempt. Deliberately not
-// as tight as the 3s used by condense/expand: on a single-slot server
-// this call can queue behind an in-flight background extract, and a
-// deadline that trips on normal queueing would convert working verdicts
-// into fallbacks — trading a real decision for a guess to save a second.
-const defaultClassifyTimeout = 6 * time.Second
+// maxClassifyTimeout is the CEILING on one classify attempt, whatever
+// the general sidecar request timeout says. Deliberately not as tight as
+// the 3s used by condense/expand: on a single-slot server this call can
+// queue behind an in-flight background extract, and a deadline that
+// trips on normal queueing would convert working verdicts into guesses
+// to save a second.
+//
+// It is a ceiling rather than just a default because the general knob is
+// too coarse to bound this call usefully — the shipped example config
+// sets request_timeout_ms = 10000, which is exactly the HTTPRouter's own
+// http.Client ceiling, so honouring it verbatim would leave the classify
+// deadline buying nothing for anyone who copied the example. Deciding
+// how hard to try must never cost more than a few seconds; the fallback
+// is cheap now, so tripping this is not expensive.
+const maxClassifyTimeout = 6 * time.Second
 
-// classifyTimeout is the per-attempt deadline, from
-// [sidecar].request_timeout_ms when set.
+// classifyTimeout is the per-attempt deadline: [sidecar].request_timeout_ms
+// when set, clamped to maxClassifyTimeout. The knob can therefore tighten
+// the bound but not lift it.
 func (c *Client) classifyTimeout() time.Duration {
 	if c != nil && c.cfg.RequestTimeoutMs > 0 {
-		return time.Duration(c.cfg.RequestTimeoutMs) * time.Millisecond
+		if d := time.Duration(c.cfg.RequestTimeoutMs) * time.Millisecond; d < maxClassifyTimeout {
+			return d
+		}
 	}
-	return defaultClassifyTimeout
+	return maxClassifyTimeout
 }
 
 // classifyUsage is the token accounting the server reports back. The
@@ -137,16 +152,8 @@ type classifyUsage struct {
 	completion int
 }
 
-// ClassifyEffort runs the HTTP roundtrip and returns the parsed
-// Output. Used by Client.Classify above; exported on HTTPRouter
-// so tests can drive it directly without a Client wrapper.
-func (r *HTTPRouter) ClassifyEffort(ctx context.Context, history []Turn, userMsg string) (classifier.Output, error) {
-	out, _, err := r.classifyEffortWithUsage(ctx, history, userMsg)
-	return out, err
-}
-
-// classifyEffortWithUsage is ClassifyEffort plus the server's token
-// counts.
+// classifyEffortWithUsage runs the HTTP roundtrip and returns the parsed
+// verdict plus the server's token counts.
 func (r *HTTPRouter) classifyEffortWithUsage(ctx context.Context, history []Turn, userMsg string) (classifier.Output, classifyUsage, error) {
 	var usage classifyUsage
 	type chatMsg struct {
@@ -265,18 +272,35 @@ const (
 	classifyServedModelName = "gemma-4-26b-a4b"
 )
 
-// capClassifyText truncates to n runes, keeping the head. The head
-// carries the intent ("look up the latest ...") which is what the
-// verdict turns on; a trailing paste does not change it.
+// capClassifyText bounds s to n runes, keeping the HEAD AND TAIL and
+// dropping the middle — the same trade ctxbuild.CapToolResult makes, for
+// the same reason.
+//
+// Head-only would be wrong here, and specifically wrong in the shape
+// that matters most: "<3000 chars of log> ...what's causing this? look it
+// up". The intent sits at the END of a paste-then-ask message. Cutting it
+// makes the classifier answer about the paste, and since its search rule
+// requires literal phrasing ("look up", "what's the latest"), the verdict
+// comes back search_depth=none — which is a hard veto downstream, not a
+// hint. Worse, that verdict parses cleanly, so it is stamped SourceModel
+// and is invisible to a src=static grep.
 func capClassifyText(s string, n int) string {
-	if len(s) <= n {
+	if n <= 0 {
 		return s
 	}
 	runes := []rune(s)
 	if len(runes) <= n {
 		return s
 	}
-	return string(runes[:n]) + " […]"
+	const marker = " […] "
+	// Split the budget between head and tail. The tail gets the larger
+	// share on the reasoning above: the request is more often at the end.
+	head := n / 3
+	tail := n - head
+	if head < 1 || tail < 1 {
+		return string(runes[:n])
+	}
+	return string(runes[:head]) + marker + string(runes[len(runes)-tail:])
 }
 
 // parseClassifierOutput extracts a classifier.Output from the

@@ -87,9 +87,11 @@ test("membership roles gate reading, writing, and member management", async ({ s
         expect(add.ok(), `add ${role}: HTTP ${add.status()}`).toBeTruthy();
     }
 
-    // Writer: page CRUD yes, member management no.
+    // Writer: page CRUD yes, member management no. Content edits require
+    // the If-Match precondition (the page's loaded updated_at); nothing has
+    // touched the page since createPage, so its updated_at is still current.
     const writerEdit = await request.patch(`${bookURL}/page-by-id/${page.id}`, {
-        headers: authed(writer),
+        headers: { ...authed(writer), "If-Match": page.updated_at },
         data: { title: "Role Target", content: "writer was here" },
     });
     expect(writerEdit.ok(), `writer edit: HTTP ${writerEdit.status()}`).toBeTruthy();

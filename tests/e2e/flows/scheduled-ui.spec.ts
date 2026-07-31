@@ -23,11 +23,17 @@ const test = base.extend<{}, { stack: GatewayStack }>({
     ],
 });
 
-test("the Push notification target shows a hint and auto-creates a thread", async ({
+test("a chat-conversation target auto-creates a thread, and notify-push rides alongside it", async ({
     stack,
     browser,
     request,
 }) => {
+    // Push delivery is no longer a first-class target kind: the UI offers a
+    // chat-conversation destination (which auto-creates a dedicated
+    // "Scheduled: <name>" thread) plus an independent "Also notify me via
+    // push (PWA)" checkbox that adds a `notify` target. openDetail migrates
+    // any legacy `push` target to conversation+notify (scheduled.js), so this
+    // is the current contract for "get a push and land in a thread".
     const user = await createTestUser();
     const ctx = await browser.newContext();
     await attachSession(ctx, stack.workspaceURL, user);
@@ -41,14 +47,18 @@ test("the Push notification target shows a hint and auto-creates a thread", asyn
         await page.locator("#actions-new").click();
         await expect(page.locator("#action-detail")).toBeVisible({ timeout: 10_000 });
 
-        // "Push notification (PWA)" is an offered delivery target, and
-        // choosing it reveals the explanatory hint.
-        await expect(page.locator('#action-target-kind option[value="push"]')).toHaveCount(1);
-        await page.locator("#action-target-kind").selectOption("push");
-        await expect(page.locator("#action-target-push")).toBeVisible();
+        // Choosing the conversation destination reveals the hint explaining a
+        // dedicated "Scheduled: …" thread is auto-created.
+        await page.locator("#action-target-kind").selectOption("conversation");
+        const hint = page.locator("#action-conversation-hint");
+        await expect(hint).toBeVisible();
+        await expect(hint).toContainText("Scheduled:");
+        // Opt into the PWA push that rides alongside the thread.
+        await page.locator("#action-notify-push").check();
 
-        // Create it — the push target auto-creates a "Scheduled: <name>"
-        // thread (one per action) the notification will deep-link to.
+        // Create it — the conversation target auto-creates the thread (the
+        // backend mints "Scheduled: <name>" and fills conversation_id), and
+        // the checkbox appends a `notify` target.
         const name = `push ui ${Date.now().toString(36)}`;
         await page.locator("#action-name").fill(name);
         await page.locator("#action-prompt").fill("notify me");
@@ -61,9 +71,14 @@ test("the Push notification target shows a hint and auto-creates a thread", asyn
         ).json();
         const act = (list.items ?? []).find((a: any) => a.name === name);
         expect(act, "created action").toBeTruthy();
-        const t = (act.report_targets || [])[0];
-        expect(t.kind).toBe("push");
-        expect(t.conversation_id, "push target auto-creates a thread").toMatch(/[0-9a-f-]{36}/);
+        const targets = act.report_targets || [];
+        const convo = targets.find((t: any) => t.kind === "conversation");
+        expect(convo, "conversation target").toBeTruthy();
+        expect(convo.conversation_id, "conversation target auto-creates a thread").toMatch(/[0-9a-f-]{36}/);
+        expect(
+            targets.some((t: any) => t.kind === "notify"),
+            "notify-push target rides alongside",
+        ).toBeTruthy();
     } finally {
         await ctx.close();
     }

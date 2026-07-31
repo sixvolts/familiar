@@ -101,20 +101,24 @@ test("a mermaid fence survives both editor modes uncorrupted", async ({
             page.locator(".ProseMirror.toastui-editor-contents .mermaid-block.is-ww.is-rendered svg"),
         ).toBeVisible({ timeout: 10_000 });
 
-        // Markdown mode: the raw fence is intact.
-        await page.locator('button[data-mode="markdown"]').click();
-        const md = await page.evaluate(() => {
-            // One Toast UI instance mounts BOTH ProseMirror panes;
-            // the markdown one lacks the -contents class.
-            const el = document.querySelector(".toastui-editor .ProseMirror:not(.toastui-editor-contents)");
-            return el ? (el as HTMLElement).innerText : "";
-        });
+        // The workspace boots a Notes splash tab AND this opened note, so two
+        // notes editors (each with its own mode bar) are mounted. Scope to the
+        // opened note's shell — `.is-splash` marks the splash tab and persists
+        // across the mode switch — or the selectors below match both and
+        // Playwright's strict mode fails.
+        const noteEditor = page.locator(".notes-shell:not(.is-splash)");
+
+        // Markdown mode: the raw fence is intact. One Toast UI instance mounts
+        // BOTH ProseMirror panes; the markdown one lacks the -contents class.
+        await noteEditor.locator('button[data-mode="markdown"]').click();
+        const mdPane = noteEditor.locator(".ProseMirror:not(.toastui-editor-contents)");
+        const md = await mdPane.innerText();
         expect(md).toContain("```mermaid");
         expect(md).toContain("graph TD;");
 
         // Type into the note to trigger a save, then confirm the
         // stored markdown still carries the fence.
-        await page.locator(".toastui-editor .ProseMirror:not(.toastui-editor-contents)").click();
+        await mdPane.click();
         await page.keyboard.press("End");
         await page.keyboard.type(" edited");
         await expect
@@ -250,12 +254,19 @@ test("saving a diagram whose fence was deleted errors instead of clobbering", as
         await page.locator(".mermaid-block.is-ww.is-rendered").click();
         await expect(page.locator(".diagram-source")).toHaveValue(/graph TD;/, { timeout: 10_000 });
 
-        // Yank the fence out from under the open tab.
+        // Yank the fence out from under the open tab. The content PATCH needs
+        // the If-Match precondition; fetch a fresh updated_at right before so
+        // the fence is genuinely removed (without it the PATCH 428s and the
+        // fence would survive, so the conflict path below could never fire).
         const replaced = "# Diagram note\n\nno more diagram\n";
-        await request.patch(`${stack.workspaceURL}/console/api/books/personal/page-by-id/${note.id}`, {
-            headers,
+        const before = await (
+            await request.get(`${stack.workspaceURL}/console/api/books/personal/page-by-id/${note.id}`, { headers })
+        ).json();
+        const yank = await request.patch(`${stack.workspaceURL}/console/api/books/personal/page-by-id/${note.id}`, {
+            headers: { ...headers, "If-Match": before.updated_at },
             data: { content: replaced },
         });
+        expect(yank.ok(), `yank fence: HTTP ${yank.status()}`).toBeTruthy();
 
         await page.locator(".diagram-source").fill("graph TD;\n  X --> Y;");
         await page.locator(".diagram-shell button", { hasText: "Save to page" }).click();

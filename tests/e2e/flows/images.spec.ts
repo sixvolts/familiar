@@ -223,10 +223,20 @@ test("images resize via preset chips and the drag handle; width persists as #w="
             { headers: authed(user), multipart: { file: { name: "r.png", mimeType: "image/png", buffer: png } } },
         );
         const meta = await up.json();
-        await request.patch(`${stack.workspaceURL}/console/api/books/personal/page-by-id/${note.id}`, {
-            headers,
-            data: { content: `resize me\n\n![r](${meta.url})\n` },
-        });
+        // Content PATCH needs the If-Match precondition. Re-fetch after the
+        // media upload (which can bump updated_at) so the timestamp is fresh —
+        // a stale one would 409 instead.
+        const fresh = await (
+            await request.get(`${stack.workspaceURL}/console/api/books/personal/page-by-id/${note.id}`, { headers })
+        ).json();
+        const patched = await request.patch(
+            `${stack.workspaceURL}/console/api/books/personal/page-by-id/${note.id}`,
+            {
+                headers: { ...headers, "If-Match": fresh.updated_at },
+                data: { content: `resize me\n\n![r](${meta.url})\n` },
+            },
+        );
+        expect(patched.ok(), `image PATCH: HTTP ${patched.status()}`).toBeTruthy();
 
         await page.locator(".sidebar-cat-notes .sidebar-row-chevron").click();
         await page
@@ -278,12 +288,14 @@ test("images resize via preset chips and the drag handle; width persists as #w="
             }, { timeout: 10_000 })
             .toBeGreaterThan(50);
 
-        // Round trip: markdown mode shows the fragment as plain text.
-        await page.locator('button[data-mode="markdown"]').click();
-        const md = await page.evaluate(() => {
-            const el = document.querySelector(".toastui-editor .ProseMirror:not(.toastui-editor-contents)");
-            return el ? (el as HTMLElement).innerText : "";
-        });
+        // Round trip: markdown mode shows the fragment as plain text. The
+        // workspace also mounts a Notes splash editor (its own mode bar), so
+        // scope to the opened note's shell. `.is-splash` marks the splash tab
+        // and persists across the mode switch — unlike the image node-view,
+        // which is torn down entering markdown mode.
+        const noteEditor = page.locator(".notes-shell:not(.is-splash)");
+        await noteEditor.locator('button[data-mode="markdown"]').click();
+        const md = await noteEditor.locator(".ProseMirror:not(.toastui-editor-contents)").innerText();
         expect(md).toMatch(/#w=\d+\)/);
     } finally {
         await ctx.close();

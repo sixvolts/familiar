@@ -111,7 +111,10 @@
             }
             await api(pageURL, {
                 method: "PATCH",
-                headers: { "Content-Type": "application/json" },
+                // If-Match carries the updated_at from the fresh GET above so
+                // the server's lost-update guard passes; every other editor
+                // (notes.js, wiki.js) sends it and page-by-id 428s without it.
+                headers: { "Content-Type": "application/json", "If-Match": page.updated_at },
                 body: JSON.stringify({ content: next }),
             });
             shell.dirty = false;

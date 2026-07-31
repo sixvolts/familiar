@@ -145,10 +145,19 @@ test("shared pages serve their images anonymously with #w= widths applied", asyn
         { headers: { Cookie: user.cookieHeader }, multipart: { file: { name: "p.png", mimeType: "image/png", buffer: png } } },
     );
     const meta = await up.json();
-    await request.patch(`${stack.workspaceURL}/console/api/books/personal/page-by-id/${note.id}`, {
-        headers,
-        data: { content: `# Pic\n\n![pic](${meta.url}#w=50)\n` },
-    });
+    // Content PATCH needs the If-Match precondition. Re-fetch after the media
+    // upload (which can bump updated_at) so the timestamp is fresh.
+    const fresh = await (
+        await request.get(`${stack.workspaceURL}/console/api/books/personal/page-by-id/${note.id}`, { headers })
+    ).json();
+    const patched = await request.patch(
+        `${stack.workspaceURL}/console/api/books/personal/page-by-id/${note.id}`,
+        {
+            headers: { ...headers, "If-Match": fresh.updated_at },
+            data: { content: `# Pic\n\n![pic](${meta.url}#w=50)\n` },
+        },
+    );
+    expect(patched.ok(), `image PATCH: HTTP ${patched.status()}`).toBeTruthy();
     const share = await (
         await request.post(
             `${stack.workspaceURL}/console/api/books/personal/page-by-id/${note.id}/share`,

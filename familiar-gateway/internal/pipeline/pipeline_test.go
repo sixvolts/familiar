@@ -11,6 +11,7 @@ import (
 
 	"github.com/familiar/gateway/internal/classifier"
 	"github.com/familiar/gateway/internal/config"
+	"github.com/familiar/gateway/internal/memory"
 	"github.com/familiar/gateway/internal/router"
 	"github.com/familiar/gateway/internal/session"
 	"github.com/familiar/gateway/internal/sidecar"
@@ -170,17 +171,34 @@ func TestPipelineHandleWithMemory(t *testing.T) {
 	srv := fakeOpenAIServer("I know you like brisket")
 	defer srv.Close()
 
-	eng := &mockEngine{
-		assembleResp: &pb.AssembleContextResponse{
-			MemoryContext: []*pb.MemoryResultProto{
-				{
-					Fact:      &pb.FactProto{Content: "user likes brisket"},
-					Staleness: "fresh",
-				},
-			},
+	// Memory now comes solely from the pgvector path (searchPgVector →
+	// MemoryStore.HybridSearch); the engine's retired dense pass no longer
+	// injects it. Wire a recording store with one hit + an embedder so the
+	// query vector is non-nil and the retrieval path runs.
+	store := &recordingMemStore{
+		results: []memory.MemoryResult{
+			{Content: "user likes brisket", Scope: "user", Similarity: 0.95},
 		},
 	}
-	pl := makePipeline(eng, srv)
+	embed := func(context.Context, string) ([]float32, error) {
+		return []float32{0.1, 0.2, 0.3}, nil
+	}
+
+	models := []config.ModelConfig{
+		{ID: "test-model", Provider: "openai", Endpoint: srv.URL},
+	}
+	reg := router.NewRegistry(models)
+	reg.SetStatusForTest("test-model", "online")
+	rtr := router.NewRouter(config.RouterConfig{Enabled: true}, reg)
+
+	pl := New(Deps{
+		Engine:      &mockEngine{},
+		Router:      rtr,
+		Sessions:    session.NewManager(),
+		AgentID:     "test-agent",
+		MemoryStore: store,
+		Embedder:    embed,
+	})
 	sess := pl.sessions.GetOrCreate("cli", "user1")
 
 	_, info, err := pl.Handle(context.Background(), sess, "what food do I like?", nil)
@@ -188,7 +206,52 @@ func TestPipelineHandleWithMemory(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if info.MemHits != 1 {
-		t.Fatalf("expected 1 memory hit, got %d", info.MemHits)
+		t.Fatalf("expected 1 memory hit from the pgvector path, got %d", info.MemHits)
+	}
+}
+
+// The engine's dense memory pass is retired: even when the (mock) engine
+// returns MemoryContext, it must NOT reach the assembled context. Only the
+// pgvector authority counts — here it's wired but empty, so MemHits is 0.
+func TestEngineMemoryPassRemoved(t *testing.T) {
+	srv := fakeOpenAIServer("ok")
+	defer srv.Close()
+
+	eng := &mockEngine{
+		assembleResp: &pb.AssembleContextResponse{
+			MemoryContext: []*pb.MemoryResultProto{
+				{Fact: &pb.FactProto{Content: "stale engine memory"}, Staleness: "fresh"},
+			},
+		},
+	}
+	store := &recordingMemStore{} // pgvector authority, no hits
+	embed := func(context.Context, string) ([]float32, error) {
+		return []float32{0.1, 0.2, 0.3}, nil
+	}
+
+	models := []config.ModelConfig{
+		{ID: "test-model", Provider: "openai", Endpoint: srv.URL},
+	}
+	reg := router.NewRegistry(models)
+	reg.SetStatusForTest("test-model", "online")
+	rtr := router.NewRouter(config.RouterConfig{Enabled: true}, reg)
+
+	pl := New(Deps{
+		Engine:      eng,
+		Router:      rtr,
+		Sessions:    session.NewManager(),
+		AgentID:     "test-agent",
+		MemoryStore: store,
+		Embedder:    embed,
+	})
+	sess := pl.sessions.GetOrCreate("cli", "user1")
+
+	_, info, err := pl.Handle(context.Background(), sess, "what do I like?", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info.MemHits != 0 {
+		t.Fatalf("engine memory leaked into the assembled context: MemHits=%d, want 0", info.MemHits)
 	}
 }
 

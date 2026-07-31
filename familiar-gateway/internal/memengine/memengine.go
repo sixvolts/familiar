@@ -121,58 +121,18 @@ func (e *MemEngine) SetDeps(pool *db.Pool, memStore memory.MemoryStore, sessions
 // Memory ops (real implementations)
 // ──────────────────────────────────────────────────────────────────
 
-// AssembleContext is the per-turn retrieval call. Returns the same
-// shape the previous engine returned, built from:
-//   - pgvector search (memStore) for the memory_context list
-//   - session.RecentTurns for the conversation_history list
+// AssembleContext returns the conversation history for a turn, read from
+// session.RecentTurns.
 //
-// The hardcoded threshold (0.70) + top-K (3) from the previous implementation are
-// kept here for byte-for-byte parity with the existing pipeline
-// behavior. The effort resolver will override these via
-// memStore.Search at the pipeline's own retrieval call site;
-// AssembleContext stays conservative since it's still the legacy
-// surface.
+// It no longer performs memory retrieval. The pipeline's own
+// searchPgVector (tier-aware hybrid + RRF, effort-resolved thresholds) is
+// the single memory authority. This used to ALSO run a dense-only top-3
+// @0.70 search whose results were prepended un-reranked ahead of — and
+// duplicated by — that hybrid pass, with a fabricated "fresh" staleness;
+// that redundant pass is gone. queryVec/memBudget/convBudget are unused
+// now but stay on the signature (engine.Service interface).
 func (e *MemEngine) AssembleContext(ctx context.Context, sessionID, userMsg string, vis *pb.VisibilityContext, memBudget, convBudget uint32, queryVec []float32) (*pb.AssembleContextResponse, error) {
 	out := &pb.AssembleContextResponse{}
-	// Memory branch. Skip when the operator hasn't wired memStore
-	// or when the caller didn't supply a query vector — both are
-	// soft-fail conditions matching the previous engine's behavior.
-	if e.memStore != nil && len(queryVec) > 0 {
-		userID := ""
-		if vis != nil {
-			userID = vis.UserId
-		}
-		const (
-			minRelevance = 0.70
-			maxInjected  = 10
-		)
-		results, err := e.memStore.Search(ctx, queryVec, maxInjected, minRelevance, userID)
-		if err != nil {
-			out.Error = "memory query failed: " + err.Error()
-			return out, nil
-		}
-		// Cap to top-3 above threshold to match the previous implementation's
-		// "max_injected = 3" constant. Search() already orders by
-		// similarity desc.
-		take := 3
-		if take > len(results) {
-			take = len(results)
-		}
-		for _, r := range results[:take] {
-			out.MemoryContext = append(out.MemoryContext, &pb.MemoryResultProto{
-				Fact: &pb.FactProto{
-					Id:        r.ID,
-					Content:   r.Content,
-					Embedding: r.Embedding,
-					Scope:     r.Scope,
-				},
-				RelevanceScore:    float32(r.Similarity),
-				TierSource:        "persistent",
-				ProvenanceSummary: r.Scope,
-				Staleness:         "fresh",
-			})
-		}
-	}
 
 	// Conversation branch. Read from session.Manager — the gateway-
 	// side source of truth post chat-rearch. Falls back to nil when

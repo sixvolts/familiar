@@ -779,7 +779,6 @@ func (p *Pipeline) assembleMessages(
 
 	memBudget := p.effort.MemoryFor(memDepth)
 
-	var memoryContext []*pb.MemoryResultProto
 	var convHistory []*pb.ConversationTurn
 	var queryVec []float32
 
@@ -847,32 +846,20 @@ func (p *Pipeline) assembleMessages(
 			if ctxResp.Error != "" {
 				log.Printf("[pipeline] AssembleContext engine error: %s", ctxResp.Error)
 			}
-			memoryContext = ctxResp.MemoryContext
 			convHistory = ctxResp.ConversationHistory
 			if onStatus != nil {
-				onStatus(fmt.Sprintf("Memory: %d hits | History: %d turns\n", len(memoryContext), len(convHistory)))
+				onStatus(fmt.Sprintf("History: %d turns\n", len(convHistory)))
 			}
 		}
 	} else {
 		log.Printf("[pipeline] trivial complexity (no memory requested) — skipping embedder/pgvector/engine context")
 	}
 
-	// Engine hot memories → ctxbuild.Memory, preserving the existing
-	// "- content (staleness)" format so the LLM sees the same thing it did
-	// before the refactor.
+	// Memory comes solely from the pgvector persistent tier below
+	// (tier-aware hybrid + RRF). The engine's dense-only pass that used to
+	// prepend un-reranked, duplicate, staleness-faked hits here is gone —
+	// searchPgVector is the single memory authority.
 	var mems []ctxbuild.Memory
-	for _, m := range memoryContext {
-		if m.Fact == nil {
-			continue
-		}
-		staleness := m.Staleness
-		if staleness == "" {
-			staleness = "unknown"
-		}
-		mems = append(mems, ctxbuild.Memory{
-			Content: fmt.Sprintf("- %s (%s)", m.Fact.Content, staleness),
-		})
-	}
 
 	// pgvector persistent tier, with optional tier-driven query expansion.
 	// Tier overrides on threshold/max_results fall through zero values to

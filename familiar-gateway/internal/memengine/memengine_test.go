@@ -110,6 +110,22 @@ func TestAssembleContextDegradesWithoutVector(t *testing.T) {
 	}
 }
 
+// AssembleContext no longer retrieves memory at all — even with a store
+// that WOULD return a hit and a non-nil query vector, its MemoryContext
+// must be empty. The pipeline's searchPgVector is the sole memory
+// authority now; this pins that the engine's dense pass stays retired.
+func TestAssembleContextNeverRetrievesMemory(t *testing.T) {
+	e := New(nil, hitMemStore{}, nil, "")
+	resp, err := e.AssembleContext(context.Background(), "sess", "hi",
+		&pb.VisibilityContext{UserId: "u"}, 1000, 1000, []float32{0.1, 0.2, 0.3})
+	if err != nil {
+		t.Fatalf("AssembleContext: %v", err)
+	}
+	if len(resp.MemoryContext) != 0 {
+		t.Fatalf("engine retrieved memory (%d hits) — the dense pass should be gone", len(resp.MemoryContext))
+	}
+}
+
 func TestCommitFactsNoPoolReturnsError(t *testing.T) {
 	// A commit with no pool stores nothing, so it must SAY so. The old
 	// contract here returned (resp, nil) with the reason only on
@@ -149,6 +165,17 @@ func (stubMemStore) NearestLiveFact(ctx context.Context, vector []float32, userI
 	return memory.NearestFact{}, false, nil
 }
 func (stubMemStore) Close() error { return nil }
+
+// hitMemStore returns a memory hit for any query — used to prove the
+// engine's retrieval path is truly gone (a returned hit must NOT surface).
+type hitMemStore struct{ stubMemStore }
+
+func (hitMemStore) Search(ctx context.Context, vector []float32, limit int, threshold float64, userID string) ([]memory.MemoryResult, error) {
+	return []memory.MemoryResult{{ID: "m1", Content: "would-be memory", Similarity: 0.99}}, nil
+}
+func (hitMemStore) HybridSearch(ctx context.Context, queryText string, vector []float32, limit int, threshold float64, userID string) ([]memory.MemoryResult, error) {
+	return []memory.MemoryResult{{ID: "m1", Content: "would-be memory", Similarity: 0.99}}, nil
+}
 
 // Close must stop the consolidation cycle it owns, so a graceful
 // shutdown drains the sleep goroutine instead of leaving it running

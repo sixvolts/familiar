@@ -16,6 +16,35 @@ func turn(role string, bytes int) session.Turn {
 	return session.Turn{Role: role, Content: repeat(bytes), Timestamp: time.Now()}
 }
 
+// On a small/backup window whose ratio-based system zone (~10%) is far
+// smaller than a realistic base+tier+tool_policy prompt, the demand-driven
+// floor must borrow from the elastic conversation zone so the WHOLE system
+// prompt survives — including the tail, where tool_policy lives — instead of
+// being head-truncated into a model that has tools but no tool instructions.
+func TestBuildSystemPromptFloorBorrowsFromConversation(t *testing.T) {
+	cfg := Config{
+		WindowSize:        8192,
+		OutputReservation: 2048,
+		SystemPromptRatio: 0.10, // ~614-token system zone — far below the prompt
+		MemoryRatio:       0.12,
+		ToolResultRatio:   0.12,
+	}
+	// ~1500-token system prompt with a distinct tail marker standing in for
+	// the tool_policy block that Assemble appends last.
+	sys := repeat(6000) + "TOOL_POLICY_TAIL"
+	turns := make([]session.Turn, 0, 40)
+	for i := 0; i < 40; i++ {
+		turns = append(turns, turn("user", 200)) // history to evict from
+	}
+
+	out := New(cfg).Build(Input{SystemPrompt: sys, Turns: turns})
+
+	if !strings.Contains(out.SystemPrompt, "TOOL_POLICY_TAIL") {
+		t.Fatalf("system prompt tail (tool_policy) was clipped on a small window: kept %d tokens of %d",
+			EstimateTokens(out.SystemPrompt), EstimateTokens(sys))
+	}
+}
+
 func TestResolveBudgetRatios(t *testing.T) {
 	cfg := DefaultConfig()
 	b := cfg.Resolve()
@@ -61,7 +90,7 @@ func TestBuildFitsSystemPromptAndMemoriesWithinZones(t *testing.T) {
 	b := New(cfg)
 
 	in := Input{
-		SystemPrompt: repeat(2000), // 500 tokens → over 400 budget, should truncate
+		SystemPrompt: repeat(2000), // 500 tokens → over the 400 sys zone
 		Memories: []Memory{
 			{Content: repeat(2000)}, // 500 tokens
 			{Content: repeat(1200)}, // 300 tokens → together 800, fits
@@ -70,8 +99,12 @@ func TestBuildFitsSystemPromptAndMemoriesWithinZones(t *testing.T) {
 	}
 	out := b.Build(in)
 
-	if got := EstimateTokens(out.SystemPrompt); got > 400 {
-		t.Fatalf("system prompt not truncated: %d tokens", got)
+	// D2: a system prompt over its ratio zone is preserved by borrowing from
+	// the elastic conversation zone (tool_policy must not be silently dropped),
+	// not head-truncated. The full 500 tokens survive; memory/tool zones are
+	// untouched by the borrow.
+	if got := EstimateTokens(out.SystemPrompt); got != 500 {
+		t.Fatalf("system prompt should be preserved via conv borrow, got %d tokens of 500", got)
 	}
 	if len(out.Memories) != 2 {
 		t.Fatalf("expected 2 memories kept, got %d", len(out.Memories))

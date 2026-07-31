@@ -1,6 +1,10 @@
 package ctxbuild
 
-import "github.com/familiar/gateway/internal/session"
+import (
+	"log"
+
+	"github.com/familiar/gateway/internal/session"
+)
 
 // Input is everything the Builder needs to assemble one context.
 //
@@ -69,6 +73,34 @@ func (b *Builder) Build(in Input) AssembledContext {
 		budget.Conversation -= in.ReservedTokens
 		if budget.Conversation < 0 {
 			budget.Conversation = 0
+		}
+	}
+
+	// The system prompt (admin base + tier overlay + tool_policy) is not
+	// elastic: head-truncating it to a ratio-based zone silently drops the
+	// TAIL — the tier overlay first, then the entire tool policy — leaving a
+	// model with tools attached but no instructions on how to use them. That
+	// bites precisely on the small/backup windows failover can route to. Give
+	// the system zone a demand-driven floor: if the prompt needs more than its
+	// ratio zone, borrow from the elastic conversation zone (history is the
+	// cheapest thing to evict) up to a ceiling of half the total budget, before
+	// ever clipping the system prompt. If the window is genuinely too small to
+	// hold it even then, clip — but loudly.
+	if sysNeed := EstimateTokens(in.SystemPrompt); sysNeed > budget.System {
+		grown := sysNeed
+		if ceiling := budget.Total / 2; grown > ceiling {
+			grown = ceiling
+		}
+		if borrow := grown - budget.System; borrow > 0 {
+			if borrow > budget.Conversation {
+				borrow = budget.Conversation
+			}
+			budget.System += borrow
+			budget.Conversation -= borrow
+		}
+		if sysNeed > budget.System {
+			log.Printf("[ctxbuild] system prompt clipped to %d of %d tokens (window %d too small for base+tier+tool_policy) — tool guidance may be dropped",
+				budget.System, sysNeed, b.cfg.WindowSize)
 		}
 	}
 

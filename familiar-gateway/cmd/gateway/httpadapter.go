@@ -368,7 +368,7 @@ func runHTTPAdapter(ctx context.Context, d httpAdapterDeps, adminHOut **admin.Ha
 								writerModel = ""
 							}
 						}
-						rSkill := researchskill.New(researchskill.Options{
+						rOpts := researchskill.Options{
 							Invoke:             pl.HandleShard,
 							Sessions:           sm,
 							Backend:            wikiStore,
@@ -378,7 +378,30 @@ func runHTTPAdapter(ctx context.Context, d httpAdapterDeps, adminHOut **admin.Ha
 							WorkerModel:        workerModel,
 							WriterModel:        writerModel,
 							MaxRounds:          cfg.Skills.Research.MaxRounds,
-						})
+						}
+						// Resolve the research_worker / research_writer chains at
+						// dispatch so the fan-out fails over to a configured backup
+						// (like the embedder) instead of pinning the static primary
+						// for the process lifetime. The worker pick is re-validated
+						// for the "tools" capability — a chain resolving to a
+						// non-tools model falls back to tier routing rather than
+						// handing workers a model they can't search with.
+						if d.roleRes != nil {
+							rOpts.ResolveWorkerModel = func() string {
+								id := d.roleRes.ResolveID(config.RoleResearchWorker)
+								if id == "" {
+									return ""
+								}
+								if m, ok := modelByID(cfg.Models, id); !ok || !slices.Contains(m.Capabilities, "tools") {
+									return ""
+								}
+								return id
+							}
+							rOpts.ResolveWriterModel = func() string {
+								return d.roleRes.ResolveID(config.RoleResearchWriter)
+							}
+						}
+						rSkill := researchskill.New(rOpts)
 						if !skillReg.KnownToolNames()["web_search"] {
 							log.Printf("[research] skills.research.enabled=true but web_search is not registered ([tools.brave] off?) — workers need search; skipping registration")
 						} else if err := skillReg.Register(rSkill); err != nil {

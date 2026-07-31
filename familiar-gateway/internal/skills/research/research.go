@@ -236,6 +236,14 @@ type Options struct {
 	// writes the note in-turn, exactly as before.
 	WriterModel string
 
+	// ResolveWorkerModel / ResolveWriterModel resolve the research_worker /
+	// research_writer role chain to a live model ID at DISPATCH time, so the
+	// fan-out follows its [roles.research_*] primary→backup→fallback chain
+	// (like the embedder) instead of pinning the static WorkerModel/
+	// WriterModel for the life of the process. Nil ⇒ use the static pin.
+	ResolveWorkerModel func() string
+	ResolveWriterModel func() string
+
 	// MaxRounds caps deep-run gap-fill rounds (§6.7). Default 2: the
 	// initial batch plus one retry of any failed sub-questions.
 	MaxRounds int
@@ -365,6 +373,28 @@ var validWorkerTiers = map[string]bool{
 }
 
 // New constructs the skill, defaulting the zero-valued worker knobs.
+// workerModelID / writerModelID resolve the model a worker / writer turn
+// dispatches on. When a chain resolver is wired its live pick wins — so the
+// fan-out follows the research_worker / research_writer failover chain —
+// falling back to the static pin when unwired or unresolved.
+func (s *Skill) workerModelID() string {
+	if s.opts.ResolveWorkerModel != nil {
+		if id := s.opts.ResolveWorkerModel(); id != "" {
+			return id
+		}
+	}
+	return s.opts.WorkerModel
+}
+
+func (s *Skill) writerModelID() string {
+	if s.opts.ResolveWriterModel != nil {
+		if id := s.opts.ResolveWriterModel(); id != "" {
+			return id
+		}
+	}
+	return s.opts.WriterModel
+}
+
 func New(opts Options) *Skill {
 	if opts.MaxWorkers <= 0 {
 		opts.MaxWorkers = defaultMaxWorkers
@@ -912,7 +942,7 @@ func (s *Skill) dispatchWriter(userID string, book *admin.Book, page *admin.Wiki
 				// evidence in, note markdown out. An empty allowlist
 				// advertises nothing and dispatches nothing.
 				ToolAllowlist: []string{},
-				ModelOverride: s.opts.WriterModel,
+				ModelOverride: s.writerModelID(),
 				MaxTokens:     writerMaxTokens,
 			}
 			prompt := "Topic: " + topic + "\n\nEvidence log:\n\n" + evidence
@@ -1099,7 +1129,7 @@ func (s *Skill) dispatch(userID string, book *admin.Book, page *admin.WikiPage, 
 				// explicit registry model; TierHint still shapes the
 				// thinking budget either way (shardModelOverride
 				// returns both).
-				ModelOverride: s.opts.WorkerModel,
+				ModelOverride: s.workerModelID(),
 				TierHint:      s.opts.WorkerTier,
 				SearchBudget:  s.opts.WorkerSearchBudget,
 				MaxTokens:     workerMaxTokens,

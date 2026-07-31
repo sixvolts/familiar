@@ -844,6 +844,30 @@ func TestSpawn_WorkerModelOverride(t *testing.T) {
 	}
 }
 
+// The worker model is resolved from the research_worker chain at dispatch,
+// so a demoted primary fails over to the configured backup instead of
+// pinning the static WorkerModel forever. The resolver's live pick wins
+// over the static pin.
+func TestSpawn_WorkerModelResolvedFromChain(t *testing.T) {
+	be := newMockBackend()
+	inv := &mockInvoke{}
+	s := newSkill(t, inv, be, Options{
+		WorkerModel:        "primary-worker", // static pin — used only if the resolver returns ""
+		ResolveWorkerModel: func() string { return "backup-worker" },
+	})
+	if res := execute(t, s, userCtx(), `{"topic":"t","tasks":[{"question":"q1"}]}`); res.Error != "" {
+		t.Fatalf("unexpected tool error: %s", res.Error)
+	}
+	waitForAppend(t, be, "complete: 1/1 workers succeeded")
+	calls := inv.callsSnapshot()
+	if len(calls) != 1 {
+		t.Fatalf("worker invocations = %d, want 1", len(calls))
+	}
+	if got := calls[0].overrides.ModelOverride; got != "backup-worker" {
+		t.Errorf("worker ModelOverride = %q, want backup-worker (resolved from chain, not the static pin)", got)
+	}
+}
+
 // Compose from an evidence page: the page is read server-side into the
 // writer prompt, a stub note appears in the personal book immediately,
 // and the writer's completion replaces it.

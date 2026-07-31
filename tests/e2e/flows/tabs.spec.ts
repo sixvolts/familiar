@@ -60,31 +60,33 @@ test("sidebar doc clicks never override doc-bearing tabs; new tabs land left-mos
         const noteRow = (t: string) =>
             page.locator('.sidebar-children[data-category="notes"] a.sidebar-child', { hasText: t });
 
-        // 1st click: the notes SPLASH (panel B) takes the doc — an
-        // empty same-surface tab overrides nothing.
+        // 1st click: the note opens as a NEW tab in the LEFT-MOST panel (A),
+        // next to the untouched chat splash. Sidebar opens always land in the
+        // left-most panel; the notes splash in panel B is a different panel
+        // and is left alone (a note hijacking it would be its own surprise).
         await noteRow("First Note").click();
-        await expect(panelB.locator(".ws-tab", { hasText: "First Note" })).toBeVisible({
+        await expect(panelA.locator(".ws-tab", { hasText: "First Note" })).toBeVisible({
             timeout: 10_000,
         });
-        await expect(panelB.locator(".ws-tab")).toHaveCount(1);
+        await expect(panelA.locator(".ws-tab")).toHaveCount(2); // chat splash + First Note
+        await expect(panelB.locator(".ws-tab")).toHaveCount(1); // notes splash untouched
 
-        // 2nd click: no empty notes tab left. The open note must NOT
-        // be replaced — a NEW tab opens, and it lands in the
-        // LEFT-MOST panel (A), next to the untouched chat splash.
+        // 2nd click: another NEW tab in A. The open First Note is NOT
+        // replaced, and panel B is still left alone.
         await noteRow("Second Note").click();
         await expect(panelA.locator(".ws-tab", { hasText: "Second Note" })).toBeVisible({
             timeout: 10_000,
         });
-        await expect(panelA.locator(".ws-tab")).toHaveCount(2);
+        await expect(panelA.locator(".ws-tab")).toHaveCount(3); // chat + First + Second
         await expect(panelB.locator(".ws-tab")).toHaveCount(1);
-        await expect(panelB.locator(".ws-tab", { hasText: "First Note" })).toBeVisible();
+        await expect(panelA.locator(".ws-tab", { hasText: "First Note" })).toBeVisible();
 
         // 3rd click on an already-open doc: dedup — focus, no new tab.
         await noteRow("First Note").click();
-        await expect(panelB.locator(".ws-tab.is-active", { hasText: "First Note" })).toBeVisible({
+        await expect(panelA.locator(".ws-tab.is-active", { hasText: "First Note" })).toBeVisible({
             timeout: 10_000,
         });
-        await expect(panelA.locator(".ws-tab")).toHaveCount(2);
+        await expect(panelA.locator(".ws-tab")).toHaveCount(3);
         await expect(panelB.locator(".ws-tab")).toHaveCount(1);
     } finally {
         await ctx.close();
@@ -238,8 +240,9 @@ test("a stale tab restore lands on the splash, and home pins obey the contract",
         await page
             .locator('.sidebar-children[data-category="notes"] a.sidebar-child', { hasText: "Doomed Note" })
             .click();
-        const panelB = page.locator('.ws-panel[data-slot="B"]');
-        await expect(panelB.locator(".ws-tab", { hasText: "Doomed Note" })).toBeVisible({
+        // Sidebar opens land in the left-most panel (A), next to the chat splash.
+        const panelA = page.locator('.ws-panel[data-slot="A"]');
+        await expect(panelA.locator(".ws-tab", { hasText: "Doomed Note" })).toBeVisible({
             timeout: 10_000,
         });
 
@@ -250,9 +253,11 @@ test("a stale tab restore lands on the splash, and home pins obey the contract",
         await page.reload();
         await expect(page.locator("#view-dashboard")).toBeVisible({ timeout: 15_000 });
         await page.locator(".sidebar-cat-notes").click();
-        // The restored tab self-heals to the splash (its New-note
-        // compact button is the marker), with no error text.
-        await expect(page.locator(".notes-splash-host .wiki-empty-tile.is-compact")).toBeVisible({
+        // The restored tab self-heals to the splash (its New-note compact
+        // button is the marker), with no error text. Scope to panel A — the
+        // restored Doomed-Note tab lives there, alongside the original notes
+        // splash still sitting in panel B (two splash hosts are now mounted).
+        await expect(panelA.locator(".notes-splash-host .wiki-empty-tile.is-compact")).toBeVisible({
             timeout: 10_000,
         });
         await expect(page.locator("text=Couldn't load note")).toHaveCount(0);

@@ -1095,7 +1095,7 @@ func (p *Pipeline) searchPgVector(
 
 	type searchJob struct {
 		label string
-		vec   []float32
+		vec   []float32 // nil → embed lazily in the fan-out worker
 	}
 	jobs := []searchJob{{label: userMsg, vec: queryVec}}
 
@@ -1114,11 +1114,8 @@ func (p *Pipeline) searchPgVector(
 				if q == "" || q == userMsg {
 					continue
 				}
-				vec := p.embedText(ctx, q)
-				if len(vec) == 0 {
-					continue
-				}
-				jobs = append(jobs, searchJob{label: q, vec: vec})
+				// Embedded lazily in the concurrent fan-out below (vec nil).
+				jobs = append(jobs, searchJob{label: q})
 			}
 		}
 	}
@@ -1127,23 +1124,43 @@ func (p *Pipeline) searchPgVector(
 	// across all sub-queries — that's the candidate-pool ranking the
 	// reranker (or the top-k cut) consumes next.
 	bestByContent := make(map[string]memory.MemoryResult)
+	var bestMu sync.Mutex
+	var wg sync.WaitGroup
 	for _, job := range jobs {
-		// Bound each sub-query search like its siblings (engine 5s,
-		// rels 2s, rerank 5s) so a slow Postgres can't stall the whole
-		// turn indefinitely on the otherwise-unbounded request ctx.
-		searchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		results, err := p.memStore.HybridSearch(searchCtx, job.label, job.vec, perSearchLimit, threshold, userID)
-		cancel()
-		if err != nil {
-			log.Printf("[pipeline] hybrid search error (%q): %v", job.label, err)
-			continue
-		}
-		for _, r := range results {
-			if prev, ok := bestByContent[r.Content]; !ok || r.FusedScore > prev.FusedScore {
-				bestByContent[r.Content] = r
+		job := job
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Expansion sub-queries embed lazily here so each embed and its
+			// search run in the same goroutine — the fan-out's wall time is
+			// ~max(sub-query embed+search), not the serial sum of them all.
+			vec := job.vec
+			if len(vec) == 0 {
+				vec = p.embedText(ctx, job.label)
+				if len(vec) == 0 {
+					return
+				}
 			}
-		}
+			// Bound each sub-query search like its siblings (engine 5s,
+			// rels 2s, rerank 5s) so a slow Postgres can't stall the whole
+			// turn indefinitely on the otherwise-unbounded request ctx.
+			searchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			results, err := p.memStore.HybridSearch(searchCtx, job.label, vec, perSearchLimit, threshold, userID)
+			cancel()
+			if err != nil {
+				log.Printf("[pipeline] hybrid search error (%q): %v", job.label, err)
+				return
+			}
+			bestMu.Lock()
+			for _, r := range results {
+				if prev, ok := bestByContent[r.Content]; !ok || r.FusedScore > prev.FusedScore {
+					bestByContent[r.Content] = r
+				}
+			}
+			bestMu.Unlock()
+		}()
 	}
+	wg.Wait()
 
 	merged := make([]memory.MemoryResult, 0, len(bestByContent))
 	for _, r := range bestByContent {

@@ -206,8 +206,14 @@ func (c *Controller) chainExhausted(s State) bool {
 		return s.PrimaryOffline
 	}
 	if s.ServingID == "" {
-		// The chat role resolves to nothing at all.
-		return true
+		// The chat role resolves to nothing at all — which is "no chat
+		// model is configured", NOT "every tier is down". Treating
+		// absence as exhaustion made maintenance latch on permanently on
+		// any deployment without a chat model: State() would report
+		// Active=auto forever, so the banner never cleared after an admin
+		// switched maintenance off. Fall back to the pre-roles signal
+		// instead; auto-engage needs positive evidence, not silence.
+		return s.PrimaryOffline
 	}
 	// The chain returned a model but it's offline too → every tier is
 	// down, so the admin-selected model is the only thing left to try.

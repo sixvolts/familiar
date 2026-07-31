@@ -132,13 +132,38 @@ func TestAutoEngagesWhenChainExhausted(t *testing.T) {
 	}
 }
 
-// A chat role that resolves to nothing at all counts as exhausted.
-func TestAutoEngagesWhenChatRoleResolvesToNothing(t *testing.T) {
-	c, _ := newTestController()
+// A chat role that resolves to NOTHING is "no chat model configured",
+// not "every tier is down". Treating absence as exhaustion latched
+// maintenance on permanently: State() reported Active=auto forever, so
+// the admin console's banner never cleared after switching it off. The
+// E2E suite caught this; these unit tests had blessed the wrong contract.
+func TestAutoDoesNotEngageWhenChatRoleResolvesToNothing(t *testing.T) {
+	c, reg := newTestController()
 	c.WithServing(func() (string, int) { return "", 0 })
 	c.SetState(false, "sidecar/gemma")
+
+	// Primary healthy (and in the e2e shape, not even registered) — there
+	// is no positive evidence anything is down.
+	if active, _ := c.Active(); active {
+		t.Fatal("an unresolvable chat role must not auto-engage maintenance — absence is not exhaustion")
+	}
+
+	// Toggling on and back off must leave it off, which is the exact
+	// sequence the banner test walks.
+	c.SetState(true, "sidecar/gemma")
 	if active, _ := c.Active(); !active {
-		t.Fatal("an unresolvable chat role should auto-engage maintenance")
+		t.Fatal("manual enable should still work")
+	}
+	c.SetState(false, "sidecar/gemma")
+	if active, _ := c.Active(); active {
+		t.Fatal("maintenance must clear when disabled — this is the banner that never went away")
+	}
+
+	// But a primary that IS positively offline still engages, via the
+	// pre-roles signal.
+	reg.status["gpu-host/qwen"] = "offline"
+	if active, _ := c.Active(); !active {
+		t.Fatal("a positively-offline primary should still auto-engage")
 	}
 }
 

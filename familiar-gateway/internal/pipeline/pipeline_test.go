@@ -255,6 +255,27 @@ func TestEngineMemoryPassRemoved(t *testing.T) {
 	}
 }
 
+// The trusted-path output budget is answer + max thinking headroom on a
+// large window, but capped at half the window on a small/backup model so the
+// input zone can't collapse. OutputReservation and the max_tokens cap both
+// derive from this, so packed input + output can never overflow n_ctx.
+func TestMaxTrustedOutputBudget(t *testing.T) {
+	p := &Pipeline{effort: classifier.ResolverFromConfig(config.EffortConfig{})}
+	full := defaultAnswerTokens + p.effort.ThinkingFor(classifier.ThinkingHigh).TokenBudget
+
+	if got := p.maxTrustedOutputBudget(262144); got != full {
+		t.Errorf("large-window budget = %d, want %d (uncapped)", got, full)
+	}
+	if got := p.maxTrustedOutputBudget(0); got != full {
+		t.Errorf("unknown-window budget = %d, want %d (uncapped)", got, full)
+	}
+	// A tiny window forces the half-window cap regardless of the configured
+	// budgets: full (>= defaultAnswerTokens) always exceeds 500.
+	if got := p.maxTrustedOutputBudget(1000); got != 500 {
+		t.Errorf("tiny-window budget = %d, want 500 (half the window)", got)
+	}
+}
+
 func TestPipelineHandleProviderError(t *testing.T) {
 	srv := fakeOpenAIServerError(http.StatusTooManyRequests, "rate limited")
 	defer srv.Close()

@@ -1017,6 +1017,15 @@ func (p *Pipeline) assembleMessages(
 	if modelCfg := p.router.GetRegistry().GetModelConfig(modelID); modelCfg != nil && modelCfg.ContextWindow > 0 {
 		effCfg.WindowSize = modelCfg.ContextWindow
 	}
+	// Reserve enough output for what buildLLMRequest actually grants on the
+	// trusted path (answer + max thinking headroom, scaled to the window).
+	// Otherwise ctxbuild packs input against the fixed 4K default while the
+	// request permits ~3x that, overflowing n_ctx on a small/backup model and
+	// context-shifting away the system prompt. Grow-only: a larger operator
+	// reservation still wins.
+	if r := p.maxTrustedOutputBudget(effCfg.WindowSize); r > effCfg.OutputReservation {
+		effCfg.OutputReservation = r
+	}
 
 	sysPrompt := p.systemPrompt
 	if p.promptStore != nil && p.promptStore.Loaded() {
@@ -2232,9 +2241,43 @@ func shardClassifierOutput(complexity string) classifier.Output {
 //   - Tool advertisement follows the shard's allowlist exclusively; the
 //     trusted-path tool logic does not apply. An empty or nil
 //     allowlist yields no tools.
+//
+// defaultAnswerTokens is the output budget reserved for the visible reply
+// (before any thinking headroom) on the trusted path.
+const defaultAnswerTokens = 4096
+
+// modelContextWindow returns a model's configured context_window, or 0 when
+// unknown.
+func (p *Pipeline) modelContextWindow(modelID string) int {
+	if p.router == nil {
+		return 0
+	}
+	if m := p.router.GetRegistry().GetModelConfig(modelID); m != nil {
+		return m.ContextWindow
+	}
+	return 0
+}
+
+// maxTrustedOutputBudget is the largest output a trusted turn may generate
+// on a model with the given context window: the visible answer plus the
+// maximum thinking headroom the trusted path grants (buildLLMRequest grants
+// flat ThinkingHigh headroom regardless of the classifier level). It is
+// capped at half the window so the input zone can never collapse — an
+// uncapped answer+thinking budget would exceed n_ctx on a small/backup
+// model and the server would context-shift away the head of the prompt (the
+// system prompt) or truncate the reply. buildLLMRequest caps max_tokens to
+// this and ctxbuild reserves exactly it, so packed input + output always fit.
+func (p *Pipeline) maxTrustedOutputBudget(windowSize int) int {
+	budget := defaultAnswerTokens + p.effort.ThinkingFor(classifier.ThinkingHigh).TokenBudget
+	if windowSize > 0 && budget > windowSize/2 {
+		budget = windowSize / 2
+	}
+	return budget
+}
+
 func (p *Pipeline) buildLLMRequest(messages []llm.Message, route *routeResult, info *RouteInfo, stream bool, onReasoningChunk func(string), overrides *ShardOverrides, userSkillsUnlocked bool) llm.CompletionRequest {
 	// answerTokens is the budget reserved for the visible reply.
-	answerTokens := 4096
+	answerTokens := defaultAnswerTokens
 	if overrides != nil && overrides.MaxTokens > 0 {
 		answerTokens = overrides.MaxTokens
 	}
@@ -2274,6 +2317,17 @@ func (p *Pipeline) buildLLMRequest(messages []llm.Message, route *routeResult, i
 		}
 	}
 	maxTokens := answerTokens + thinkingHeadroom
+	// Cap the trusted-path output to what fits alongside a minimal input in
+	// this model's window — the same ceiling ctxbuild reserved (see
+	// maxTrustedOutputBudget) — so a small/backup model is never asked for
+	// more tokens than its context can hold.
+	if overrides == nil {
+		if window := p.modelContextWindow(route.modelID); window > 0 {
+			if capTokens := p.maxTrustedOutputBudget(window); maxTokens > capTokens {
+				maxTokens = capTokens
+			}
+		}
+	}
 	req := llm.CompletionRequest{
 		Model:          modelIDToProviderModel(route.modelID),
 		Messages:       messages,

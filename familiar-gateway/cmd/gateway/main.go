@@ -28,7 +28,6 @@ import (
 	"github.com/familiar/gateway/internal/memory"
 	"github.com/familiar/gateway/internal/modelrole"
 	"github.com/familiar/gateway/internal/pipeline"
-	"github.com/familiar/gateway/internal/prefetch"
 	"github.com/familiar/gateway/internal/push"
 	"github.com/familiar/gateway/internal/rerank"
 	"github.com/familiar/gateway/internal/router"
@@ -273,12 +272,10 @@ func main() {
 		}
 	}()
 
-	var toolOrch *prefetch.Orchestrator
 	var braveClient *brave.Client
 	if cfg.Tools.Brave.Enabled && cfg.Tools.Brave.APIKey != "" {
 		braveClient = brave.New(cfg.Tools.Brave.APIKey, cfg.Tools.Brave.MaxResults)
-		toolOrch = prefetch.NewOrchestrator(braveClient)
-		log.Printf("[gateway] tool orchestrator enabled: brave_search=true")
+		log.Printf("[gateway] brave search enabled")
 		if err := skillReg.Register(search.New(braveClient)); err != nil {
 			log.Printf("[gateway] warning: register search skill: %v", err)
 		}
@@ -678,13 +675,12 @@ func main() {
 			ToolResultRatio:     cfg.Context.ToolResultRatio,
 			MaxToolResultTokens: cfg.Context.MaxToolResultTokens,
 		},
-		ProfileStore:     profStore,
-		PromptStore:      promptStore,
-		SidecarEndpoint:  sidecarEndpoint,
-		SidecarClient:    sc,
-		ToolOrchestrator: toolOrch,
-		SkillRegistry:    skillRegForPipeline,
-		SessionStore:     sessStore,
+		ProfileStore:    profStore,
+		PromptStore:     promptStore,
+		SidecarEndpoint: sidecarEndpoint,
+		SidecarClient:   sc,
+		SkillRegistry:   skillRegForPipeline,
+		SessionStore:    sessStore,
 		// Guarded for the same reason as MemoryStore above — and this one
 		// was not theoretical: without it, booting with no
 		// [memory].local_dsn panicked on the first turn, because

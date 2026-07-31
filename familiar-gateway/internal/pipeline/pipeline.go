@@ -47,7 +47,6 @@ import (
 	"github.com/familiar/gateway/internal/llm"
 	"github.com/familiar/gateway/internal/memevents"
 	"github.com/familiar/gateway/internal/memory"
-	"github.com/familiar/gateway/internal/prefetch"
 	"github.com/familiar/gateway/internal/rerank"
 	"github.com/familiar/gateway/internal/router"
 	"github.com/familiar/gateway/internal/session"
@@ -178,7 +177,6 @@ type Pipeline struct {
 	promptStore       *ctxbuild.PromptStore
 	sidecarEndpoint   string
 	sidecarClient     *sidecar.Client
-	toolOrchestrator  *prefetch.Orchestrator
 	skillRegistry     *skills.Registry
 	maxToolIters      int
 	shardAugment      func(ctx context.Context, ov *ShardOverrides) error
@@ -509,17 +507,16 @@ type Deps struct {
 	// Reranker is the cross-encoder client used to trim the hybrid-
 	// search candidate pool to the top few memories. Optional — nil
 	// (or a disabled RerankConfig) falls back to hybrid-search top-k.
-	Reranker         *rerank.Client
-	PipelineConfig   config.PipelineConfig
-	ContextConfig    ctxbuild.Config
-	ProfileStore     *userprofile.Store
-	PromptStore      *ctxbuild.PromptStore
-	SidecarEndpoint  string
-	SidecarClient    *sidecar.Client
-	ToolOrchestrator *prefetch.Orchestrator
-	SkillRegistry    *skills.Registry
-	MaxToolIters     int
-	SessionStore     *session.Store
+	Reranker        *rerank.Client
+	PipelineConfig  config.PipelineConfig
+	ContextConfig   ctxbuild.Config
+	ProfileStore    *userprofile.Store
+	PromptStore     *ctxbuild.PromptStore
+	SidecarEndpoint string
+	SidecarClient   *sidecar.Client
+	SkillRegistry   *skills.Registry
+	MaxToolIters    int
+	SessionStore    *session.Store
 	// Conversations optionally hydrates verbatim turns when a
 	// session is created cold (e.g. after a gateway restart). Nil
 	// disables turn hydration; the session starts empty.
@@ -572,7 +569,6 @@ func New(d Deps) *Pipeline {
 		promptStore:       d.PromptStore,
 		sidecarEndpoint:   d.SidecarEndpoint,
 		sidecarClient:     d.SidecarClient,
-		toolOrchestrator:  d.ToolOrchestrator,
 		skillRegistry:     d.SkillRegistry,
 		maxToolIters:      maxIters,
 		shardAugment:      d.ShardAugment,
@@ -1303,20 +1299,6 @@ func (p *Pipeline) beginTurn(ctx context.Context, sess *session.Session, userMsg
 	return route, info, nil
 }
 
-// executeToolsSync runs pre-execution tool orchestration synchronously.
-// HandleStream uses its own concurrent variant (running tools in
-// parallel with the preamble); this helper is only for Handle.
-func (p *Pipeline) executeToolsSync(ctx context.Context, route *routeResult) prefetch.ExecuteResult {
-	var toolResult prefetch.ExecuteResult
-	if p.toolOrchestrator != nil && len(route.toolsNeeded) > 0 {
-		toolResult = p.toolOrchestrator.Execute(ctx, route.toolsNeeded, route.searchQueries, route.complexityLabel())
-		if toolResult.Context != "" {
-			log.Printf("[pipeline] tool results: %d bytes, %d results", len(toolResult.Context), toolResult.ResultCount)
-		}
-	}
-	return toolResult
-}
-
 // runTurn handles the post-tool portion of a turn: context assembly,
 // LLM dispatch, and commit. Streaming and non-streaming both call this
 // — streaming passes real callbacks, Handle passes nil for all three.
@@ -1331,7 +1313,7 @@ func (p *Pipeline) runTurn(
 	sess *session.Session,
 	userMsg string,
 	route *routeResult,
-	toolResult prefetch.ExecuteResult,
+	toolResultCtx string,
 	info *RouteInfo,
 	onChunk func(string),
 	onReasoningChunk func(string),
@@ -1349,7 +1331,7 @@ func (p *Pipeline) runTurn(
 		info.Tier = ctxbuild.TierFor(route.complexityLabel())
 		messages = p.buildShardMessages(sess, userMsg, overrides, info)
 	} else {
-		messages = p.assembleMessages(ctx, sess, userMsg, route.modelID, route.complexityLabel(), route.classifier.MemoryDepth, toolResult.Context, info, onStatus)
+		messages = p.assembleMessages(ctx, sess, userMsg, route.modelID, route.complexityLabel(), route.classifier.MemoryDepth, toolResultCtx, info, onStatus)
 	}
 
 	// USER-SKILLS-SPEC Phase B: on trusted turns, the user's
@@ -1455,18 +1437,10 @@ func (p *Pipeline) handle(ctx context.Context, sess *session.Session, userMsg st
 		return "", nil, err
 	}
 
-	// Shards skip pre-execution tool orchestration — their tools are in
-	// the allowlist attached to the LLM request, not prefetched by the
-	// sidecar. executeToolsSync is a no-op when route.toolsNeeded is
-	// empty, which is always true on the shard path; the explicit
-	// branch just makes that intention visible.
-	var toolResult prefetch.ExecuteResult
-	if overrides == nil {
-		toolResult = p.executeToolsSync(turnCtx, route)
-	}
-
-	// Non-streaming path: no preamble (it's a streaming-only lead-in).
-	text, err := p.runTurn(turnCtx, sess, userMsg, route, toolResult, info, nil, nil, nil, "", overrides)
+	// Non-streaming path: no preamble (it's a streaming-only lead-in) and
+	// no pre-execution tool context — the model drives tools via the tool
+	// loop.
+	text, err := p.runTurn(turnCtx, sess, userMsg, route, "", info, nil, nil, nil, "", overrides)
 	if err != nil {
 		return "", info, err
 	}
@@ -1523,25 +1497,10 @@ func (p *Pipeline) handleStream(
 		return "", nil, err
 	}
 
-	// Tool execution and preamble run concurrently on the trusted path.
-	// Shards skip both: their tools are attached to the LLM request
-	// directly (no prefetch), and they don't run the preamble model
-	// (which is a Familiar-voice UX affordance, not a shard concern).
-	var toolResult prefetch.ExecuteResult
+	// The preamble runs on the trusted path only. Shards skip it (it's a
+	// Familiar-voice UX affordance, not a shard concern).
 	var preamble string
 	if overrides == nil {
-		var toolWg sync.WaitGroup
-		if p.toolOrchestrator != nil && len(route.toolsNeeded) > 0 {
-			toolWg.Add(1)
-			go func() {
-				defer toolWg.Done()
-				toolResult = p.toolOrchestrator.Execute(turnCtx, route.toolsNeeded, route.searchQueries, route.complexityLabel())
-				if toolResult.Context != "" {
-					log.Printf("[pipeline] tool results: %d bytes, %d results", len(toolResult.Context), toolResult.ResultCount)
-				}
-			}()
-		}
-
 		// Preamble fires when the classifier flags the request as
 		// thinking=high — the user is going to wait, so a "let me
 		// think about this" stream from the sidecar bridges the gap
@@ -1550,7 +1509,6 @@ func (p *Pipeline) handleStream(
 		if route.classifier.Thinking == classifier.ThinkingHigh {
 			preamble = p.generatePreamble(turnCtx, userMsg, route.complexityLabel(), onChunk)
 		}
-		toolWg.Wait()
 
 		// Surface routing metadata after the preamble so reasoning
 		// chunks stay contiguous in the thinking block.
@@ -1564,18 +1522,11 @@ func (p *Pipeline) handleStream(
 				modelShort = route.modelID[idx+1:]
 			}
 			statusMsg := fmt.Sprintf("Complexity: %s | Model: %s", complexityLabel, modelShort)
-			if len(route.toolsNeeded) > 0 {
-				statusMsg += fmt.Sprintf(" | Tools: %s", strings.Join(route.toolsNeeded, ", "))
-			}
 			onStatus(statusMsg + "\n")
-			if len(toolResult.Queries) > 0 {
-				onStatus(fmt.Sprintf("Searched: %s\n", strings.Join(toolResult.Queries, " | ")))
-				onStatus(fmt.Sprintf("Found: %d results\n", toolResult.ResultCount))
-			}
 		}
 	}
 
-	text, err := p.runTurn(turnCtx, sess, userMsg, route, toolResult, info, onChunk, onReasoningChunk, onStatus, preamble, overrides)
+	text, err := p.runTurn(turnCtx, sess, userMsg, route, "", info, onChunk, onReasoningChunk, onStatus, preamble, overrides)
 	if err != nil {
 		return "", info, err
 	}
@@ -2058,18 +2009,12 @@ func modelIDToProviderModel(modelID string) string {
 // CHAT-REARCH S2.3: classifier.Output is now the single source of
 // truth for effort. The legacy `complexity` string + booleans are
 // gone; a small helper derives a complexity-shaped label from the
-// thinking level for transitional readers (prefetch.Execute, ctxbuild
-// .TierFor) that still take a string.
+// thinking level for transitional readers (ctxbuild.TierFor) that
+// still take a string.
 type routeResult struct {
 	modelID    string
 	provider   llm.Provider
 	classifier classifier.Output
-
-	// Populated from classifier.Tools at construction; readers
-	// expect a populated slice today, so we mirror it here. Will
-	// be inlined into the classifier field as readers cut over.
-	toolsNeeded   []string
-	searchQueries []string
 }
 
 // complexityLabel maps the classifier's thinking level to a tier key
@@ -2223,8 +2168,6 @@ func (p *Pipeline) classifyRequest(ctx context.Context, sess *session.Session, u
 		// wiring a classifier.
 		r.classifier = classifier.StaticDefault()
 	}
-	r.toolsNeeded = append([]string(nil), r.classifier.Tools...)
-
 	// CHAT-REARCH §"Smaller Hardening" — stamp the classifier verdict
 	// onto the session for debug surfaces + future rapid-follow-up
 	// heuristics. Cheap atomic write; nil-safe in shard mock paths
@@ -2240,9 +2183,9 @@ func (p *Pipeline) classifyRequest(ctx context.Context, sess *session.Session, u
 	// `src=static` to get the fallback rate, and dur= to get the tail
 	// latency. Those are the two numbers that decide whether classifying
 	// up front is worth its place on the critical path.
-	log.Printf("[pipeline] classified: thinking=%s memory=%s search=%s tools=%v → tier=%s (src=%s dur=%s in=%d out=%d model=%s)",
+	log.Printf("[pipeline] classified: thinking=%s memory=%s search=%s → tier=%s (src=%s dur=%s in=%d out=%d model=%s)",
 		r.classifier.Thinking, r.classifier.MemoryDepth, r.classifier.SearchDepth,
-		r.classifier.Tools, r.complexityLabel(),
+		r.complexityLabel(),
 		classifierSourceLabel(r.classifier.Source), cstats.Duration.Round(time.Millisecond),
 		cstats.InputTokens, cstats.OutputTokens, orNone(cstats.ModelID))
 

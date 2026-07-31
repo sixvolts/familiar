@@ -52,14 +52,12 @@ const (
 //	{
 //	  "thinking":     "off" | "low" | "medium" | "high",
 //	  "memory_depth": "none" | "shallow" | "deep",
-//	  "search_depth": "none" | "shallow" | "deep",
-//	  "tools":        ["search", "notes_read", ...]
+//	  "search_depth": "none" | "shallow" | "deep"
 //	}
 type Output struct {
 	Thinking    ThinkingLevel `json:"thinking"`
 	MemoryDepth MemoryDepth   `json:"memory_depth"`
 	SearchDepth SearchDepth   `json:"search_depth"`
-	Tools       []string      `json:"tools"`
 
 	// Source records where this verdict came from. Never decoded from
 	// the model (json:"-") — the classifier stamps it. Two reasons it
@@ -110,7 +108,6 @@ func ConservativeFallback() Output {
 		Thinking:    ThinkingHigh,
 		MemoryDepth: MemoryDeep,
 		SearchDepth: SearchNone,
-		Tools:       nil,
 		Source:      SourceUnparsed,
 	}
 }
@@ -141,7 +138,6 @@ func StaticDefault() Output {
 		Thinking:    ThinkingMedium,
 		MemoryDepth: MemoryShallow,
 		SearchDepth: SearchShallow,
-		Tools:       nil,
 		Source:      SourceStatic,
 	}
 }

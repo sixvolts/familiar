@@ -17,7 +17,6 @@ func TestSessionLastClassifierRoundTrip(t *testing.T) {
 		Thinking:    classifier.ThinkingHigh,
 		MemoryDepth: classifier.MemoryDeep,
 		SearchDepth: classifier.SearchShallow,
-		Tools:       []string{"web_search"},
 	})
 	got := s.LastClassifier()
 	if got == nil {
@@ -25,15 +24,13 @@ func TestSessionLastClassifierRoundTrip(t *testing.T) {
 	}
 	if got.Thinking != classifier.ThinkingHigh ||
 		got.MemoryDepth != classifier.MemoryDeep ||
-		got.SearchDepth != classifier.SearchShallow ||
-		len(got.Tools) != 1 || got.Tools[0] != "web_search" {
+		got.SearchDepth != classifier.SearchShallow {
 		t.Errorf("round-trip mismatch: %+v", got)
 	}
 
 	// Returned value is a copy — mutation must not bleed into the
 	// session's internal state.
 	got.Thinking = classifier.ThinkingOff
-	got.Tools[0] = "tampered"
 	again := s.LastClassifier()
 	if again.Thinking != classifier.ThinkingHigh {
 		t.Error("session state leaked through returned pointer (Thinking)")

@@ -103,10 +103,10 @@ func (s *Session) SummaryKey() string {
 	return Key(s.ChannelID, s.SenderID)
 }
 
-// LastClassifier returns a deep copy of the most recent classifier
-// output for this session, or nil if the session hasn't been
-// classified yet. Tools is copied so caller mutation can't bleed into
-// session state.
+// LastClassifier returns a copy of the most recent classifier output for
+// this session, or nil if the session hasn't been classified yet.
+// classifier.Output is all value types, so the struct copy is fully
+// independent of session state.
 func (s *Session) LastClassifier() *classifier.Output {
 	if s == nil {
 		return nil
@@ -117,9 +117,6 @@ func (s *Session) LastClassifier() *classifier.Output {
 		return nil
 	}
 	cp := *s.lastClassifier
-	if len(s.lastClassifier.Tools) > 0 {
-		cp.Tools = append([]string(nil), s.lastClassifier.Tools...)
-	}
 	return &cp
 }
 

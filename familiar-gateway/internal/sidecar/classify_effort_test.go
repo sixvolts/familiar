@@ -25,9 +25,6 @@ func TestParseClassifierOutput_PlainJSON(t *testing.T) {
 	if out.SearchDepth != classifier.SearchNone {
 		t.Errorf("search_depth = %q, want none", out.SearchDepth)
 	}
-	if len(out.Tools) != 1 || out.Tools[0] != "notes_read" {
-		t.Errorf("tools = %v, want [notes_read]", out.Tools)
-	}
 }
 
 func TestParseClassifierOutput_FencedAndProseWrapped(t *testing.T) {

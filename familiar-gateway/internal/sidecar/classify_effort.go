@@ -333,20 +333,18 @@ func parseClassifierOutput(raw string) (classifier.Output, error) {
 // This is a starter prompt. The eval harness + hand-labeled
 // dataset (deferred — see Chat-Backend-Rearch.md §"Dataset &
 // Eval") will iterate this in a follow-up.
-const classifyEffortSystemPrompt = `You are a request classifier. For each user turn, emit a JSON object with FOUR fields. No prose. No code fences. Just the object.
+const classifyEffortSystemPrompt = `You are a request classifier. For each user turn, emit a JSON object with THREE fields. No prose. No code fences. Just the object.
 
 {
   "thinking":     "off" | "low" | "medium" | "high",
   "memory_depth": "none" | "shallow" | "deep",
-  "search_depth": "none" | "shallow" | "deep",
-  "tools": []
+  "search_depth": "none" | "shallow" | "deep"
 }
 
 GUIDANCE
 - "thinking" — how much reasoning the answer needs. Greetings and one-word follow-ups: off. Factual lookups: low. Multi-step reasoning: medium. Hard problems with branching: high. Bias toward MORE thinking when uncertain — wasted tokens are cheaper than a degraded answer.
 - "memory_depth" — how deeply to search the user's saved memories. Topic continuation referencing prior context: shallow. New question that may pull on past discussions: deep. Pure greeting / meta-question: none.
 - "search_depth" — web search budget. The user's literal request must imply a search ("look up", "what's the latest", "search for"); otherwise none. NEVER pick "shallow" or "deep" because the topic feels searchable. Hallucinated searches are worse than no search.
-- "tools" — a list of tools the answer needs. Common values: "search", "notes_read", "notes_write", "wiki_read", "wiki_write", "memory_save". Empty list when none apply. Do not include tools the request doesn't actually need.
 
 OUTPUT
 Just the JSON object. No explanation, no fences, no preamble.`

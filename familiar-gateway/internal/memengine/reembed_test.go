@@ -176,6 +176,50 @@ func TestCommitWithEmbeddingDoesNotEnqueue(t *testing.T) {
 	}
 }
 
+// A conversation-source fact is never retrieved by vector, so its NULL
+// embedding is expected, not a gap — it must NOT be queued for reembed
+// (which would make the sweeper embed rows nothing reads). The row still
+// commits so the admin chunk browser can surface it.
+func TestCommitConversationFactDoesNotEnqueue(t *testing.T) {
+	e := setupReembedTest(t)
+	now := time.Now()
+	resp, err := e.CommitFacts(context.Background(), "sess-reembed", []*pb.FactProto{{
+		Content:      "user: hi\nassistant: hello",
+		Embedding:    nil, // conversation facts are intentionally unembedded
+		UserId:       "user-reembed",
+		Scope:        "session",
+		SourceType:   "conversation",
+		CreatedAt:    timestamppb.New(now),
+		LastAccessed: timestamppb.New(now),
+	}})
+	if err != nil {
+		t.Fatalf("CommitFacts: %v", err)
+	}
+	if resp.Committed != 1 {
+		t.Fatalf("committed %d facts, want 1", resp.Committed)
+	}
+
+	var queued int
+	if err := e.pool.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM pending_embeds`).Scan(&queued); err != nil {
+		t.Fatalf("counting queue: %v", err)
+	}
+	if queued != 0 {
+		t.Fatalf("conversation fact was enqueued for reembed: pending_embeds has %d rows, want 0", queued)
+	}
+
+	// The row itself must still be stored (nothing about skipping the
+	// embed should drop the write the admin browser depends on).
+	var stored int
+	if err := e.pool.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM memories WHERE source_type = 'conversation'`).Scan(&stored); err != nil {
+		t.Fatalf("counting memories: %v", err)
+	}
+	if stored != 1 {
+		t.Fatalf("conversation fact not stored: %d rows, want 1", stored)
+	}
+}
+
 // The sweep back-fills the vector and clears the queue row once an
 // embedder is reachable.
 func TestSweepBackfillsAndClearsQueue(t *testing.T) {

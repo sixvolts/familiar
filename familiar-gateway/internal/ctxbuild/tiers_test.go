@@ -22,15 +22,15 @@ func TestTierFor(t *testing.T) {
 		}
 	}
 
-	// Trivial must not inject tools or burn a thinking budget.
+	// Trivial must not append tool policy or enable memory retrieval.
 	triv := TierFor("trivial")
-	if triv.InjectTools || triv.IncludeToolPolicy || triv.ThinkingBudget != 0 {
-		t.Errorf("trivial tier leaks tools/thinking: %+v", triv)
+	if triv.IncludeToolPolicy || triv.MemoryConfig.Enabled {
+		t.Errorf("trivial tier leaks tool policy / memory: %+v", triv)
 	}
 
-	// Deep must inject tools and carry the largest thinking budget.
+	// Deep must include tool policy and carry the largest context budgets.
 	deep := TierFor("deep_reasoning")
-	if !deep.InjectTools || deep.ThinkingBudget < TierFor("analytical").ThinkingBudget {
+	if !deep.IncludeToolPolicy || deep.ConvBudget < TierFor("analytical").ConvBudget {
 		t.Errorf("deep tier budget regression: %+v", deep)
 	}
 }

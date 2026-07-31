@@ -13,16 +13,16 @@ import (
 // PromptTier describes how one routing complexity class should be prompted.
 //
 // The tier is selected by the classifier→tier mapping (trivial /
-// knowledge / analytical / deep_reasoning) and drives three things:
-// which overlay file the PromptStore concatenates onto base.md,
-// whether tool schemas are injected into the LLM request, and the
-// suggested thinking token budget. See FAMILIAR-TIERED-PROMPTS-SPEC.md.
+// knowledge / analytical / deep_reasoning) and drives which overlay file
+// the PromptStore concatenates onto base.md, whether tool_policy.md is
+// appended, the web-search cap, and the memory/history budgets. (Tool
+// schemas are always advertised to tool-capable models and the thinking
+// budget is effort-resolved — neither is tier-driven.)
+// See FAMILIAR-TIERED-PROMPTS-SPEC.md.
 type PromptTier struct {
 	Name              string // canonical tier key used for file lookup
 	OverlayFile       string // filename under the prompt dir
-	InjectTools       bool   // gate for tool schema injection
 	IncludeToolPolicy bool   // whether to append tool_policy.md
-	ThinkingBudget    int    // suggested thinking tokens, 0 = disabled
 	MaxWebSearches    int    // per-turn cap on web_search tool calls; 0 = unlimited
 	MemoryConfig      TierMemoryConfig
 	// ConvBudget caps how many tokens of conversation history the
@@ -51,9 +51,7 @@ var tiers = map[string]PromptTier{
 	"trivial": {
 		Name:              "trivial",
 		OverlayFile:       "tier_trivial.md",
-		InjectTools:       false,
 		IncludeToolPolicy: false,
-		ThinkingBudget:    0,
 		MaxWebSearches:    1,
 		MemoryConfig:      TierMemoryConfig{Enabled: false},
 		ConvBudget:        2000, // ~1.5K words — short follow-ups don't need long history
@@ -62,9 +60,7 @@ var tiers = map[string]PromptTier{
 	"knowledge": {
 		Name:              "knowledge",
 		OverlayFile:       "tier_knowledge.md",
-		InjectTools:       true,
 		IncludeToolPolicy: true,
-		ThinkingBudget:    400,
 		MaxWebSearches:    2,
 		MemoryConfig:      TierMemoryConfig{Enabled: true, ExpandQueries: true},
 		ConvBudget:        12000,
@@ -73,9 +69,7 @@ var tiers = map[string]PromptTier{
 	"analytical": {
 		Name:              "reasoning",
 		OverlayFile:       "tier_reasoning.md",
-		InjectTools:       true,
 		IncludeToolPolicy: true,
-		ThinkingBudget:    1500,
 		MaxWebSearches:    5,
 		MemoryConfig:      TierMemoryConfig{Enabled: true, Threshold: 0.45, MaxResults: 10, ExpandQueries: true},
 		ConvBudget:        32000,
@@ -84,9 +78,7 @@ var tiers = map[string]PromptTier{
 	"deep_reasoning": {
 		Name:              "deep",
 		OverlayFile:       "tier_deep.md",
-		InjectTools:       true,
 		IncludeToolPolicy: true,
-		ThinkingBudget:    4000,
 		MaxWebSearches:    10,
 		MemoryConfig:      TierMemoryConfig{Enabled: true, Threshold: 0.40, MaxResults: 15, ExpandQueries: true},
 		ConvBudget:        64000,

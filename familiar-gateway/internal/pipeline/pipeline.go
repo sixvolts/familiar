@@ -2281,7 +2281,7 @@ func shardClassifierOutput(complexity string) classifier.Output {
 //     default when zero).
 //   - Temperature is propagated to the provider.
 //   - Tool advertisement follows the shard's allowlist exclusively; the
-//     tier-driven InjectTools logic does not apply. An empty or nil
+//     trusted-path tool logic does not apply. An empty or nil
 //     allowlist yields no tools.
 func (p *Pipeline) buildLLMRequest(messages []llm.Message, route *routeResult, info *RouteInfo, stream bool, onReasoningChunk func(string), overrides *ShardOverrides, userSkillsUnlocked bool) llm.CompletionRequest {
 	// answerTokens is the budget reserved for the visible reply.
@@ -2461,9 +2461,16 @@ func (p *Pipeline) commitAndExtract(ctx context.Context, sess *session.Session, 
 		factContent := fmt.Sprintf("user: %s\nassistant: %s", userMsg, responseText)
 		now := time.Now()
 		fact := &pb.FactProto{
-			Id:           uuid.NewString(),
-			Content:      factContent,
-			Embedding:    p.embedText(ctx, factContent),
+			Id:      uuid.NewString(),
+			Content: factContent,
+			// Conversation facts are never retrieved semantically — every
+			// vector path (Search/HybridSearch/NearestLiveFact/sleep) filters
+			// out source_type="conversation", and the admin chunk browser reads
+			// them by recency, not vector. Embedding them is pure waste (one
+			// embedder call per turn) and during an outage would pollute
+			// pending_embeds with rows nothing reads. Leave the vector NULL;
+			// CommitFacts skips the reembed enqueue for this source type.
+			Embedding:    nil,
 			SourceType:   "conversation",
 			Confidence:   1.0,
 			Scope:        "session",

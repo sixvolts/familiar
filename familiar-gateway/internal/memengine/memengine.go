@@ -274,7 +274,12 @@ func (e *MemEngine) CommitFacts(ctx context.Context, sessionID string, facts []*
 		// it for the re-embed sweep rather than leaving it half-indexed
 		// forever. Best-effort: a failed enqueue must not fail the commit
 		// (the fact itself is safely stored and FTS-findable).
-		if needsEmbed {
+		// Conversation facts are never retrieved by vector (every semantic
+		// path filters out source_type="conversation"), so a NULL vector is
+		// expected here, not a gap to back-fill — enqueuing them would just
+		// make the reembed sweeper embed rows nothing reads. Only queue real,
+		// retrievable facts.
+		if needsEmbed && f.SourceType != "conversation" {
 			e.enqueuePendingEmbed(ctx, storedID)
 		}
 		committed++

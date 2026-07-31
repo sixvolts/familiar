@@ -35,6 +35,9 @@ type Router struct {
 // makes the fallback behavior trivially testable.
 type ChatRoleResolver interface {
 	Resolve(role string) (modelID string, tier int, ok bool)
+	// Chain returns the role's ordered candidate model IDs
+	// (primary → backup → global fallback) for completion-level failover.
+	Chain(role string) []string
 }
 
 type compiledRule struct {
@@ -76,6 +79,16 @@ func (r *Router) SetSidecar(sc *sidecar.Client) {
 // chat model follows its [roles.chat] failover chain.
 func (r *Router) SetChatRole(res ChatRoleResolver) {
 	r.chatRole = res
+}
+
+// GetChatChain returns the ordered [roles.chat] candidate model IDs
+// (primary → backup → global fallback) for completion-level failover.
+// Empty when no chat-role resolver is wired.
+func (r *Router) GetChatChain() []string {
+	if r.chatRole == nil {
+		return nil
+	}
+	return r.chatRole.Chain(config.RoleChat)
 }
 
 // Select picks a chat model for the given message + channel.

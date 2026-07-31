@@ -1344,11 +1344,13 @@ func (p *Pipeline) runTurn(
 	llmCtx, llmCancel := context.WithTimeout(ctx, turnHardCap)
 	defer llmCancel()
 
-	complete := route.provider.Complete
-	if stream {
-		complete = func(c context.Context, req llm.CompletionRequest) (*llm.CompletionResponse, error) {
-			return route.provider.CompleteStream(c, req, onChunk)
-		}
+	// Completion-level failover: on the trusted chat path a completion that
+	// errors before any visible token advances to the next chain candidate
+	// (a transient 5xx / reset on a model that passed its last health check
+	// no longer fails the turn while a healthy backup sits idle).
+	cands := p.completionCandidates(route, overrides)
+	complete := func(c context.Context, req llm.CompletionRequest) (*llm.CompletionResponse, error) {
+		return p.completeWithFailover(c, cands, req, onChunk, info)
 	}
 
 	llmResp, loopMsgs, err := p.runCompletion(llmCtx, sess, route.provider, llmReq, route.complexityLabel(), route.classifier.SearchDepth, complete, onStatus, overrides, userSkillsUnlocked, &info.PagesFetched, &info.ResearchNote)
@@ -2320,6 +2322,89 @@ func (p *Pipeline) runCompletion(ctx context.Context, sess *session.Session, pro
 		return nil, nil, fmt.Errorf("LLM completion: %w", err)
 	}
 	return resp, nil, nil
+}
+
+// completionCandidate pairs a model ID with a ready provider for the
+// completion-level failover walk.
+type completionCandidate struct {
+	id       string
+	provider llm.Provider
+}
+
+// completionCandidates is the ordered list of models a turn may serve
+// from. On the trusted chat path that's the whole [roles.chat] chain
+// (the resolved model first, then the rest as failover targets); shards
+// run their single resolved model with no chain to fall back on.
+func (p *Pipeline) completionCandidates(route *routeResult, overrides *ShardOverrides) []completionCandidate {
+	cands := []completionCandidate{{id: route.modelID, provider: route.provider}}
+	if overrides != nil || p.router == nil {
+		return cands
+	}
+	seen := map[string]bool{route.modelID: true}
+	for _, id := range p.router.GetChatChain() {
+		if id == "" || seen[id] {
+			continue
+		}
+		prov, err := p.router.GetRegistry().GetProvider(id, p.apiKeyFn)
+		if err != nil {
+			continue
+		}
+		seen[id] = true
+		cands = append(cands, completionCandidate{id: id, provider: prov})
+	}
+	return cands
+}
+
+// completeWithFailover runs one completion against the candidate chain. If
+// a candidate errors BEFORE any visible content reaches onChunk, it
+// advances to the next candidate. Once visible content is on the wire we
+// commit to that model (you can't swap mid-answer), and a parent-context
+// cancellation (user Stop / hard cap / shutdown) is terminal — not a
+// failover trigger.
+//
+// Reasoning models stream their thinking via onReasoningChunk (wired into
+// the request), NOT onChunk, so this deliberately imposes no first-token
+// deadline: a hang-detection watchdog would have to count reasoning output
+// as "alive" or it would kill a model mid-think. That watchdog is a
+// follow-up; ctx's turnHardCap remains the backstop against a true hang.
+func (p *Pipeline) completeWithFailover(ctx context.Context, cands []completionCandidate, req llm.CompletionRequest, onChunk func(string), info *RouteInfo) (*llm.CompletionResponse, error) {
+	var lastErr error
+	for i, cand := range cands {
+		req.Model = modelIDToProviderModel(cand.id)
+		emitted := false
+		var resp *llm.CompletionResponse
+		var err error
+		if onChunk != nil {
+			resp, err = cand.provider.CompleteStream(ctx, req, func(s string) {
+				emitted = true
+				onChunk(s)
+			})
+		} else {
+			resp, err = cand.provider.Complete(ctx, req)
+		}
+		if err == nil {
+			if i > 0 {
+				log.Printf("[pipeline] chat failover: %s served after %d earlier candidate(s) failed pre-first-token", cand.id, i)
+				if info != nil {
+					info.ModelID = cand.id
+				}
+			}
+			return resp, nil
+		}
+		lastErr = err
+		// User Stop / hard cap / shutdown is terminal — not a candidate fault.
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		// Visible content already streamed → we can't swap models mid-answer.
+		if emitted {
+			return nil, err
+		}
+		if i < len(cands)-1 {
+			log.Printf("[pipeline] chat candidate %s failed before first token (%v); failing over to next", cand.id, err)
+		}
+	}
+	return nil, lastErr
 }
 
 // commitAndExtract persists the exchange and kicks off the post-turn

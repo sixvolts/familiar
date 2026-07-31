@@ -156,6 +156,13 @@ func (s stubChatRole) Resolve(role string) (string, int, bool) {
 	return s.chain[0], 0, true
 }
 
+func (s stubChatRole) Chain(role string) []string {
+	if role != config.RoleChat {
+		return nil
+	}
+	return s.chain
+}
+
 // With a chat-role resolver attached, GetChatModelID follows the chain
 // instead of the chat=true / lex-order config selection.
 func TestGetChatModelIDUsesRoleChain(t *testing.T) {

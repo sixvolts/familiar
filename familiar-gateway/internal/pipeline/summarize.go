@@ -190,6 +190,12 @@ func previewString(s string, n int) string {
 // occasional duplicate than block the write pipeline indefinitely.
 const postTurnDeadline = 10 * time.Second
 
+// extractContextTurns is how many prior turns we hand the extractor as
+// read-only context so it can resolve pronouns/back-references in the current
+// turn ("bump it to 64GB") into standalone facts. The extractor is told to
+// resolve against this block but extract only from the current turn pair.
+const extractContextTurns = 6
+
 // kickoffPostTurnExtract fires the post-turn write pipeline in a
 // fresh goroutine with a 10s soft deadline. Returns immediately so
 // the user-facing response isn't held up. Safe to call when the
@@ -241,7 +247,17 @@ func (p *Pipeline) runPostTurnExtract(sess *session.Session, userMsg, responseTe
 		{Role: "user", Content: userMsg},
 		{Role: "assistant", Content: responseText},
 	}
-	extraction, err := p.sidecarClient.ExtractFacts(ctx, turns)
+	// Prior turns, read-only, for reference resolution only. The current pair
+	// is already appended to the session by the time this goroutine runs, so
+	// drop it by content — we extract from `turns`, not from the context.
+	var contextTurns []sidecar.Turn
+	for _, t := range sess.RecentTurns(extractContextTurns + 2) {
+		if t.Content == userMsg || t.Content == responseText {
+			continue
+		}
+		contextTurns = append(contextTurns, sidecar.Turn{Role: t.Role, Content: t.Content})
+	}
+	extraction, err := p.sidecarClient.ExtractFactsWithContext(ctx, turns, contextTurns)
 	if err != nil {
 		deferred := ctx.Err() != nil
 		if deferred {

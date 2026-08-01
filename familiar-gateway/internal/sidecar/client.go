@@ -319,6 +319,23 @@ func (c *Client) ExtractFacts(ctx context.Context, turns []Turn) (ExtractionResu
 	return r.ExtractFacts(ctx, turns)
 }
 
+// ExtractFactsWithContext is ExtractFacts with a read-only prior-turns block
+// for reference resolution (see HTTPRouter.ExtractFactsWithContext). Same
+// small-slot routing + async gate as ExtractFacts.
+func (c *Client) ExtractFactsWithContext(ctx context.Context, turns, context []Turn) (ExtractionResult, error) {
+	r, err := c.taskReady(TaskExtract)
+	if err != nil {
+		return ExtractionResult{}, err
+	}
+	if gate := c.gateForTask(TaskExtract); gate != nil {
+		if err := gate.acquireAsync(ctx); err != nil {
+			return ExtractionResult{}, err
+		}
+		defer gate.releaseAsync()
+	}
+	return r.ExtractFactsWithContext(ctx, turns, context)
+}
+
 // ExtractFactsLarge routes extraction of a large document to the
 // extract_large model (a bigger model that holds the whole doc in
 // context). Falls back to the normal extract route when extract_large

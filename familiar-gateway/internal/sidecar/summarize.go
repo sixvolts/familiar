@@ -162,6 +162,12 @@ Categories: "decision", "technical_fact", "preference", "project_context",
 Only extract facts that are SPECIFIC and stand alone without needing the conversation
 for context. Skip vague generalizations and meta-commentary.
 
+A <context> block of earlier conversation may precede the <conversation>. Use it ONLY
+to resolve pronouns and back-references in the <conversation> ("it", "that server",
+"the other one") into concrete entity names — so "bump it to 64GB" becomes a standalone
+fact about the named machine. Do NOT extract any facts or triples FROM the <context>;
+extract only from the <conversation>.
+
 "relationships" is an array of {"subject","predicate","object"} triples that capture
 structured edges between entities mentioned in the turns. Use snake_case predicates
 (has_ip, runs_os, located_at, owned_by, part_of, depends_on, has_gpu, ...). Emit a
@@ -199,11 +205,27 @@ If no facts or no relationships are present, return the corresponding key as an 
 // result on a parse failure so the caller can proceed — extraction is
 // best-effort and the pipeline is expected to handle partial output.
 func (r *HTTPRouter) ExtractFacts(ctx context.Context, turns []Turn) (ExtractionResult, error) {
+	return r.ExtractFactsWithContext(ctx, turns, nil)
+}
+
+// ExtractFactsWithContext is ExtractFacts with a read-only block of prior
+// turns the extractor may use to resolve pronouns and back-references in the
+// conversation ("bump it to 64GB") into standalone facts — without extracting
+// anything FROM the context itself. context may be nil (document extraction,
+// or no prior turns), which is exactly ExtractFacts.
+func (r *HTTPRouter) ExtractFactsWithContext(ctx context.Context, turns, context []Turn) (ExtractionResult, error) {
 	if len(turns) == 0 {
 		return ExtractionResult{}, nil
 	}
 
 	var user strings.Builder
+	if len(context) > 0 {
+		user.WriteString("<context>\n")
+		for _, t := range context {
+			fmt.Fprintf(&user, "%s: %s\n", t.Role, t.Content)
+		}
+		user.WriteString("</context>\n\n")
+	}
 	user.WriteString("<conversation>\n")
 	for _, t := range turns {
 		fmt.Fprintf(&user, "%s: %s\n", t.Role, t.Content)

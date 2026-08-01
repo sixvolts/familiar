@@ -1594,6 +1594,39 @@ func (p *Pipeline) skillToolSpecs(includeUserSkillTools bool) []llm.ToolSpec {
 	return specs
 }
 
+// trivialToolNames is the curated tool subset offered on trivial-tier turns
+// (greetings, acks). The full ~21-tool catalog is pure token waste on "hi",
+// but we can't advertise an EMPTY tools array (history with tool rows + no
+// tools crashes some Jinja templates) and — per the always-attach rationale —
+// a turn mislabeled trivial might still need memory ("what's my dog's name?").
+// So trivial keeps the memory tools and drops the rest (notes/wiki/news/
+// weather/web/datetime/etc.).
+var trivialToolNames = map[string]bool{
+	"save_fact":        true,
+	"remember":         true,
+	"search_memory":    true,
+	"list_my_memories": true,
+	"correct_fact":     true,
+	"forget_fact":      true,
+}
+
+// trivialToolSpecs is skillToolSpecs filtered to trivialToolNames. Falls back
+// to the full catalog if none of the curated tools are registered, so a
+// tool-capable model is never handed an empty tools array.
+func (p *Pipeline) trivialToolSpecs(includeUserSkillTools bool) []llm.ToolSpec {
+	full := p.skillToolSpecs(includeUserSkillTools)
+	curated := make([]llm.ToolSpec, 0, len(trivialToolNames))
+	for _, s := range full {
+		if trivialToolNames[s.Name] {
+			curated = append(curated, s)
+		}
+	}
+	if len(curated) == 0 {
+		return full
+	}
+	return curated
+}
+
 // toolSchemaTokens estimates the token cost of the full tool catalog that
 // buildLLMRequest attaches on the trusted path. The schemas ride in the
 // request alongside the assembled context but were never counted in
@@ -2360,13 +2393,19 @@ func (p *Pipeline) buildLLMRequest(messages []llm.Message, route *routeResult, i
 		req.Tools = p.filterToolSpecs(overrides.ToolAllowlist)
 		return req
 	}
-	// Always include tools for models that support them. The model
-	// decides whether to use tools, not the classifier — gating tools
-	// by tier loses context (e.g. memory search for "what's my dog's
-	// name?") and also crashes Cohere2's Jinja template when history
-	// contains tool messages but the current turn has no tools array.
+	// Attach tools for models that support them. The model decides whether to
+	// USE them, not the classifier — so non-trivial turns get the full
+	// catalog. Trivial turns (greetings/acks) get only a curated memory-tool
+	// subset: the full ~21-tool catalog is pure token waste on "hi", but the
+	// subset preserves the one case mislabeling could lose (memory search for
+	// "what's my dog's name?") and stays non-empty (an empty tools array with
+	// tool rows in history crashes some Jinja templates).
 	if p.modelSupportsTools(route.modelID) {
-		req.Tools = p.skillToolSpecs(userSkillsUnlocked)
+		if route.complexityLabel() == "trivial" {
+			req.Tools = p.trivialToolSpecs(userSkillsUnlocked)
+		} else {
+			req.Tools = p.skillToolSpecs(userSkillsUnlocked)
+		}
 	}
 	return req
 }

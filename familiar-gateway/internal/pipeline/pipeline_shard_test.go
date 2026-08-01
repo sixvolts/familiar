@@ -691,3 +691,33 @@ func TestToolSchemaTokens(t *testing.T) {
 		t.Fatalf("registry with a tool: got %d, want > 0", got)
 	}
 }
+
+// Trivial turns get only the curated memory-tool subset, not the full catalog.
+func TestTrivialToolSpecs(t *testing.T) {
+	reg := skills.NewRegistry()
+	if err := reg.Register(&renamedStubSkill{stubSkill: &stubSkill{toolName: "save_fact", reply: "ok"}, name: "mem"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Register(&renamedStubSkill{stubSkill: &stubSkill{toolName: "read_page", reply: "ok"}, name: "wiki"}); err != nil {
+		t.Fatal(err)
+	}
+	p := &Pipeline{skillRegistry: reg}
+
+	if len(p.skillToolSpecs(false)) != 2 {
+		t.Fatalf("full catalog = %d tools, want 2", len(p.skillToolSpecs(false)))
+	}
+	triv := p.trivialToolSpecs(false)
+	if len(triv) != 1 || triv[0].Name != "save_fact" {
+		t.Fatalf("trivial subset = %+v, want [save_fact]", triv)
+	}
+
+	// Fallback: a registry with no curated tools still returns a non-empty set
+	// (an empty tools array with tool rows in history can crash Jinja).
+	reg2 := skills.NewRegistry()
+	if err := reg2.Register(&stubSkill{toolName: "read_page", reply: "ok"}); err != nil {
+		t.Fatal(err)
+	}
+	if len((&Pipeline{skillRegistry: reg2}).trivialToolSpecs(false)) == 0 {
+		t.Error("trivial subset must fall back to non-empty when no curated tool is registered")
+	}
+}

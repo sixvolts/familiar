@@ -11,7 +11,7 @@ import (
 // trailing text. Extract from first `{` to last `}` and decode.
 
 func TestParseClassifierOutput_PlainJSON(t *testing.T) {
-	raw := `{"thinking":"medium","memory_depth":"shallow","search_depth":"none","tools":["notes_read"]}`
+	raw := `{"thinking":"medium","memory_depth":"shallow","search_depth":"none","condensed_query":"server timeout setting"}`
 	out, err := parseClassifierOutput(raw)
 	if err != nil {
 		t.Fatalf("parse error: %v", err)
@@ -24,6 +24,9 @@ func TestParseClassifierOutput_PlainJSON(t *testing.T) {
 	}
 	if out.SearchDepth != classifier.SearchNone {
 		t.Errorf("search_depth = %q, want none", out.SearchDepth)
+	}
+	if out.CondensedQuery != "server timeout setting" {
+		t.Errorf("condensed_query = %q, want %q", out.CondensedQuery, "server timeout setting")
 	}
 }
 

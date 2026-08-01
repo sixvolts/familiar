@@ -51,13 +51,23 @@ const (
 //
 //	{
 //	  "thinking":     "off" | "low" | "medium" | "high",
-//	  "memory_depth": "none" | "shallow" | "deep",
-//	  "search_depth": "none" | "shallow" | "deep"
+//	  "memory_depth":    "none" | "shallow" | "deep",
+//	  "search_depth":    "none" | "shallow" | "deep",
+//	  "condensed_query": "<standalone retrieval query>"
 //	}
 type Output struct {
 	Thinking    ThinkingLevel `json:"thinking"`
 	MemoryDepth MemoryDepth   `json:"memory_depth"`
 	SearchDepth SearchDepth   `json:"search_depth"`
+
+	// CondensedQuery is the user's latest message rewritten into a
+	// self-contained retrieval query (pronouns/back-references resolved
+	// against recent dialogue), produced in the SAME classify round-trip so
+	// the read path doesn't pay a second serial sidecar call. Empty when the
+	// classifier didn't answer (fallback) or the message needed no rewrite;
+	// retrieval then falls back to the raw message. Used ONLY for memory
+	// search — generation always uses the raw user message.
+	CondensedQuery string `json:"condensed_query"`
 
 	// Source records where this verdict came from. Never decoded from
 	// the model (json:"-") — the classifier stamps it. Two reasons it

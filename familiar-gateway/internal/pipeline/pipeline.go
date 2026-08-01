@@ -767,6 +767,7 @@ func (p *Pipeline) assembleMessages(
 	modelID string,
 	complexity string,
 	memDepth classifier.MemoryDepth,
+	condensedQuery string,
 	toolResultCtx string,
 	info *RouteInfo,
 	onStatus func(string),
@@ -782,38 +783,21 @@ func (p *Pipeline) assembleMessages(
 	var convHistory []*pb.ConversationTurn
 	var queryVec []float32
 
-	// retrievalQuery is what we search memory with — userMsg condensed
-	// against recent dialogue. Defaults to the raw message; rewritten
-	// below when a sidecar is available.
+	// retrievalQuery is what we search memory with. The classifier already
+	// rewrote the user's latest message into a self-contained query in the
+	// SAME round-trip (condensedQuery), so the read path no longer pays a
+	// second serial sidecar call here. Empty ⇒ the message needed no rewrite
+	// (or the classifier fell back); use the raw message. Generation always
+	// uses userMsg — the condensed form is retrieval-only.
 	retrievalQuery := userMsg
+	if condensedQuery != "" && condensedQuery != userMsg {
+		log.Printf("[pipeline] query condensed (in classify): %q -> %q", userMsg, condensedQuery)
+		retrievalQuery = condensedQuery
+	}
 
 	if !memBudget.Skip {
 		if onStatus != nil {
 			onStatus("Searching memories...\n")
-		}
-		// Query condensation: a follow-up turn like "what about the
-		// timeout?" embeds terribly on its own. Rewrite it into a
-		// self-contained query against recent dialogue before
-		// embedding. Best-effort — any sidecar failure falls back to
-		// the raw message. The condensed query is used ONLY for
-		// retrieval; userMsg still drives generation.
-		if p.sidecarClient != nil {
-			recent := sess.RecentTurns(6)
-			if len(recent) > 0 {
-				history := make([]sidecar.Turn, 0, len(recent))
-				for _, t := range recent {
-					history = append(history, sidecar.Turn{Role: t.Role, Content: t.Content})
-				}
-				condCtx, condCancel := context.WithTimeout(ctx, 3*time.Second)
-				condensed, condErr := p.sidecarClient.CondenseQuery(condCtx, history, userMsg)
-				condCancel()
-				if condErr != nil {
-					log.Printf("[pipeline] query condensation failed (using raw message): %v", condErr)
-				} else if condensed != "" && condensed != userMsg {
-					log.Printf("[pipeline] query condensed: %q -> %q", userMsg, condensed)
-					retrievalQuery = condensed
-				}
-			}
 		}
 		queryVec = p.embedText(ctx, retrievalQuery)
 		assembleCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -1344,7 +1328,7 @@ func (p *Pipeline) runTurn(
 		info.Tier = ctxbuild.TierFor(route.complexityLabel())
 		messages = p.buildShardMessages(sess, userMsg, overrides, info)
 	} else {
-		messages = p.assembleMessages(ctx, sess, userMsg, route.modelID, route.complexityLabel(), route.classifier.MemoryDepth, toolResultCtx, info, onStatus)
+		messages = p.assembleMessages(ctx, sess, userMsg, route.modelID, route.complexityLabel(), route.classifier.MemoryDepth, route.classifier.CondensedQuery, toolResultCtx, info, onStatus)
 	}
 
 	// USER-SKILLS-SPEC Phase B: on trusted turns, the user's
@@ -2161,10 +2145,11 @@ func (p *Pipeline) classifyRequest(ctx context.Context, sess *session.Session, u
 	// latency + token cost so this call stops being unmeasurable.
 	var cstats sidecar.ClassifyStats
 	if p.sidecarClient != nil {
-		// Build the 2-3 turn history slice the classifier prompt
-		// expects, in chronological order. Spec is explicit about
-		// not reversing — reversed dialogue reads as off-distribution.
-		recent := sess.RecentTurns(3)
+		// Build the recent-history slice (chronological, not reversed —
+		// reversed dialogue reads as off-distribution) the classifier
+		// prompt expects. Six turns: enough for both the effort verdict
+		// and the condensed-query rewrite the same call now produces.
+		recent := sess.RecentTurns(6)
 		history := make([]sidecar.Turn, 0, len(recent))
 		for _, t := range recent {
 			history = append(history, sidecar.Turn{Role: t.Role, Content: t.Content})

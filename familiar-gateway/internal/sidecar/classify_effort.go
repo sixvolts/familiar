@@ -333,18 +333,20 @@ func parseClassifierOutput(raw string) (classifier.Output, error) {
 // This is a starter prompt. The eval harness + hand-labeled
 // dataset (deferred — see Chat-Backend-Rearch.md §"Dataset &
 // Eval") will iterate this in a follow-up.
-const classifyEffortSystemPrompt = `You are a request classifier. For each user turn, emit a JSON object with THREE fields. No prose. No code fences. Just the object.
+const classifyEffortSystemPrompt = `You are a request classifier. For each user turn, emit a JSON object with FOUR fields. No prose. No code fences. Just the object.
 
 {
-  "thinking":     "off" | "low" | "medium" | "high",
-  "memory_depth": "none" | "shallow" | "deep",
-  "search_depth": "none" | "shallow" | "deep"
+  "thinking":        "off" | "low" | "medium" | "high",
+  "memory_depth":    "none" | "shallow" | "deep",
+  "search_depth":    "none" | "shallow" | "deep",
+  "condensed_query": "<one-line standalone search query>"
 }
 
 GUIDANCE
 - "thinking" — how much reasoning the answer needs. Greetings and one-word follow-ups: off. Factual lookups: low. Multi-step reasoning: medium. Hard problems with branching: high. Bias toward MORE thinking when uncertain — wasted tokens are cheaper than a degraded answer.
 - "memory_depth" — how deeply to search the user's saved memories. Topic continuation referencing prior context: shallow. New question that may pull on past discussions: deep. Pure greeting / meta-question: none.
 - "search_depth" — web search budget. The user's literal request must imply a search ("look up", "what's the latest", "search for"); otherwise none. NEVER pick "shallow" or "deep" because the topic feels searchable. Hallucinated searches are worse than no search.
+- "condensed_query" — the user's LATEST message rewritten as ONE self-contained search query for their personal knowledge base, with pronouns and back-references resolved against the conversation (after discussing a server, "what about the timeout?" becomes "server timeout setting"). If the message is already self-contained, or is small talk / a greeting, copy it unchanged. One line, a concise query not a sentence, no quotes. Used only to search memory.
 
 OUTPUT
 Just the JSON object. No explanation, no fences, no preamble.`

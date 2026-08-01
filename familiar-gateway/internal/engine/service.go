@@ -19,7 +19,7 @@ type Service interface {
 	// real cleanup.
 	Close() error
 	Ping(ctx context.Context) (*pb.PingResponse, error)
-	AssembleContext(ctx context.Context, sessionID, userMsg string, vis *pb.VisibilityContext, memBudget, convBudget uint32, queryVec []float32) (*pb.AssembleContextResponse, error)
+	AssembleContext(ctx context.Context, sessionID, userMsg string, vis *pb.VisibilityContext, queryVec []float32) (*pb.AssembleContextResponse, error)
 	CommitFacts(ctx context.Context, sessionID string, facts []*pb.FactProto) (*pb.CommitFactsResponse, error)
 	QueryMemory(ctx context.Context, req *pb.MemoryQueryRequest) (*pb.MemoryQueryResponse, error)
 	DeleteFact(ctx context.Context, sessionID, factID string, vis *pb.VisibilityContext) (*pb.DeleteFactResponse, error)

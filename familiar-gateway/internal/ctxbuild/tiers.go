@@ -15,7 +15,7 @@ import (
 // The tier is selected by the classifier→tier mapping (trivial /
 // knowledge / analytical / deep_reasoning) and drives which overlay file
 // the PromptStore concatenates onto base.md, whether tool_policy.md is
-// appended, the web-search cap, and the memory/history budgets. (Tool
+// appended, the web-search cap, and the tier memory config. (Tool
 // schemas are always advertised to tool-capable models and the thinking
 // budget is effort-resolved — neither is tier-driven.)
 // See FAMILIAR-TIERED-PROMPTS-SPEC.md.
@@ -25,16 +25,6 @@ type PromptTier struct {
 	IncludeToolPolicy bool   // whether to append tool_policy.md
 	MaxWebSearches    int    // per-turn cap on web_search tool calls; 0 = unlimited
 	MemoryConfig      TierMemoryConfig
-	// ConvBudget caps how many tokens of conversation history the
-	// engine returns for this tier. Trivial requests don't need
-	// long history; deep-reasoning requests benefit from more
-	// context. Pre-tier-aware defaults below were sized for a 32K
-	// world; modern Qwen-122B at 262K can afford much more.
-	// 0 falls back to a global default at the call site.
-	ConvBudget int
-	// MemBudget likewise caps memory tokens. Same falls-back-to-
-	// global behavior at zero.
-	MemBudget int
 }
 
 // TierMemoryConfig lets a tier override global memory retrieval settings.
@@ -54,8 +44,6 @@ var tiers = map[string]PromptTier{
 		IncludeToolPolicy: false,
 		MaxWebSearches:    1,
 		MemoryConfig:      TierMemoryConfig{Enabled: false},
-		ConvBudget:        2000, // ~1.5K words — short follow-ups don't need long history
-		MemBudget:         1000,
 	},
 	"knowledge": {
 		Name:              "knowledge",
@@ -63,8 +51,6 @@ var tiers = map[string]PromptTier{
 		IncludeToolPolicy: true,
 		MaxWebSearches:    2,
 		MemoryConfig:      TierMemoryConfig{Enabled: true, ExpandQueries: true},
-		ConvBudget:        12000,
-		MemBudget:         3000,
 	},
 	"analytical": {
 		Name:              "reasoning",
@@ -72,8 +58,6 @@ var tiers = map[string]PromptTier{
 		IncludeToolPolicy: true,
 		MaxWebSearches:    5,
 		MemoryConfig:      TierMemoryConfig{Enabled: true, Threshold: 0.45, MaxResults: 10, ExpandQueries: true},
-		ConvBudget:        32000,
-		MemBudget:         6000,
 	},
 	"deep_reasoning": {
 		Name:              "deep",
@@ -81,8 +65,6 @@ var tiers = map[string]PromptTier{
 		IncludeToolPolicy: true,
 		MaxWebSearches:    10,
 		MemoryConfig:      TierMemoryConfig{Enabled: true, Threshold: 0.40, MaxResults: 15, ExpandQueries: true},
-		ConvBudget:        64000,
-		MemBudget:         10000,
 	},
 }
 

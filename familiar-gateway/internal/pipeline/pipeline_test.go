@@ -34,7 +34,7 @@ type mockEngine struct {
 func (m *mockEngine) Ping(ctx context.Context) (*pb.PingResponse, error) {
 	return &pb.PingResponse{Version: "test", UptimeSecs: 1, MemoryTier: "ram_only"}, nil
 }
-func (m *mockEngine) AssembleContext(ctx context.Context, sessionID, userMsg string, vis *pb.VisibilityContext, memBudget, convBudget uint32, queryVec []float32) (*pb.AssembleContextResponse, error) {
+func (m *mockEngine) AssembleContext(ctx context.Context, sessionID, userMsg string, vis *pb.VisibilityContext, queryVec []float32) (*pb.AssembleContextResponse, error) {
 	if m.assembleErr != nil {
 		return nil, m.assembleErr
 	}

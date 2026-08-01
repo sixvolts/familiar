@@ -28,10 +28,11 @@ func TestTierFor(t *testing.T) {
 		t.Errorf("trivial tier leaks tool policy / memory: %+v", triv)
 	}
 
-	// Deep must include tool policy and carry the largest context budgets.
+	// Deep must include tool policy and allow at least as many web searches
+	// as the analytical tier (a monotonic tier property).
 	deep := TierFor("deep_reasoning")
-	if !deep.IncludeToolPolicy || deep.ConvBudget < TierFor("analytical").ConvBudget {
-		t.Errorf("deep tier budget regression: %+v", deep)
+	if !deep.IncludeToolPolicy || deep.MaxWebSearches < TierFor("analytical").MaxWebSearches {
+		t.Errorf("deep tier regression: %+v", deep)
 	}
 }
 

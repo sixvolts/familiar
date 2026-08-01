@@ -84,7 +84,7 @@ func TestAssembleContextEmptyWithoutDeps(t *testing.T) {
 	// return a clean empty response. Mirrors the previous engine's
 	// behavior when no memory matches.
 	e := New(nil, nil, nil, "")
-	resp, err := e.AssembleContext(context.Background(), "sess-1", "hi", &pb.VisibilityContext{}, 1000, 1000, nil)
+	resp, err := e.AssembleContext(context.Background(), "sess-1", "hi", &pb.VisibilityContext{}, nil)
 	if err != nil {
 		t.Fatalf("assemble: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestAssembleContextDegradesWithoutVector(t *testing.T) {
 	// Mirrors the previous implementation which short-circuits on empty
 	// query_vector.
 	e := New(nil, stubMemStore{}, nil, "")
-	resp, _ := e.AssembleContext(context.Background(), "sess", "hi", &pb.VisibilityContext{UserId: "u"}, 1000, 1000, nil)
+	resp, _ := e.AssembleContext(context.Background(), "sess", "hi", &pb.VisibilityContext{UserId: "u"}, nil)
 	if len(resp.MemoryContext) != 0 {
 		t.Errorf("expected no memory hits without query vector; got %d", len(resp.MemoryContext))
 	}
@@ -117,7 +117,7 @@ func TestAssembleContextDegradesWithoutVector(t *testing.T) {
 func TestAssembleContextNeverRetrievesMemory(t *testing.T) {
 	e := New(nil, hitMemStore{}, nil, "")
 	resp, err := e.AssembleContext(context.Background(), "sess", "hi",
-		&pb.VisibilityContext{UserId: "u"}, 1000, 1000, []float32{0.1, 0.2, 0.3})
+		&pb.VisibilityContext{UserId: "u"}, []float32{0.1, 0.2, 0.3})
 	if err != nil {
 		t.Fatalf("AssembleContext: %v", err)
 	}

@@ -809,21 +809,13 @@ func (p *Pipeline) assembleMessages(
 			// axis matches the write axis used in commitAndExtract.
 			UserId: sess.UserID(),
 		}
-		// Tier-aware budgets — earlier we hardcoded 2000 / 4000
-		// which clipped Qwen-122B's 262K window down to ~3K words
-		// of history regardless of the request's complexity. Pull
-		// the budgets from tier so deep_reasoning gets 64K of
-		// history while trivial keeps a tight 2K. Zero values fall
-		// back to the legacy literals.
-		memBudget := uint32(2000)
-		if tier.MemBudget > 0 {
-			memBudget = uint32(tier.MemBudget)
-		}
-		convBudget := uint32(4000)
-		if tier.ConvBudget > 0 {
-			convBudget = uint32(tier.ConvBudget)
-		}
-		ctxResp, err := p.engine.AssembleContext(assembleCtx, sess.ID, retrievalQuery, vis, memBudget, convBudget, queryVec)
+		// AssembleContext returns conversation history only (memory retrieval
+		// is searchPgVector's job below). The per-tier ConvBudget/MemBudget
+		// caps once threaded here were a dead second budgeting layer — ctxbuild's
+		// window-aware zones (which scale to the model's context window) are the
+		// single authority now, so history depth follows the window, not a tier
+		// literal that clipped the 262K window to ~3K.
+		ctxResp, err := p.engine.AssembleContext(assembleCtx, sess.ID, retrievalQuery, vis, queryVec)
 		if err != nil {
 			log.Printf("[pipeline] AssembleContext error (continuing): %v", err)
 		} else {

@@ -129,9 +129,11 @@ func (e *MemEngine) SetDeps(pool *db.Pool, memStore memory.MemoryStore, sessions
 // the single memory authority. This used to ALSO run a dense-only top-3
 // @0.70 search whose results were prepended un-reranked ahead of — and
 // duplicated by — that hybrid pass, with a fabricated "fresh" staleness;
-// that redundant pass is gone. queryVec/memBudget/convBudget are unused
-// now but stay on the signature (engine.Service interface).
-func (e *MemEngine) AssembleContext(ctx context.Context, sessionID, userMsg string, vis *pb.VisibilityContext, memBudget, convBudget uint32, queryVec []float32) (*pb.AssembleContextResponse, error) {
+// that redundant pass is gone. userMsg/vis/queryVec are unused now (the
+// method returns conversation history keyed by sessionID) but stay on the
+// engine.Service signature; the dead per-tier memBudget/convBudget caps —
+// a second budgeting layer atop ctxbuild's window-aware zones — were removed.
+func (e *MemEngine) AssembleContext(ctx context.Context, sessionID, userMsg string, vis *pb.VisibilityContext, queryVec []float32) (*pb.AssembleContextResponse, error) {
 	out := &pb.AssembleContextResponse{}
 
 	// Conversation branch. Read from session.Manager — the gateway-

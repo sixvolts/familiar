@@ -55,7 +55,8 @@ func (m *recordingMemStore) NearestLiveFacts(ctx context.Context, vector []float
 	return nil, nil
 }
 
-func (m *recordingMemStore) Close() error { return nil }
+func (m *recordingMemStore) ReinforceFacts(ctx context.Context, ids []string) error { return nil }
+func (m *recordingMemStore) Close() error                                           { return nil }
 
 // capturedRequest holds the system prompt the tier-prompt assertions
 // inspect. In the OpenAI chat shape the system prompt is the

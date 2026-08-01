@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/familiar/gateway/internal/db"
+	"github.com/lib/pq"
 )
 
 // MemoryResult represents a single memory retrieved from pgvector.
@@ -43,6 +44,7 @@ type MemoryStore interface {
 	HybridSearch(ctx context.Context, queryText string, vector []float32, limit int, threshold float64, userID string) ([]MemoryResult, error)
 	NearestSimilarity(ctx context.Context, vector []float32, scope string, userID string) (float64, bool, error)
 	NearestLiveFacts(ctx context.Context, vector []float32, userID, scopeTag string, limit int) ([]NearestFact, error)
+	ReinforceFacts(ctx context.Context, ids []string) error
 	Close() error
 }
 
@@ -430,6 +432,29 @@ func (s *PgVectorStore) NearestLiveFact(ctx context.Context, vector []float32, u
 		return NearestFact{}, false, nil
 	}
 	return facts[0], true, nil
+}
+
+// ReinforceFacts bumps last_accessed and access_count for the given fact
+// ids. Called when the post-turn extractor decides an incoming candidate is a
+// semantic DUPLICATE of an existing fact: the user restated it this turn, so
+// the surviving row is more salient and more recently confirmed. Recording
+// that on the target — instead of silently dropping the restatement — keeps
+// recency/frequency signals honest for anything that later ranks or ages
+// facts. No-op on an empty id list; invalid uuids surface as an error.
+func (s *PgVectorStore) ReinforceFacts(ctx context.Context, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE memories
+		 SET access_count = access_count + 1,
+		     last_accessed = NOW()
+		 WHERE id = ANY($1::uuid[])`,
+		pq.Array(ids))
+	if err != nil {
+		return fmt.Errorf("pgvector reinforce facts: %w", err)
+	}
+	return nil
 }
 
 // Close is a no-op: the *db.Pool is owned by main() and closed there.

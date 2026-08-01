@@ -292,6 +292,10 @@ func (p *Pipeline) runPostTurnExtract(sess *session.Session, userMsg, responseTe
 	}
 	prep := make([]prepared, 0, len(candidates))
 	batchCands := make([]sidecar.BatchCandidate, 0, len(candidates))
+	// Fact ids whose survivor we should reinforce because a candidate this turn
+	// duplicated them — collected from both the cheap-gate skip below and the
+	// model's DUPLICATE decisions, applied in one batch after the decision loop.
+	var reinforceIDs []string
 
 	for _, f := range candidates {
 		if f.Content == "" {
@@ -316,8 +320,10 @@ func (p *Pipeline) runPostTurnExtract(sess *session.Session, userMsg, responseTe
 
 		// Cheap dedupe before paying for the medium-slot call: if a candidate
 		// is essentially identical to its NEAREST neighbor, skip it without
-		// asking the model.
+		// asking the model — but reinforce the survivor first (the user just
+		// restated it, so bump its recency/frequency).
 		if len(neighbors) > 0 && neighbors[0].Similarity >= p.memoryCfg.DedupThresholdOrDefault() {
+			reinforceIDs = append(reinforceIDs, neighbors[0].ID)
 			continue
 		}
 
@@ -378,6 +384,9 @@ func (p *Pipeline) runPostTurnExtract(sess *session.Session, userMsg, responseTe
 		switch action {
 		case "DUPLICATE":
 			skipped++
+			if targetID != "" {
+				reinforceIDs = append(reinforceIDs, targetID)
+			}
 			p.events.Emit(sess.ID, memevents.KindConflictResolved, memevents.ConflictResolvedPayload{
 				Action:      "DUPLICATE",
 				TargetID:    targetID,
@@ -422,6 +431,18 @@ func (p *Pipeline) runPostTurnExtract(sess *session.Session, userMsg, responseTe
 	if skipped > 0 || updated > 0 {
 		log.Printf("[pipeline] post-turn extract for session %s: candidates=%d skipped=%d updated=%d",
 			sess.ID, len(prep), skipped, updated)
+	}
+
+	// Reinforce the survivors of every duplicate detected this turn: bump
+	// their recency/frequency so a restated fact doesn't look stale next to a
+	// freshly-added near-neighbor. Best-effort — a failed bump never blocks
+	// the commit below.
+	if p.memStore != nil && len(reinforceIDs) > 0 {
+		rCtx, rCancel := context.WithTimeout(ctx, 2*time.Second)
+		if err := p.memStore.ReinforceFacts(rCtx, reinforceIDs); err != nil {
+			log.Printf("[pipeline] reinforce %d duplicate target(s) for session %s: %v", len(reinforceIDs), sess.ID, err)
+		}
+		rCancel()
 	}
 
 	if len(pbFacts) > 0 {

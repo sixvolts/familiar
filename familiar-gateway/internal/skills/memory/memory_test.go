@@ -89,7 +89,8 @@ func (f *fakeStore) NearestLiveFacts(_ context.Context, _ []float32, _, _ string
 	return nil, nil
 }
 
-func (f *fakeStore) Close() error { return nil }
+func (f *fakeStore) ReinforceFacts(_ context.Context, _ []string) error { return nil }
+func (f *fakeStore) Close() error                                       { return nil }
 
 // --- save_fact --------------------------------------------------------------
 

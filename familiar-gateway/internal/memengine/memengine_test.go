@@ -164,7 +164,8 @@ func (stubMemStore) NearestSimilarity(ctx context.Context, vector []float32, sco
 func (stubMemStore) NearestLiveFacts(ctx context.Context, vector []float32, userID, scopeTag string, limit int) ([]memory.NearestFact, error) {
 	return nil, nil
 }
-func (stubMemStore) Close() error { return nil }
+func (stubMemStore) ReinforceFacts(ctx context.Context, ids []string) error { return nil }
+func (stubMemStore) Close() error                                           { return nil }
 
 // hitMemStore returns a memory hit for any query — used to prove the
 // engine's retrieval path is truly gone (a returned hit must NOT surface).

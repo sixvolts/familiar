@@ -32,9 +32,11 @@ import (
 // userID argument so the test can assert that the pipeline never
 // surfaces one user's results to another.
 type recordingStore struct {
-	mu     sync.Mutex
-	byUser map[string][]memory.MemoryResult
-	calls  []recordingStoreCall
+	mu          sync.Mutex
+	byUser      map[string][]memory.MemoryResult
+	calls       []recordingStoreCall
+	nearestLive []memory.NearestFact // returned by NearestLiveFacts if set
+	reinforced  []string             // ids passed to ReinforceFacts
 }
 
 type recordingStoreCall struct {
@@ -71,7 +73,16 @@ func (r *recordingStore) NearestSimilarity(_ context.Context, _ []float32, _ str
 }
 
 func (r *recordingStore) NearestLiveFacts(_ context.Context, _ []float32, _, _ string, _ int) ([]memory.NearestFact, error) {
-	return nil, nil
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.nearestLive, nil
+}
+
+func (r *recordingStore) ReinforceFacts(_ context.Context, ids []string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reinforced = append(r.reinforced, ids...)
+	return nil
 }
 
 func (r *recordingStore) Close() error { return nil }

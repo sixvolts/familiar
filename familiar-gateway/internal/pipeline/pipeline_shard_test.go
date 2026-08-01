@@ -674,3 +674,20 @@ func TestShard_SearchBudgetGrantsWebSearch(t *testing.T) {
 	}
 	mock.AssertAllConsumed()
 }
+
+// The tool-schema catalog is sized so ctxbuild can reserve space for it,
+// instead of the schemas riding on top of an already-full budget.
+func TestToolSchemaTokens(t *testing.T) {
+	// Nil registry → no tools → nothing to reserve.
+	if got := (&Pipeline{}).toolSchemaTokens(); got != 0 {
+		t.Fatalf("nil registry: got %d, want 0", got)
+	}
+	// A registry with a tool yields a positive estimate.
+	reg := skills.NewRegistry()
+	if err := reg.Register(&stubSkill{toolName: "a_tool", reply: "ok"}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if got := (&Pipeline{skillRegistry: reg}).toolSchemaTokens(); got <= 0 {
+		t.Fatalf("registry with a tool: got %d, want > 0", got)
+	}
+}

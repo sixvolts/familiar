@@ -1021,6 +1021,16 @@ func (p *Pipeline) assembleMessages(
 		sysPrompt = p.promptStore.Assemble(tier)
 	}
 
+	// Reserve space for content that rides in the request but isn't in the
+	// assembled Input: the incoming user message, plus — on a tool-capable
+	// model — the tool-schema catalog buildLLMRequest attaches. Those schemas
+	// (~2-4K tokens) were never counted in the budget, so a packed context
+	// could tip past the window once they were added on top. Reserved from the
+	// elastic conversation zone.
+	reserved := ctxbuild.EstimateTokens(userMsg)
+	if p.modelSupportsTools(modelID) {
+		reserved += p.toolSchemaTokens()
+	}
 	assembled := ctxbuild.New(effCfg).Build(ctxbuild.Input{
 		SystemPrompt:      sysPrompt,
 		UserPrompt:        userPrompt,
@@ -1029,7 +1039,7 @@ func (p *Pipeline) assembleMessages(
 		Memories:          mems,
 		RelationshipLines: relLines,
 		ToolResults:       toolResults,
-		ReservedTokens:    ctxbuild.EstimateTokens(userMsg),
+		ReservedTokens:    reserved,
 	})
 
 	info.MemHits = len(assembled.Memories)
@@ -1582,6 +1592,25 @@ func (p *Pipeline) skillToolSpecs(includeUserSkillTools bool) []llm.ToolSpec {
 		})
 	}
 	return specs
+}
+
+// toolSchemaTokens estimates the token cost of the full tool catalog that
+// buildLLMRequest attaches on the trusted path. The schemas ride in the
+// request alongside the assembled context but were never counted in
+// ctxbuild's budget — ~2-4K tokens that can tip a packed context past the
+// model window. Reserved (from the conversation zone) so packed input +
+// tools fit. Cheap to recompute; the catalog is static after startup.
+func (p *Pipeline) toolSchemaTokens() int {
+	if p.skillRegistry == nil {
+		return 0
+	}
+	bytes := 0
+	for _, d := range p.skillRegistry.ToolDefinitions() {
+		// Approximates the provider's serialized function schema: name +
+		// description + JSON-Schema params, plus structural overhead per tool.
+		bytes += len(d.Name) + len(d.Description) + len(d.Parameters) + 24
+	}
+	return bytes / 4
 }
 
 // appendToSystemMessage folds an extra block into the turn's system

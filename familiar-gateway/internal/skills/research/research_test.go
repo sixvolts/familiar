@@ -976,6 +976,23 @@ func TestCompose_WriterFailureLandsOnStub(t *testing.T) {
 	}
 }
 
+// A panic inside the writer's detached turn must NOT crash the gateway: the
+// safego guard converts it into the same stub failure a returned error
+// produces. (Without the guard, the unrecovered goroutine panic would abort
+// the whole test binary — so this test passing IS the guard working.)
+func TestCompose_WriterPanicLandsOnStub(t *testing.T) {
+	be := newMockBackend()
+	inv := &mockInvoke{failFor: func(string) error { panic("writer model panicked") }}
+	s := newSkill(t, inv, be, Options{WriterModel: "prose-model"})
+	if res := executeTool(t, s, userCtx(), composeToolName, `{"topic":"t","evidence":"e"}`); res.Error != "" {
+		t.Fatalf("unexpected tool error: %s", res.Error)
+	}
+	got := waitForUpdate(t, be, "Compose failed")
+	if !strings.Contains(got, "panicked") {
+		t.Errorf("panic failure note = %q, want it to mention the panic", got)
+	}
+}
+
 // Compose argument validation: topic required; exactly one evidence
 // source; a named evidence page must exist.
 func TestCompose_Validation(t *testing.T) {

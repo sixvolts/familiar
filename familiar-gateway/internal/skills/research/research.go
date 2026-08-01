@@ -912,6 +912,17 @@ func (s *Skill) dispatchWriter(userID string, book *admin.Book, page *admin.Wiki
 	// delivery time is someone else's edit and must survive.
 	ifMatch := page.UpdatedAt
 	go func() {
+		// A writer runs a full pl.HandleShard turn on a detached goroutine, so
+		// an unrecovered panic here kills the gateway — the same hazard the
+		// worker and supervisor goroutines already guard against. Convert a
+		// panic into the writer's normal failure delivery so the stub reports
+		// it, rather than the process dying with every in-flight conversation.
+		defer safego.RecoverWith(
+			"research run "+runID+" writer",
+			func(rec any) {
+				s.deliverToStub(userID, book, page, ifMatch,
+					composeFailureText(fmt.Errorf("writer panicked: %v", rec)))
+			})
 		select {
 		case s.sem <- struct{}{}:
 		case <-s.rootCtx.Done():

@@ -265,11 +265,14 @@ func (p *Pipeline) runPostTurnExtract(sess *session.Session, userMsg, responseTe
 	// the same vector serves the neighbor lookup AND the eventual
 	// FactProto commit, avoiding a second embed call. Empty-content
 	// candidates get skipped.
+	// conflictNeighborK is how many nearest live facts we show the conflict
+	// classifier per candidate. Top-1 alone missed a supersede/dup target
+	// sitting at rank 2-3 behind an unrelated closer neighbour.
+	const conflictNeighborK = 5
 	type prepared struct {
 		fact      sidecar.ExtractedFact
 		embedding []float32
-		neighbor  memory.NearestFact
-		hasNbr    bool
+		neighbors []memory.NearestFact // nearest live facts, most-similar first
 	}
 	prep := make([]prepared, 0, len(candidates))
 	batchCands := make([]sidecar.BatchCandidate, 0, len(candidates))
@@ -281,29 +284,28 @@ func (p *Pipeline) runPostTurnExtract(sess *session.Session, userMsg, responseTe
 		emb := p.embedText(ctx, f.Content)
 		bc := sidecar.BatchCandidate{Fact: f}
 
-		var nf memory.NearestFact
-		var ok bool
+		var neighbors []memory.NearestFact
 		if p.memStore != nil && len(emb) > 0 {
 			lookupCtx, lookupCancel := context.WithTimeout(ctx, 2*time.Second)
-			n, found, lerr := p.memStore.NearestLiveFact(lookupCtx, emb, sess.UserID(), scopeTagFor(overrides))
+			found, lerr := p.memStore.NearestLiveFacts(lookupCtx, emb, sess.UserID(), scopeTagFor(overrides), conflictNeighborK)
 			lookupCancel()
-			if lerr == nil && found {
-				nf = n
-				ok = true
-				bc.Neighbors = []sidecar.FactNeighbor{
-					{ID: n.ID, Content: n.Content, Similarity: n.Similarity},
+			if lerr == nil && len(found) > 0 {
+				neighbors = found
+				bc.Neighbors = make([]sidecar.FactNeighbor, len(found))
+				for j, n := range found {
+					bc.Neighbors[j] = sidecar.FactNeighbor{ID: n.ID, Content: n.Content, Similarity: n.Similarity}
 				}
 			}
 		}
 
-		// Cheap dedupe before paying for the medium-slot call: if a
-		// candidate is essentially identical to its nearest neighbor,
-		// skip it without asking the model.
-		if ok && nf.Similarity >= p.memoryCfg.DedupThresholdOrDefault() {
+		// Cheap dedupe before paying for the medium-slot call: if a candidate
+		// is essentially identical to its NEAREST neighbor, skip it without
+		// asking the model.
+		if len(neighbors) > 0 && neighbors[0].Similarity >= p.memoryCfg.DedupThresholdOrDefault() {
 			continue
 		}
 
-		prep = append(prep, prepared{fact: f, embedding: emb, neighbor: nf, hasNbr: ok})
+		prep = append(prep, prepared{fact: f, embedding: emb, neighbors: neighbors})
 		batchCands = append(batchCands, bc)
 	}
 
@@ -355,7 +357,7 @@ func (p *Pipeline) runPostTurnExtract(sess *session.Session, userMsg, responseTe
 	var skipped, updated int
 
 	for i, p2 := range prep {
-		action, targetID := resolveDecision(i, batch.Decisions, p2.neighbor, p2.hasNbr,
+		action, targetID := resolveDecision(i, batch.Decisions, p2.neighbors,
 			p.memoryCfg.SupersedeThresholdOrDefault())
 		switch action {
 		case "DUPLICATE":
@@ -522,9 +524,9 @@ func supersedesFor(action, targetID string) string {
 // supersede target actually applied, refusing anything the model was not
 // entitled to say.
 //
-// The classifier is a small local model shown exactly ONE existing fact per
-// candidate — that candidate's nearest neighbour. So the only target it can
-// legitimately name is that neighbour's id. It used to be taken at its
+// The classifier is a small local model shown its candidate's up-to-K nearest
+// live facts. So the only targets it can legitimately name are those shown
+// neighbours' ids. It used to be taken at its
 // word: decisions[i].TargetID was applied verbatim, with no check that it
 // was that neighbour, a UUID, or even a row that exists, and an UPDATE with
 // no target silently fell back to the neighbour whatever the similarity.
@@ -538,7 +540,7 @@ func supersedesFor(action, targetID string) string {
 //
 // Two rules now:
 //
-//   - A NAMED target must be this candidate's neighbour. Anything else is a
+//   - A NAMED target must be one of the shown neighbours. Anything else is a
 //     hallucination, a stale id, or a target meant for a different
 //     candidate in the batch; the write degrades to ADD rather than
 //     superseding a row nobody looked at.
@@ -552,36 +554,47 @@ func supersedesFor(action, targetID string) string {
 // fact over a lost one. It still requires a neighbour to exist — a
 // duplicate of nothing is not a duplicate — but not the floor, since the
 // model judged the content and that is more informative than cosine.
-func resolveDecision(i int, decisions []sidecar.BatchDecision, nbr memory.NearestFact, hasNeighbor bool, supersedeFloor float64) (action, targetID string) {
+func resolveDecision(i int, decisions []sidecar.BatchDecision, neighbors []memory.NearestFact, supersedeFloor float64) (action, targetID string) {
 	action = "ADD"
 	if i < len(decisions) {
 		action = decisions[i].Action
 		targetID = decisions[i].TargetID
 	}
+	hasNeighbor := len(neighbors) > 0
 
-	// Rule 1: a named target must be the neighbour we actually showed.
-	if targetID != "" && (!hasNeighbor || targetID != nbr.ID) {
-		log.Printf("[pipeline] conflict resolver: %s named target %q which is not this candidate's neighbour (%q) — downgrading to ADD",
-			action, previewString(targetID, 64), previewString(nbr.ID, 64))
-		if action == "UPDATE" || action == "DUPLICATE" {
-			action = "ADD"
+	// Rule 1: a named target must be one of the neighbours we actually showed
+	// the model (any of the top-K), not just the closest one.
+	if targetID != "" {
+		shown := false
+		for _, n := range neighbors {
+			if n.ID == targetID {
+				shown = true
+				break
+			}
 		}
-		return action, ""
+		if !shown {
+			log.Printf("[pipeline] conflict resolver: %s named target %q which is not among this candidate's %d shown neighbour(s) — downgrading to ADD",
+				action, previewString(targetID, 64), len(neighbors))
+			if action == "UPDATE" || action == "DUPLICATE" {
+				action = "ADD"
+			}
+			return action, ""
+		}
 	}
 
 	switch action {
 	case "UPDATE":
 		if targetID != "" {
-			return action, targetID // validated against the neighbour above
+			return action, targetID // validated against the shown set above
 		}
-		// Rule 2: only supersede on an unnamed target when the neighbour is
-		// close enough to plausibly BE the same fact.
-		if hasNeighbor && nbr.Similarity >= supersedeFloor {
-			return action, nbr.ID
+		// Rule 2: an unnamed UPDATE supersedes the NEAREST neighbour only when
+		// it's close enough to plausibly BE the same fact.
+		if hasNeighbor && neighbors[0].Similarity >= supersedeFloor {
+			return action, neighbors[0].ID
 		}
 		if hasNeighbor {
 			log.Printf("[pipeline] conflict resolver: UPDATE with no target and nearest fact at %.2f < %.2f floor — adding instead of superseding",
-				nbr.Similarity, supersedeFloor)
+				neighbors[0].Similarity, supersedeFloor)
 		}
 		return "ADD", ""
 	case "DUPLICATE":

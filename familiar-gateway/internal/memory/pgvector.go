@@ -42,7 +42,7 @@ type MemoryStore interface {
 	Search(ctx context.Context, vector []float32, limit int, threshold float64, userID string) ([]MemoryResult, error)
 	HybridSearch(ctx context.Context, queryText string, vector []float32, limit int, threshold float64, userID string) ([]MemoryResult, error)
 	NearestSimilarity(ctx context.Context, vector []float32, scope string, userID string) (float64, bool, error)
-	NearestLiveFact(ctx context.Context, vector []float32, userID, scopeTag string) (NearestFact, bool, error)
+	NearestLiveFacts(ctx context.Context, vector []float32, userID, scopeTag string, limit int) ([]NearestFact, error)
 	Close() error
 }
 
@@ -373,9 +373,9 @@ func (s *PgVectorStore) NearestSimilarity(ctx context.Context, vector []float32,
 // turn reaching into some isolated shard's private rows. So: rows sharing
 // the caller's own scope_tag are always fair game, and beyond that only
 // rows that belong to no isolated shard.
-func (s *PgVectorStore) NearestLiveFact(ctx context.Context, vector []float32, userID, scopeTag string) (NearestFact, bool, error) {
-	if len(vector) == 0 {
-		return NearestFact{}, false, nil
+func (s *PgVectorStore) NearestLiveFacts(ctx context.Context, vector []float32, userID, scopeTag string, limit int) ([]NearestFact, error) {
+	if len(vector) == 0 || limit <= 0 {
+		return nil, nil
 	}
 	vecStr := vectorToString(vector)
 
@@ -386,8 +386,7 @@ func (s *PgVectorStore) NearestLiveFact(ctx context.Context, vector []float32, u
 		scopeParam = scopeTag
 	}
 
-	var nf NearestFact
-	err := s.db.QueryRowContext(ctx,
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT m.id::text, m.content, 1 - (m.embedding <=> $1::vector) AS similarity
 		 FROM memories m
 		 WHERE m.embedding IS NOT NULL
@@ -401,15 +400,36 @@ func (s *PgVectorStore) NearestLiveFact(ctx context.Context, vector []float32, u
 		            AND sh.visibility = 'isolated'
 		        ))
 		 ORDER BY m.embedding <=> $1::vector
-		 LIMIT 1`,
-		vecStr, userID, scopeParam).Scan(&nf.ID, &nf.Content, &nf.Similarity)
-	if err == sql.ErrNoRows {
+		 LIMIT $4`,
+		vecStr, userID, scopeParam, limit)
+	if err != nil {
+		return nil, fmt.Errorf("pgvector nearest live facts: %w", err)
+	}
+	defer rows.Close()
+
+	var out []NearestFact
+	for rows.Next() {
+		var nf NearestFact
+		if err := rows.Scan(&nf.ID, &nf.Content, &nf.Similarity); err != nil {
+			return nil, fmt.Errorf("pgvector nearest live facts scan: %w", err)
+		}
+		out = append(out, nf)
+	}
+	return out, rows.Err()
+}
+
+// NearestLiveFact returns the single most similar live fact (ok=false when
+// none). A thin wrapper over NearestLiveFacts, kept for callers and tests
+// that only need the nearest one.
+func (s *PgVectorStore) NearestLiveFact(ctx context.Context, vector []float32, userID, scopeTag string) (NearestFact, bool, error) {
+	facts, err := s.NearestLiveFacts(ctx, vector, userID, scopeTag, 1)
+	if err != nil {
+		return NearestFact{}, false, err
+	}
+	if len(facts) == 0 {
 		return NearestFact{}, false, nil
 	}
-	if err != nil {
-		return NearestFact{}, false, fmt.Errorf("pgvector nearest live fact: %w", err)
-	}
-	return nf, true, nil
+	return facts[0], true, nil
 }
 
 // Close is a no-op: the *db.Pool is owned by main() and closed there.

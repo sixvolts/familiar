@@ -85,8 +85,8 @@ func (f *fakeStore) NearestSimilarity(_ context.Context, _ []float32, _ string, 
 	return 0, false, nil
 }
 
-func (f *fakeStore) NearestLiveFact(_ context.Context, _ []float32, _, _ string) (mem.NearestFact, bool, error) {
-	return mem.NearestFact{}, false, nil
+func (f *fakeStore) NearestLiveFacts(_ context.Context, _ []float32, _, _ string, _ int) ([]mem.NearestFact, error) {
+	return nil, nil
 }
 
 func (f *fakeStore) Close() error { return nil }

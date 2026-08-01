@@ -70,8 +70,8 @@ func (r *recordingStore) NearestSimilarity(_ context.Context, _ []float32, _ str
 	return 0, false, nil
 }
 
-func (r *recordingStore) NearestLiveFact(_ context.Context, _ []float32, _, _ string) (memory.NearestFact, bool, error) {
-	return memory.NearestFact{}, false, nil
+func (r *recordingStore) NearestLiveFacts(_ context.Context, _ []float32, _, _ string, _ int) ([]memory.NearestFact, error) {
+	return nil, nil
 }
 
 func (r *recordingStore) Close() error { return nil }

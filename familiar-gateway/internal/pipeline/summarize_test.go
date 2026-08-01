@@ -110,8 +110,12 @@ func TestResolveDecision(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			var neighbors []memory.NearestFact
+			if c.hasNeighbor {
+				neighbors = []memory.NearestFact{c.neighbor}
+			}
 			action, target := resolveDecision(0, []sidecar.BatchDecision{c.decision},
-				c.neighbor, c.hasNeighbor, testFloor)
+				neighbors, testFloor)
 			if action != c.wantAction || target != c.wantTarget {
 				t.Errorf("got (%q, %q), want (%q, %q)%s",
 					action, target, c.wantAction, c.wantTarget,
@@ -130,9 +134,29 @@ func TestResolveDecision(t *testing.T) {
 // silently drop a fact.
 func TestResolveDecisionPastEndDefaultsToAdd(t *testing.T) {
 	action, target := resolveDecision(99, []sidecar.BatchDecision{{Action: "UPDATE", TargetID: "x"}},
-		nbr("nbr", 0.99), true, testFloor)
+		[]memory.NearestFact{nbr("nbr", 0.99)}, testFloor)
 	if action != "ADD" || target != "" {
 		t.Errorf("got (%q, %q), want (ADD, \"\")", action, target)
+	}
+}
+
+// Top-K: a target naming a NON-nearest shown neighbour is honoured — the whole
+// point of showing more than one — while a target in no shown neighbour is
+// still refused. Top-1-only would have downgraded the rank-2 target to ADD and
+// left the stale row live forever.
+func TestResolveDecisionAcceptsNonTopNeighbourTarget(t *testing.T) {
+	neighbors := []memory.NearestFact{nbr("closer-but-unrelated", 0.88), nbr("the-real-target", 0.71)}
+
+	if a, tgt := resolveDecision(0,
+		[]sidecar.BatchDecision{{Action: "UPDATE", TargetID: "the-real-target"}},
+		neighbors, testFloor); a != "UPDATE" || tgt != "the-real-target" {
+		t.Errorf("rank-2 target: got (%q,%q), want (UPDATE, the-real-target)", a, tgt)
+	}
+
+	if a, tgt := resolveDecision(0,
+		[]sidecar.BatchDecision{{Action: "UPDATE", TargetID: "never-shown"}},
+		neighbors, testFloor); a != "ADD" || tgt != "" {
+		t.Errorf("unshown target: got (%q,%q), want (ADD, \"\")", a, tgt)
 	}
 }
 

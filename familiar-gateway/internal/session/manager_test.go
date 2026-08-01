@@ -1,6 +1,7 @@
 package session
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -34,6 +35,38 @@ func TestSessionLastClassifierRoundTrip(t *testing.T) {
 	again := s.LastClassifier()
 	if again.Thinking != classifier.ThinkingHigh {
 		t.Error("session state leaked through returned pointer (Thinking)")
+	}
+}
+
+func TestSessionRecentFactsRing(t *testing.T) {
+	s := &Session{ID: "s1"}
+	if got := s.RecentFacts(); len(got) != 0 {
+		t.Fatalf("expected empty ring, got %v", got)
+	}
+	s.AddRecentFacts([]string{"a", "b"})
+	s.AddRecentFacts([]string{"c"})
+	if got := s.RecentFacts(); len(got) != 3 || got[0] != "a" || got[2] != "c" {
+		t.Fatalf("ring = %v, want [a b c]", got)
+	}
+
+	// Overflow keeps only the newest maxRecentFacts.
+	many := make([]string, maxRecentFacts+5)
+	for i := range many {
+		many[i] = fmt.Sprintf("f%d", i)
+	}
+	s.AddRecentFacts(many)
+	got := s.RecentFacts()
+	if len(got) != maxRecentFacts {
+		t.Fatalf("ring len = %d, want %d after overflow", len(got), maxRecentFacts)
+	}
+	if got[len(got)-1] != many[len(many)-1] {
+		t.Errorf("newest fact evicted; last = %q", got[len(got)-1])
+	}
+
+	// The returned slice is a copy — mutating it can't corrupt session state.
+	got[0] = "TAMPERED"
+	if s.RecentFacts()[0] == "TAMPERED" {
+		t.Error("RecentFacts returned the live slice, not a copy")
 	}
 }
 

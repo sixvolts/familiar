@@ -78,6 +78,12 @@ type Session struct {
 	// classify call.
 	lastClassifier *classifier.Output
 
+	// recentFacts is a bounded ring of the most recently EXTRACTED fact
+	// contents for this session, fed to the batch extractor as dedup/conflict
+	// context so a fact restated across turns — before it lands in (or rises
+	// above the cosine floor of) pgvector — is still caught as a duplicate.
+	recentFacts []string
+
 	mu sync.Mutex
 }
 
@@ -130,6 +136,34 @@ func (s *Session) SetLastClassifier(out classifier.Output) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lastClassifier = &out
+}
+
+// maxRecentFacts bounds the per-session recent-extracted-fact ring.
+const maxRecentFacts = 20
+
+// AddRecentFacts appends freshly-committed fact contents to the session's
+// recent ring, keeping only the newest maxRecentFacts.
+func (s *Session) AddRecentFacts(contents []string) {
+	if s == nil || len(contents) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recentFacts = append(s.recentFacts, contents...)
+	if len(s.recentFacts) > maxRecentFacts {
+		// Re-alloc (not re-slice) so the evicted heads can be GC'd.
+		s.recentFacts = append([]string(nil), s.recentFacts[len(s.recentFacts)-maxRecentFacts:]...)
+	}
+}
+
+// RecentFacts returns a copy of the session's recent extracted-fact ring.
+func (s *Session) RecentFacts() []string {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.recentFacts...)
 }
 
 // UserID returns the canonical user identity when one has been resolved,

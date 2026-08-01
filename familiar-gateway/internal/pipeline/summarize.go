@@ -325,6 +325,10 @@ func (p *Pipeline) runPostTurnExtract(sess *session.Session, userMsg, responseTe
 			AssistantMessage: responseText,
 			Candidates:       batchCands,
 			RetrievedRels:    retrievedTriples,
+			// Recently-extracted facts as dedup/conflict context — catches a
+			// restatement that hasn't yet landed in (or risen above the cosine
+			// floor of) pgvector this session.
+			RecentFacts: sess.RecentFacts(),
 		}
 		batchResult, berr := p.sidecarClient.BatchClassifyAndRelate(ctx, batchIn)
 		if berr != nil {
@@ -403,6 +407,15 @@ func (p *Pipeline) runPostTurnExtract(sess *session.Session, userMsg, responseTe
 	}
 
 	if len(pbFacts) > 0 {
+		// Seed the session's recent ring with what we just extracted so the
+		// next turn's batch extractor can dedup a restatement not yet in
+		// pgvector (or below its cosine floor).
+		contents := make([]string, len(pbFacts))
+		for i, f := range pbFacts {
+			contents[i] = f.Content
+		}
+		sess.AddRecentFacts(contents)
+
 		commitCtx, ccancel := context.WithTimeout(ctx, 5*time.Second)
 		if _, err := p.engine.CommitFacts(commitCtx, sess.ID, pbFacts); err != nil {
 			ccancel()

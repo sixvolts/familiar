@@ -1,0 +1,52 @@
+{
+  "_readme": "Labeled turns for the classifier eval harness (classify_eval_test.go). Each case is one turn the effort classifier must label. `want` is the reference verdict — the effort levels that give the user the best answer at the lowest cost, per the field semantics: thinking off/low/medium/high (off=no reasoning, high=multi-step); memory none/shallow/deep (none SKIPS both pgvector AND conversation history, so any turn needing prior context must be >=shallow); search none/shallow/deep (none is a HARD veto on web_search — the dangerous one to get wrong on a recency turn). `history` is prior turns for context/pronoun cases. Labels are hand-authored from the system semantics and reviewed against the local 122B; see notes for judgment calls.",
+  "cases": [
+    {"id": "triv-thanks", "message": "thanks", "want": {"thinking": "off", "memory": "none", "search": "none"}, "note": "pure social close; also caught by the deterministic fast-path"},
+    {"id": "triv-thank-you", "message": "thank you so much!", "want": {"thinking": "off", "memory": "none", "search": "none"}, "note": "fast-path"},
+    {"id": "triv-hi", "message": "hi", "want": {"thinking": "off", "memory": "none", "search": "none"}, "note": "greeting; fast-path"},
+    {"id": "triv-morning", "message": "good morning", "want": {"thinking": "off", "memory": "none", "search": "none"}, "note": "fast-path"},
+    {"id": "triv-multiword-react", "message": "haha that's perfect, love it", "want": {"thinking": "off", "memory": "none", "search": "none"}, "note": "trivial reaction but multi-word, so NOT fast-pathed — the classifier must still call it trivial"},
+    {"id": "triv-bye-multiword", "message": "ok great, talk later", "want": {"thinking": "off", "memory": "none", "search": "none"}, "note": "social close, not fast-pathed"},
+
+    {"id": "fact-capital", "message": "what's the capital of France", "want": {"thinking": "low", "memory": "none", "search": "none"}, "note": "stable world knowledge; no retrieval, no search"},
+    {"id": "fact-arith", "message": "what is 17 times 23", "want": {"thinking": "low", "memory": "none", "search": "none"}, "note": "trivial computation"},
+    {"id": "fact-convert", "message": "convert 100 fahrenheit to celsius", "want": {"thinking": "low", "memory": "none", "search": "none"}},
+    {"id": "fact-http429", "message": "what does the HTTP 429 status code mean?", "want": {"thinking": "low", "memory": "none", "search": "none"}, "note": "stable technical knowledge phrased as a lookup — must NOT trip search"},
+    {"id": "fact-btree", "message": "explain what a B-tree is", "want": {"thinking": "low", "memory": "none", "search": "none"}, "note": "stable; no search"},
+
+    {"id": "mem-editor", "message": "what did I say my favorite editor was?", "want": {"thinking": "low", "memory": "shallow", "search": "none"}, "note": "personal recall → pgvector"},
+    {"id": "mem-apikey", "message": "what's my api key again?", "want": {"thinking": "low", "memory": "shallow", "search": "none"}, "note": "personal fact recall"},
+    {"id": "mem-schema-decision", "message": "remind me what we decided about the database schema", "want": {"thinking": "medium", "memory": "deep", "search": "none"}, "note": "project-context recall, likely multiple facts → deep"},
+    {"id": "mem-projects", "message": "what projects am I working on?", "want": {"thinking": "low", "memory": "deep", "search": "none"}, "note": "broad personal context → deep"},
+    {"id": "mem-summary-infra", "message": "summarize everything you know about my infrastructure", "want": {"thinking": "medium", "memory": "deep", "search": "none"}, "note": "wide recall + synthesis"},
+
+    {"id": "reason-rrf-rerank", "message": "compare the tradeoffs between RRF and a cross-encoder reranker for memory retrieval", "want": {"thinking": "high", "memory": "none", "search": "none"}, "note": "multi-step reasoning on general knowledge"},
+    {"id": "reason-failover-design", "message": "help me design a primary/backup failover chain for my models", "want": {"thinking": "high", "memory": "shallow", "search": "none"}, "note": "design task; may lean on the user's setup → shallow memory"},
+    {"id": "reason-deadlock", "message": "walk me through how to debug a deadlock in this Go code", "want": {"thinking": "high", "memory": "none", "search": "none"}},
+    {"id": "reason-trunk", "message": "what are the pros and cons of trunk-based development?", "want": {"thinking": "medium", "memory": "none", "search": "none"}},
+    {"id": "reason-tradeoff-short", "message": "should I use postgres or sqlite for this?", "want": {"thinking": "medium", "memory": "shallow", "search": "none"}, "note": "advice depends a bit on the user's project → shallow"},
+
+    {"id": "code-reverse-list", "message": "write a Go function to reverse a linked list", "want": {"thinking": "medium", "memory": "none", "search": "none"}},
+    {"id": "code-goroutine-leak", "message": "why does my goroutine leak here", "want": {"thinking": "high", "memory": "none", "search": "none"}, "note": "debugging → higher thinking"},
+
+    {"id": "search-explicit-pricing", "message": "search the web for the current Brave Search API pricing", "want": {"thinking": "low", "memory": "none", "search": "shallow"}, "note": "explicit search request"},
+    {"id": "search-explicit-weather", "message": "look up today's weather in Denver", "want": {"thinking": "low", "memory": "none", "search": "shallow"}, "note": "explicit + recency"},
+    {"id": "search-explicit-releasenotes", "message": "find the latest release notes for Go 1.26", "want": {"thinking": "low", "memory": "none", "search": "shallow"}, "note": "explicit lookup"},
+    {"id": "search-recency-iphone", "message": "what's the newest iPhone model?", "want": {"thinking": "low", "memory": "none", "search": "shallow"}, "note": "VETO BOUNDARY: recency question, not explicitly 'search' — a false 'none' answers from stale weights. Ideal permits one search."},
+    {"id": "search-recency-ceo", "message": "who is the current CEO of OpenAI?", "want": {"thinking": "low", "memory": "none", "search": "shallow"}, "note": "VETO BOUNDARY: 'current' → could have changed since training"},
+    {"id": "search-recency-pg", "message": "what's the latest stable version of PostgreSQL?", "want": {"thinking": "low", "memory": "none", "search": "shallow"}, "note": "VETO BOUNDARY: version recency"},
+    {"id": "search-research-deep", "message": "research the best embedding models for code search in 2026 and summarize the options", "want": {"thinking": "high", "memory": "none", "search": "deep"}, "note": "explicit research → deep search + reasoning"},
+
+    {"id": "ctx-pronoun-ip", "message": "what's its IP address?", "history": [{"role": "user", "content": "is gpu-host online?"}, {"role": "assistant", "content": "yes, gpu-host is up."}], "want": {"thinking": "low", "memory": "shallow", "search": "none"}, "note": "pronoun 'its'→gpu-host; condensed_query should resolve it; personal/infra recall → shallow"},
+    {"id": "ctx-pronoun-ram", "message": "and how much RAM does it have?", "history": [{"role": "user", "content": "tell me about gpu-host"}, {"role": "assistant", "content": "gpu-host runs Ubuntu and has 6 GPUs."}], "want": {"thinking": "low", "memory": "shallow", "search": "none"}, "note": "follow-up needs context"},
+    {"id": "ctx-confirm-save", "message": "yes", "history": [{"role": "user", "content": "my postgres dsn is postgres://u:p@db:5432"}, {"role": "assistant", "content": "Want me to save that DSN to memory?"}], "want": {"thinking": "low", "memory": "shallow", "search": "none"}, "note": "bare 'yes' EXCLUDED from fast-path on purpose; needs conversation history to act, so memory>=shallow (none would skip history too)"},
+    {"id": "ctx-continue", "message": "continue", "history": [{"role": "user", "content": "explain the failover design"}, {"role": "assistant", "content": "First, each role has a primary and backup..."}], "want": {"thinking": "medium", "memory": "shallow", "search": "none"}, "note": "needs prior turn; resumes a reasoning thread"},
+
+    {"id": "amb-help", "message": "help", "want": {"thinking": "low", "memory": "shallow", "search": "none"}, "note": "ambiguous, short — NOT fast-pathed; bias toward keeping some context"},
+    {"id": "amb-affirm-ok", "message": "ok", "want": {"thinking": "off", "memory": "none", "search": "none"}, "note": "with NO history 'ok' is a bare ack → trivial-ish; but excluded from the deterministic fast-path because WITH history it can be a confirmation. Tests the classifier's context-sensitivity."},
+
+    {"id": "search-current-events", "message": "what happened in the news today?", "want": {"thinking": "low", "memory": "none", "search": "shallow"}, "note": "recency"},
+    {"id": "mem-preference-write", "message": "remember that I prefer tabs over spaces", "want": {"thinking": "low", "memory": "shallow", "search": "none"}, "note": "a save instruction; low thinking, some memory context to dedup against"},
+    {"id": "reason-explain-tradeoff-mem", "message": "given my setup, should I bump the dedup threshold?", "want": {"thinking": "high", "memory": "deep", "search": "none"}, "note": "advice grounded in the user's config → deep memory + real reasoning"}
+  ]
+}

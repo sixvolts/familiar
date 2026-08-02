@@ -151,7 +151,9 @@ func TestStopTurn_CancelsTurnStuckInClassification(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_, _, _ = pl.HandleStream(context.Background(), sess, "hello",
+		// Non-trivial so it reaches the classifier (a bare greeting would be
+		// short-circuited by the deterministic fast-path).
+		_, _, _ = pl.HandleStream(context.Background(), sess, "what is the status of gpu-host",
 			nil, func(string) {}, nil, nil)
 	}()
 
@@ -218,7 +220,9 @@ func TestPrepContext_ClientDisconnectCancelsClassification(t *testing.T) {
 	classifyReturned := make(chan struct{})
 	go func() {
 		defer close(classifyReturned)
-		_, _, _ = pl.HandleStream(reqCtx, sess, "hello", nil, func(string) {}, nil, nil)
+		// A non-trivial message so it reaches the classifier (a bare
+		// greeting would be short-circuited by the deterministic fast-path).
+		_, _, _ = pl.HandleStream(reqCtx, sess, "what is the status of gpu-host", nil, func(string) {}, nil, nil)
 	}()
 
 	select {

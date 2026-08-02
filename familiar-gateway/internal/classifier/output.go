@@ -93,6 +93,12 @@ const (
 	// classifier is evidence the turn may be unusual, so this one keeps
 	// ConservativeFallback.
 	SourceUnparsed Source = "unparsed"
+	// SourceFastPath — a deterministic pre-classifier gate recognized the
+	// turn as an unambiguous trivial (a curated social pleasantry) and
+	// skipped the model call entirely. Distinct from SourceStatic so
+	// telemetry can measure how often the gate fires vs. a real verdict or
+	// a sidecar-down default (grep `src=fastpath`).
+	SourceFastPath Source = "fastpath"
 )
 
 // FromModel reports whether the verdict reflects an actual classifier

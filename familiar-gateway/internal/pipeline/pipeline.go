@@ -2198,7 +2198,17 @@ func (p *Pipeline) classifyRequest(ctx context.Context, sess *session.Session, u
 	// whether it is a real verdict or a default, and stats carry the
 	// latency + token cost so this call stops being unmeasurable.
 	var cstats sidecar.ClassifyStats
-	if p.sidecarClient != nil {
+	if verdict, ok := classifier.TrivialFastPath(userMsg); ok {
+		// Deterministic trivial gate: a pure social pleasantry ("thanks",
+		// "hi", "bye") needs no reasoning, retrieval, or web search, and we
+		// know that without a model call. Short-circuit to off/none/none,
+		// skipping BOTH the classify round-trip and the retrieval it gates.
+		// High-precision by construction (see classifier.TrivialFastPath) —
+		// anything ambiguous falls through to the model below. This also
+		// wins when the sidecar is down, where the default would otherwise
+		// send "thanks" to the analytical tier.
+		r.classifier = verdict
+	} else if p.sidecarClient != nil {
 		// Build the recent-history slice (chronological, not reversed —
 		// reversed dialogue reads as off-distribution) the classifier
 		// prompt expects. Six turns: enough for both the effort verdict

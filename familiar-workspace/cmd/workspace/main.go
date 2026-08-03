@@ -72,11 +72,19 @@ func main() {
 	// reads ?token=... from the URL, calls the gateway's
 	// /console/api/auth/enroll/{begin,finish} endpoints, and runs
 	// the WebAuthn ceremony inline.
+	// One stamper shared by every HTML shell we serve (enroll +
+	// index/mobile) so they resolve asset hashes through a single
+	// cache. enroll.html is a shell like any other: it pins
+	// /enroll.js with a ?v= param, so without stamping it keeps the
+	// hand-maintained value and a changed enroll.js never reaches a
+	// client whose service worker already cached that URL.
+	stamper := newAssetStamper(staticDir)
+
 	enrollPath := filepath.Join(staticDir, "enroll.html")
 	mux.HandleFunc("/enroll", func(w http.ResponseWriter, r *http.Request) {
 		docSecurityHeaders(w)
 		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-		http.ServeFile(w, r, enrollPath)
+		stamper.serveShell(w, r, enrollPath)
 	})
 
 	// Static + SPA fallback. The handler tries to serve a file from
@@ -86,7 +94,7 @@ func main() {
 	// "/" path (or unknown SPA route), the User-Agent is sniffed so
 	// phones get mobile.html and everyone else gets index.html — no
 	// client-side redirect, the URL stays the same.
-	mux.HandleFunc("/", makeStaticHandler(staticDir))
+	mux.HandleFunc("/", makeStaticHandler(staticDir, stamper))
 
 	log.Printf("[workspace] static_dir=%s gateway=%s", staticDir, cfg.GatewayURL)
 	log.Printf("[workspace] listening on %s tls=%v", cfg.ListenAddr, cfg.TLS.Enabled())
@@ -168,8 +176,7 @@ func isStaticAssetPath(rel string) bool {
 	return staticAssetExts[strings.ToLower(filepath.Ext(rel))]
 }
 
-func makeStaticHandler(staticDir string) http.HandlerFunc {
-	stamper := newAssetStamper(staticDir)
+func makeStaticHandler(staticDir string, stamper *assetStamper) http.HandlerFunc {
 	indexPath := filepath.Join(staticDir, "index.html")
 	mobilePath := filepath.Join(staticDir, "mobile.html")
 	hasMobile := false

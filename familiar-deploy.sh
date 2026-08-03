@@ -36,17 +36,19 @@ step "Gateway built"
 # every deploy would drop live chat streams (the workspace proxies
 # /api/chat) for no reason. Comparing the binary hash would not help
 # either: go stamps VCS info into it, so it changes on every commit.
-# Compare the sources instead. If the range cannot be diffed (a
-# force-pushed history can orphan PREV_HEAD), fall back to rebuilding.
+# Compare mtimes instead: rebuild when any Go source is newer than
+# the built binary. This catches pull-driven changes, locally committed
+# ones (where reset --hard is a no-op so a commit-range diff sees
+# nothing), and hand edits alike.
 WS_RESTART=false
 WS_REASON=""
 cd "$WORKSPACE"
 if [[ ! -x familiar-workspace ]]; then
     WS_RESTART=true
     WS_REASON="binary missing"
-elif ! git diff --quiet "$PREV_HEAD" "$NEW_HEAD" -- cmd internal go.mod go.sum 2>/dev/null; then
+elif [[ -n "$(find cmd internal go.mod go.sum -newer familiar-workspace 2>/dev/null | head -1)" ]]; then
     WS_RESTART=true
-    WS_REASON="Go sources changed"
+    WS_REASON="Go sources newer than binary"
 fi
 
 if [[ "$WS_RESTART" == true ]]; then

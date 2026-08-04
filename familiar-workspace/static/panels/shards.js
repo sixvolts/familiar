@@ -623,6 +623,9 @@
                 await openShardDetail(id);
             }
             loadShards();
+            // The sidebar "shards" category lists active shards from
+            // /console/api/shards; keep it in sync with create/rename/edit.
+            window.dispatchEvent(new Event("familiar:sidebarRefresh"));
         } catch (err) {
             setError("shard-form-error", err);
         }
@@ -637,6 +640,9 @@
             toast("Shard " + action + "d", "success");
             await openShardDetail(id);
             loadShards();
+            // enable/disable flips whether the shard shows in the sidebar
+            // "shards" category (it filters active !== false).
+            window.dispatchEvent(new Event("familiar:sidebarRefresh"));
         } catch (e) {
             setError("shard-form-error", e);
         }
@@ -651,6 +657,8 @@
             toast("Shard " + id + " deleted", "success");
             closeShardDetail();
             loadShards();
+            // Drop the deleted shard from the sidebar "shards" category.
+            window.dispatchEvent(new Event("familiar:sidebarRefresh"));
         } catch (e) {
             setError("shard-form-error", e);
         }
@@ -725,6 +733,9 @@
             });
             showTokenModal(data.plaintext);
             loadShardTokens(id);
+            // The list's Tokens count cell is real (from listShards) but only
+            // reloads with the list — refresh it so minting reflects there too.
+            loadShards();
         } catch (e) {
             setError("shard-tokens-error", e);
         }
@@ -740,6 +751,8 @@
             if (shardsState.currentShard) {
                 loadShardTokens(shardsState.currentShard.id);
             }
+            // Keep the list's Tokens count cell in sync with the revoke.
+            loadShards();
         } catch (e) {
             setError("shard-tokens-error", e);
         }

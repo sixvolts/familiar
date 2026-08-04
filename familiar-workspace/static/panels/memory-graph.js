@@ -66,6 +66,16 @@
         });
         document.getElementById("graph-viewas-clear").addEventListener("click", () => viewAsUser(""));
 
+        // A memory mutation in the memory panel (merge / fact edit / delete /
+        // chain collapse) broadcasts familiar:memoryChanged — repaint the
+        // graph so rewritten edges and relabeled nodes aren't left stale.
+        // Registered only here (once), so it can't fire before the graph
+        // exists; currentCenter may be null (the overview graph), which
+        // loadGraph handles.
+        window.addEventListener("familiar:memoryChanged", () => {
+            loadGraph(graphState.currentCenter);
+        });
+
         try {
             await ensureCytoscape();
         } catch (err) {
@@ -427,7 +437,9 @@
                     });
                     toast("Edge updated", "success");
                     openRelationshipDetail(id);
-                    loadGraph(graphState.currentCenter);
+                    // Repaints the graph (own listener) AND refreshes the
+                    // memory panel's entity index / degree columns.
+                    window.dispatchEvent(new Event("familiar:memoryChanged"));
                 } catch (e) {
                     toast("Edit failed: " + (e.message || String(e)), "error");
                 }
@@ -556,7 +568,10 @@
             }
             closeGraphDetail();
             toast(type === "entity" ? "Entity deleted" : "Relationship deleted", "success");
-            loadGraph(graphState.currentCenter);
+            // Repaints the graph (own listener) AND refreshes the memory
+            // panel's entity index + store-health strip (deletes change
+            // orphan_edges / superseded counts).
+            window.dispatchEvent(new Event("familiar:memoryChanged"));
         } catch (e) {
             toast("Delete failed: " + (e.message || String(e)), "error");
         }

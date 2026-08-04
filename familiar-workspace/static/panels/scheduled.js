@@ -415,6 +415,11 @@
             }
             closeDetail();
             loadActions();
+            // The sidebar has a "scheduled" category (from /console/api/actions)
+            // and, for conversation-target actions, the backend spins up a
+            // "Scheduled: <name>" chat thread — refresh the rail so both track
+            // create/rename/target changes.
+            window.dispatchEvent(new Event("familiar:sidebarRefresh"));
         } catch (err) {
             setError("action-form-error", err);
         }
@@ -445,6 +450,10 @@
             $("action-enable").hidden = a.enabled;
             $("action-disable").hidden = !a.enabled;
             toast(enabled ? "Enabled" : "Disabled", "success");
+            // The list row's State cell + the sidebar "scheduled" meta both
+            // read the last-fetched enabled flag; neither reloaded on toggle.
+            loadActions();
+            window.dispatchEvent(new Event("familiar:sidebarRefresh"));
         } catch (e) {
             setError("action-form-error", e);
         }
@@ -458,6 +467,8 @@
             toast("Action deleted", "success");
             closeDetail();
             loadActions();
+            // Drop the deleted action from the sidebar "scheduled" category.
+            window.dispatchEvent(new Event("familiar:sidebarRefresh"));
         } catch (e) {
             setError("action-form-error", e);
         }

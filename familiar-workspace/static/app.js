@@ -650,7 +650,15 @@
         // always lands on your own. The Users-panel jump re-enters
         // view-as immediately after this call, so the reset here
         // never fights it.
-        if (name === "dashboard") dashViewAs("");
+        if (name === "dashboard") {
+            dashViewAs("");
+            // Pick up any memory mutation that landed while the dashboard was
+            // hidden (dashViewAs("") no-ops when the scope is unchanged).
+            if (dashState.dirty && dashState.initialized) {
+                dashState.dirty = false;
+                loadDashboard();
+            }
+        }
     }
 
     // ── Permission envelope (SHARD-AUTH-SPEC Phase 1) ────────────
@@ -892,7 +900,24 @@
         initialized: false,
         viewingUser: "",       // admin picker: "" = own, else userID
         cy: null,              // preview cytoscape instance
+        dirty: false,          // a memory mutation happened off-screen; reload on next view
     };
+
+    // A memory/graph mutation (memory.js / memory-graph.js broadcast
+    // familiar:memoryChanged) changes the dashboard's fact/entity/relationship
+    // counts and graph preview. Reload immediately if the dashboard is the
+    // visible panel; otherwise mark it dirty so switchPanel reloads on entry —
+    // no wasted fetch while it's hidden. (Before this the counts only
+    // refreshed on a full reload; re-entry no-ops because dashViewAs is a
+    // scope-change guard.)
+    window.addEventListener("familiar:memoryChanged", () => {
+        if (!dashState.initialized) return;
+        if (currentPanel === "dashboard") {
+            loadDashboard();
+        } else {
+            dashState.dirty = true;
+        }
+    });
 
     // dashScope mirrors withGraphScope — one helper per panel keeps
     // the admin-override flow explicit at each call site.

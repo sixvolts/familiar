@@ -1200,6 +1200,11 @@
                 localState.conversations.unshift(c);
                 renderConvList();
                 loadConversation(c.id);
+                // Refresh the sidebar rail's Chat list so the new thread
+                // appears immediately — deletion already broadcasts
+                // (familiar:conversationDeleted), creation did not, so the
+                // rail lagged until the first reply auto-titled the thread.
+                window.dispatchEvent(new Event("familiar:sidebarRefresh"));
             } catch (e) {
                 renderError("Couldn't create conversation: " + e.message);
             }
@@ -1358,6 +1363,12 @@
                     titleEl.value = c.title || "Conversation";
                     localState.conversations.unshift(c);
                     renderConvList();
+                    // Surface the just-created thread in the sidebar rail
+                    // now, not only after the reply auto-titles it — the
+                    // deferred autoTitle refresh still fires, this just closes
+                    // the reply-long staleness window (and the PATCH-failure
+                    // permanently-stale path).
+                    window.dispatchEvent(new Event("familiar:sidebarRefresh"));
                     // Update workspace tab label.
                     if (window.FamiliarWorkspace && window.FamiliarWorkspace.updateTabTitle) {
                         window.FamiliarWorkspace.updateTabTitle(tab.id, titleEl.value);

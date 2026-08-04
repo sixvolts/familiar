@@ -144,6 +144,16 @@
         // a page reload.
         const el = document.getElementById("sidebar-user-name");
         if (el) el.textContent = name;
+        // The initials avatar is computed at bootstrap (app.js renderDashboard)
+        // and nothing recomputed it on a rename, so it kept the old initials
+        // next to the new name. Mirror that formula here to keep them in sync.
+        const avatar = document.getElementById("sidebar-user-avatar");
+        if (avatar) {
+            const initials = (name || "?")
+                .split(/\s+/).filter(Boolean).slice(0, 2)
+                .map((s) => s[0].toUpperCase()).join("") || "?";
+            avatar.textContent = initials;
+        }
     }
 
     function wireEnrollmentLinkPanel() {

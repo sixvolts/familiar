@@ -245,6 +245,14 @@
         document.getElementById("entity-merge-go").addEventListener("click", mergeCurrentEntity);
         document.getElementById("detail-collapse-chain").addEventListener("click", collapseCurrentChain);
 
+        // Any memory OR graph mutation (this panel or memory-graph.js)
+        // broadcasts familiar:memoryChanged. Refresh whichever list is showing
+        // plus the health strip so the entity/fact indexes, counts, and store
+        // health stay consistent with edits made in the graph panel — and so
+        // this panel's own mutations refresh the CORRECT visible list (the
+        // entities tab used to keep showing stale rows after a fact delete).
+        window.addEventListener("familiar:memoryChanged", refreshMemoryViews);
+
         loadHealth();
 
         const form = document.getElementById("memory-filter");
@@ -451,11 +459,26 @@
             });
             toast("MERGED — " + (res.rewritten || 0) + " TRIPLES NOW REFERENCE " + to.toUpperCase(), "success");
             closeEntityDetail();
-            loadEntities();
+            // Refreshes this panel's list + health AND the graph (which listens
+            // too) — a merge rewrites edges the graph is drawing.
+            window.dispatchEvent(new Event("familiar:memoryChanged"));
         } catch (e) {
             setError("entity-detail-error", e);
             toast("MERGE FAILED", "error");
         }
+    }
+
+    // refreshMemoryViews repaints whatever the memory panel is currently
+    // showing — the entities index or the facts list — plus the store-health
+    // strip. It is the single handler for familiar:memoryChanged, so a
+    // mutation anywhere (this panel or the graph) lands on the right list.
+    function refreshMemoryViews() {
+        if (memState.kind === "entities") {
+            loadEntities();
+        } else {
+            loadMemories();
+        }
+        loadHealth();
     }
 
     // loadHealth fills the store-health strip at the bottom of the
@@ -567,7 +590,9 @@
             } else {
                 closeDetail();
             }
-            loadMemories();
+            // Refresh the active list + health (collapse prunes superseded
+            // rows) and let the graph repaint the affected chain.
+            window.dispatchEvent(new Event("familiar:memoryChanged"));
         } catch (e) {
             setError("detail-error", e);
             toast("COLLAPSE FAILED", "error");
@@ -730,7 +755,9 @@
             cancelEditMode();
             toast("MEMORY UPDATED", "success");
             openDetail(memState.currentID);
-            loadMemories();
+            // Refresh the active list + health; the graph re-reads edge
+            // labels and supporting-fact text that a content edit changes.
+            window.dispatchEvent(new Event("familiar:memoryChanged"));
         } catch (e) {
             setError("detail-error", e);
             toast("UPDATE FAILED", "error");
@@ -755,7 +782,8 @@
             });
             closeDetail();
             toast("MEMORY DELETED", "success");
-            loadMemories();
+            // Refresh the active list + health and repaint the graph.
+            window.dispatchEvent(new Event("familiar:memoryChanged"));
         } catch (e) {
             setError("detail-error", e);
             toast("DELETE FAILED", "error");

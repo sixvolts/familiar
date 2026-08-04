@@ -1021,6 +1021,10 @@
                 renderTree();
                 localState.history.length = 0;
                 loadNote(n.id);
+                // Surface the new note in the sidebar rail (and any second
+                // notes panel) immediately — deleteNote fires notesChanged;
+                // create must too, or the rail lagged until reload.
+                window.dispatchEvent(new CustomEvent("familiar:notesChanged"));
             } catch (e) {
                 notifyErr("Couldn't create note: " + (e.message || String(e)));
             }
@@ -1029,6 +1033,10 @@
         // One-shot guard so a save-failure streak toasts once, not on
         // every debounced retry. Reset on the next successful save.
         let saveFailedNotified = false;
+        // Coalesces the sidebar-row refresh after content saves so a body
+        // edit's updated-at meta (and any folder move) reflects in the rail
+        // without refetching it on every 500ms autosave.
+        let sidebarMetaTimer = null;
         async function flushSave(immediate) {
             if (!localState.note) return;
             if (localState.saving) return;
@@ -1096,6 +1104,14 @@
                     };
                     renderTree();
                 }
+                // The sidebar row's updated-at meta only refreshed on a title
+                // blur before, so body-only edits (and folder moves) left it
+                // stale until reload. Coalesced to spare the rail on autosave.
+                if (sidebarMetaTimer) clearTimeout(sidebarMetaTimer);
+                sidebarMetaTimer = setTimeout(() => {
+                    sidebarMetaTimer = null;
+                    window.dispatchEvent(new Event("familiar:sidebarRefresh"));
+                }, 2000);
                 saveFailedNotified = false;
                 setTimeout(() => {
                     if (savedDot.textContent === "Saved") savedDot.textContent = "";
@@ -1385,7 +1401,26 @@
             // Live-refresh when the chat surface modifies a note
             // via tool calls (append_to_note, update_note, etc.).
             window.addEventListener("familiar:notesChanged", () => {
+                // On the splash, refreshCurrentNote early-returns (no note
+                // loaded), so a note added/deleted/moved elsewhere left the
+                // Recent/Pinned lists stale. Re-render the splash instead.
+                if (root.classList.contains("is-splash")) {
+                    renderSplash();
+                    return;
+                }
                 refreshCurrentNote();
+            });
+
+            // A pin toggled elsewhere (another notes panel, the Home grid, or
+            // the AI) only broadcast familiar:pinsChanged, which notes.js did
+            // not consume — so a second panel kept a stale pin glyph and the
+            // splash's Pinned list lagged. Refresh the affected view.
+            window.addEventListener("familiar:pinsChanged", () => {
+                if (root.classList.contains("is-splash")) {
+                    renderSplash();
+                    return;
+                }
+                refreshList();
             });
 
             // Server-pushed page-saved / page-deleted events. Lets a
@@ -1397,6 +1432,13 @@
             // the conflict via the existing path.
             window.addEventListener("familiar:pageEvent", (ev) => {
                 const d = ev.detail || {};
+                // A note added/deleted on another device or by the AI arrives
+                // here with no note open; on the splash, refresh its
+                // Recent/Pinned lists (the open-note case continues below).
+                if (root.classList.contains("is-splash")) {
+                    renderSplash();
+                    return;
+                }
                 if (!localState.note || d.page_id !== localState.note.id) return;
                 if (d.kind === "page-deleted") {
                     // Page was removed elsewhere. Refreshing the

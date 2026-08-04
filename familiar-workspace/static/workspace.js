@@ -1961,6 +1961,24 @@
     // rail) and clicking it 404s until a full page refresh.
     window.addEventListener("familiar:conversationDeleted", refreshSidebarChildren);
 
+    // Server page-saved / page-deleted (app.js re-dispatches the SSE as
+    // familiar:pageEvent). wiki.js / notes.js consume it to refresh the OPEN
+    // editor, but nothing bridged it to the rail — so a page created or
+    // deleted by another session, another device, or the AI never updated the
+    // sidebar's page tree until reload. The local editor paths already fire
+    // notesChanged; this covers every push that originates no local event.
+    // Debounced so a burst (e.g. research writing many pages) coalesces into
+    // one rail re-fetch rather than one per page.
+    let pageEventSidebarTimer = null;
+    window.addEventListener("familiar:pageEvent", () => {
+        if (pageEventSidebarTimer) return;
+        pageEventSidebarTimer = setTimeout(() => {
+            pageEventSidebarTimer = null;
+            sidebarWikiPagesCache.clear();
+            refreshSidebarChildren();
+        }, 250);
+    });
+
     // openDocFromSidebar focuses (or creates) a workspace tab of
     // the right surface, then dispatches `familiar:openDoc` so the
     // surface module can load the doc into that tab. id=null means

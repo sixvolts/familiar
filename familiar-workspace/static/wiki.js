@@ -1871,6 +1871,11 @@
                 renderBookSelect();
                 bookSelect.value = b.slug;
                 await loadBook(b.slug);
+                // Books aren't pages, so no page-saved SSE fires — the
+                // sidebar rail's Wiki book list only re-fetches on
+                // notesChanged. Without this the new book is absent from the
+                // rail until reload (createPage fires the same event above).
+                window.dispatchEvent(new CustomEvent("familiar:notesChanged"));
             } catch (e) {
                 notifyErr("Couldn't create book: " + (e.message || e));
             }
@@ -1945,6 +1950,9 @@
                     newPageBtn.disabled = true;
                     showWikiSplash();
                 }
+                // Drop the archived book from the sidebar rail (same
+                // no-SSE reason as createBook — books need the client event).
+                window.dispatchEvent(new CustomEvent("familiar:notesChanged"));
             } catch (e) {
                 notifyErr("Couldn't archive: " + (e.message || e));
             }

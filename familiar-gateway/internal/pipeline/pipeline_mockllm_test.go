@@ -10,6 +10,7 @@ package pipeline
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -192,6 +193,101 @@ func TestRunToolLoop_StopDoesNotDispatchSalvagedToolCall(t *testing.T) {
 	}
 	if resp.FinishReason != "stopped" {
 		t.Errorf("finish reason = %q, want stopped", resp.FinishReason)
+	}
+}
+
+// Prose the model emits ALONGSIDE a tool call must reach a non-streaming
+// caller (scheduled actions), not just the final iteration's wrap-up. The tool
+// loop used to return only the last response's Content, so a model that wrote
+// its whole answer next to one last tool call — then closed with a short
+// "Saved to memory." — had the answer silently dropped from both the delivered
+// reply and the persisted transcript (the arXiv digest, 2026-08-11: 3777 chars
+// of summaries lost behind a 250-char wrap-up). Streaming clients were fine
+// (they render from token events via onChunk); this only bit the non-streaming
+// path, which is what runToolLoop returns. Guards f11a46a.
+func TestRunToolLoop_KeepsProseEmittedAlongsideToolCall(t *testing.T) {
+	const answer = "The three papers and why they matter: paper one does X; two does Y; three does Z."
+	const wrapup = "Saved to memory. These offer concrete paths forward."
+
+	stub := &stubSkill{toolName: "stub_lookup", reply: "saved"}
+	reg := skills.NewRegistry()
+	if err := reg.Register(stub); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	pl := makePipelineWithIters(&mockEngine{}, testutil.NewMockLLM(t), reg, 5)
+
+	// iter 1: the model writes its answer AND calls one more tool in the same
+	// response. iter 2: a short wrap-up with no tools, so the loop exits.
+	call := 0
+	complete := func(_ context.Context, _ llm.CompletionRequest) (*llm.CompletionResponse, error) {
+		call++
+		if call == 1 {
+			return &llm.CompletionResponse{
+				Content:      answer,
+				FinishReason: "tool_calls",
+				ToolCalls: []llm.ToolCall{{
+					ID: "c1", Name: "stub_lookup", Arguments: json.RawMessage(`{"q":"save"}`),
+				}},
+			}, nil
+		}
+		return &llm.CompletionResponse{Content: wrapup, FinishReason: "stop"}, nil
+	}
+	baseReq := llm.CompletionRequest{
+		Model: "mock-model",
+		Tools: []llm.ToolSpec{{Name: "stub_lookup"}},
+	}
+
+	resp, _, err := pl.runToolLoop(context.Background(), baseReq, "standard", classifier.SearchNone, 0, complete, nil, nil, false, nil, nil)
+	if err != nil {
+		t.Fatalf("runToolLoop: %v", err)
+	}
+	// The tool emitted alongside the prose really ran — this is genuinely the
+	// prose-with-tool case, not a plain two-turn exchange.
+	if stub.execCalls != 1 {
+		t.Fatalf("stub tool ran %d times, want 1 (the call emitted alongside the prose)", stub.execCalls)
+	}
+	// Both the earlier answer AND the wrap-up must survive. Pre-fix, resp only
+	// carried the wrap-up and the answer was dropped.
+	if !strings.Contains(resp.Content, answer) {
+		t.Errorf("prose emitted alongside the tool call was dropped.\n got:  %q\n want it to contain: %q", resp.Content, answer)
+	}
+	if !strings.Contains(resp.Content, wrapup) {
+		t.Errorf("final wrap-up missing from the reply: %q", resp.Content)
+	}
+}
+
+// The same guarantee on the max-iters exit path: when every iteration carries
+// a tool call and the loop hits its cap, the prose accumulated across those
+// iterations must still come back, not be truncated to the last response.
+func TestRunToolLoop_KeepsProseWhenCappedMidToolChain(t *testing.T) {
+	stub := &stubSkill{toolName: "stub_lookup", reply: "more"}
+	reg := skills.NewRegistry()
+	if err := reg.Register(stub); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	pl := makePipelineWithIters(&mockEngine{}, testutil.NewMockLLM(t), reg, 2)
+
+	// Every iteration emits prose AND a tool call, so the loop runs to the cap.
+	call := 0
+	complete := func(_ context.Context, _ llm.CompletionRequest) (*llm.CompletionResponse, error) {
+		call++
+		return &llm.CompletionResponse{
+			Content:      fmt.Sprintf("progress note %d", call),
+			FinishReason: "tool_calls",
+			ToolCalls: []llm.ToolCall{{
+				ID: fmt.Sprintf("c%d", call), Name: "stub_lookup", Arguments: json.RawMessage(`{"q":"x"}`),
+			}},
+		}, nil
+	}
+	baseReq := llm.CompletionRequest{Model: "mock-model", Tools: []llm.ToolSpec{{Name: "stub_lookup"}}}
+
+	resp, _, err := pl.runToolLoop(context.Background(), baseReq, "standard", classifier.SearchNone, 0, complete, nil, nil, false, nil, nil)
+	if err != nil {
+		t.Fatalf("runToolLoop: %v", err)
+	}
+	// The first iteration's prose must not be lost to the cap.
+	if !strings.Contains(resp.Content, "progress note 1") {
+		t.Errorf("prose from an earlier capped iteration was dropped: %q", resp.Content)
 	}
 }
 

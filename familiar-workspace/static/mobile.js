@@ -1072,7 +1072,14 @@ var reader = resp.body.getReader();
                         if (payload && typeof payload.output_tokens === 'number') outputTokens = payload.output_tokens;
                         if (payload && typeof payload.decode_ms === 'number') decodeMs = payload.decode_ms;
                     } else if (kind === 'error') {
-                        throw new Error((payload && payload.message) || 'stream error');
+                        // An explicit `event: error` frame is a TERMINAL server
+                        // verdict, not a dropped connection. Tag it so the catch
+                        // renders the message instead of routing to the
+                        // transport-drop recovery path (which would swallow it
+                        // behind "Connection lost"). Mirrors chat.js (063e38f).
+                        var ibErr = new Error((payload && payload.message) || 'stream error');
+                        ibErr.inBand = true;
+                        throw ibErr;
                     }
                 };
                 var flushEvent = function () {
@@ -1102,9 +1109,15 @@ var reader = resp.body.getReader();
             } catch (e) {
                 // User hit stop → keep the partial answer; other errors show.
                 if (e.name === 'AbortError') { aborted = true; }
+                else if (e && e.inBand) {
+                    // Terminal server error frame — the turn is definitively
+                    // over and there is nothing to recover, so render the
+                    // actual message rather than polling for a saved reply.
+                    aBubble.textContent = '\u26a0 ' + (e.message || e);
+                }
                 else {
-                    // Keep the partial text and try to pick up the
-                    // completed turn rather than declaring failure.
+                    // Genuine transport drop: keep the partial text and try to
+                    // pick up the completed turn rather than declaring failure.
                     aBubble.textContent = '\u26a0 Connection lost. Checking whether the ' +
                         'turn finished on the server\u2026';
                     recoverInterruptedTurn(state.currentId, aBubble).catch(function () {});

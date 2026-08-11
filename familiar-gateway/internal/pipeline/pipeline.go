@@ -881,21 +881,29 @@ func (p *Pipeline) assembleMessages(
 		// table". Removed entirely.
 	}
 
-	// Prefer engine-provided conversation history, fall back to session.
-	// On the fallback path we hand ctxbuild the full session buffer
-	// (capped by MaxSessionTurns) and let it evict by token budget —
-	// previously we capped at 10 here, which silently truncated to a
-	// fraction of the model's actual context window. ctxbuild's
-	// conversation zone is the single authoritative truncation point;
-	// trivial complexity still gets a tiny window (2 turns) since the
-	// router skipped engine + memory entirely for that tier.
+	// Always build turns from the session buffer. It is the only
+	// source that carries the tool shape (ToolCalls / ToolCallID),
+	// and it is never smaller than the engine's copy: MemEngine
+	// .AssembleContext reads this very same buffer and flattens it
+	// into pb.ConversationTurn, which has only role/content/timestamp.
+	//
+	// Preferring that flattened copy silently erased every tool call
+	// and result from history. Assistant tool-calling turns carry
+	// their payload in ToolCalls with empty Content, so once the
+	// calls were dropped they became "..." stubs in
+	// buildOpenAIMessages, and sanitizeToolHistory then deleted both
+	// the stubs and the now-orphaned tool rows (empty ToolCallID).
+	// The model was left seeing only user turns and its own prose —
+	// so after any interruption it reported work it had actually
+	// completed as never started, and re-guessed slugs it had
+	// already looked up.
+	//
+	// ctxbuild's conversation zone remains the single authoritative
+	// truncation point (capped by MaxSessionTurns); trivial
+	// complexity still gets a tiny window since the router skipped
+	// engine + memory entirely for that tier.
 	var turns []session.Turn
-	if len(convHistory) > 0 {
-		turns = make([]session.Turn, 0, len(convHistory))
-		for _, t := range convHistory {
-			turns = append(turns, session.Turn{Role: t.Role, Content: t.Content})
-		}
-	} else if complexity == "trivial" {
+	if complexity == "trivial" {
 		turns = sess.RecentTurns(2)
 	} else {
 		turns = sess.RecentTurns(0) // 0 = all (capped by MaxSessionTurns)

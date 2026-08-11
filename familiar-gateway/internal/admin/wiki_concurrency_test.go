@@ -364,8 +364,14 @@ func TestSweepResearchEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
-	if n != 1 {
-		t.Errorf("sweep reaped %d pages, want exactly 1 (the aged research page)", n)
+	// SweepResearchEvidence reaps across the WHOLE schema, which every test in
+	// this package shares (wikiStoreForTest does CREATE SCHEMA IF NOT EXISTS,
+	// no per-test truncation) — so a sibling test's aged research pages inflate
+	// this count and an exact `== 1` is fragile on ordering. The per-page
+	// assertions below prove the real contract: the aged research page is
+	// reaped, the fresh one and the normal-book page survive.
+	if n < 1 {
+		t.Errorf("sweep reaped %d pages, want at least the aged research page", n)
 	}
 	// The old research page is gone; the fresh one and the normal-book
 	// page survive.

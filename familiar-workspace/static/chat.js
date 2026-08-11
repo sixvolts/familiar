@@ -1726,8 +1726,14 @@
                         return;
                     }
                     if (kind === "error") {
-                        const msg = (p && p.message) || "stream error";
-                        throw new Error(msg);
+                        // An explicit `event: error` frame is a TERMINAL
+                        // server verdict, not a dropped connection. Tag it so
+                        // the catch renders the message instead of routing to
+                        // the transport-drop recovery path (which would swallow
+                        // it behind "Connection lost — reload to check").
+                        const err = new Error((p && p.message) || "stream error");
+                        err.inBand = true;
+                        throw err;
                     }
                 };
                 while (true) {
@@ -1755,6 +1761,21 @@
             } catch (e) {
                 // User hit stop → keep the partial answer and finalize
                 // normally (fall through). Any other error is surfaced.
+                if (e && e.inBand) {
+                    // Terminal server error frame — the turn is definitively
+                    // over and there is nothing to recover. Render the actual
+                    // message (e.g. "model exploded"), free the composer, and
+                    // do NOT poll for a saved reply (which would swallow it
+                    // behind "Connection lost — reload to check").
+                    dropIndicator();
+                    thinkLabel.textContent = "Thinking";
+                    assistantBubble.classList.remove("chat-msg-streaming");
+                    localState.streaming = false;
+                    localState.currentAbort = null;
+                    setComposerStreaming(false);
+                    renderError(e.message);
+                    return;
+                }
                 if (e.name !== "AbortError") {
                     // Keep whatever streamed so far and try to pick up the
                     // completed turn instead of declaring failure — the

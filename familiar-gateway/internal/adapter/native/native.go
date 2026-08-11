@@ -245,6 +245,7 @@ func (a *Adapter) buildMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/chat", a.handleChat)
 	mux.HandleFunc("POST /api/chat/stop", a.handleStop)
+	mux.HandleFunc("GET /api/chat/status", a.handleTurnStatus)
 	mux.HandleFunc("POST /api/chat/title", a.handleTitle)
 	mux.HandleFunc("GET /api/health", a.handleHealth)
 
@@ -521,6 +522,51 @@ func (a *Adapter) handleStop(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]bool{"stopped": stopped})
+}
+
+// handleTurnStatus reports whether a turn is still running for a session.
+// A detached turn survives the client disconnecting, so a client whose
+// stream died needs to distinguish "still generating, hold on" from
+// "already finished — refetch the conversation". Accepts session_id or
+// conversation_id as the key, matching handleStop, since the console
+// client tracks only the conversation.
+func (a *Adapter) handleTurnStatus(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	key := strings.TrimSpace(q.Get("session_id"))
+	if key == "" {
+		key = strings.TrimSpace(q.Get("conversation_id"))
+	}
+	if key == "" {
+		writeError(w, http.StatusBadRequest, "session_id or conversation_id is required")
+		return
+	}
+
+	senderID := ""
+	if a.sessionReader != nil {
+		if uid, ok := a.sessionReader.UserIDFromRequest(r); ok {
+			senderID = uid
+		}
+	}
+	if senderID == "" {
+		writeError(w, http.StatusUnauthorized, "no user identity: authenticate via the workspace session")
+		return
+	}
+
+	// A missing session is not an error: the turn finished and the
+	// session was reaped, or the key is stale. Either way nothing is
+	// running, which is exactly what the caller needs to know.
+	running := false
+	if sess, ok := a.sessions.Get(key); ok {
+		if sess.UserID() != senderID {
+			log.Printf("[http] status: rejected session %q not owned by %q", key, senderID)
+			writeError(w, http.StatusForbidden, "session not found")
+			return
+		}
+		running = a.pipeline.TurnRunning(sess.ID)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"running": running})
 }
 
 func (a *Adapter) handleStreaming(ctx context.Context, w http.ResponseWriter, sess *session.Session, userMsg string, shardTarget *ShardChatTarget) {

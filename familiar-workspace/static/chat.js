@@ -795,6 +795,69 @@
             root.classList.remove("is-splash");
         }
 
+        // A dropped stream does NOT mean the turn died. Turns are
+        // detached from the request on the server (see pipeline
+        // WithoutCancel + turnHardCap), so after a network blip the model
+        // keeps generating, finishes, and persists the result — the old
+        // behaviour just surfaced "Stream error" and abandoned it, which
+        // made completed work look lost.
+        //
+        // Recover by OBSERVING, never by resending: re-POSTing /api/chat
+        // would run a second concurrent turn against a session that is
+        // still working, duplicate the user message, and re-execute tool
+        // side effects (page writes). So poll the server instead and
+        // reload the thread once the answer lands.
+        async function recoverInterruptedTurn(convID, notice) {
+            if (!convID) return false;
+            // Server caps a turn at 600s; polling past that is pointless.
+            const deadline = Date.now() + 615000;
+            let delay = 1500;
+            while (Date.now() < deadline) {
+                await new Promise((r) => setTimeout(r, delay));
+                delay = Math.min(delay * 1.6, 5000);
+
+                let running = null;
+                try {
+                    const st = await apiJSON(
+                        "/api/chat/status?conversation_id=" + encodeURIComponent(convID));
+                    running = !!(st && st.running);
+                } catch (e) { /* status is advisory — fall back to messages */ }
+
+                // Has a new assistant message landed?
+                try {
+                    const resp = await apiJSON(
+                        "/console/api/conversations/" + encodeURIComponent(convID));
+                    const msgs = (resp && resp.messages) || [];
+                    const last = msgs[msgs.length - 1];
+                    if (last && last.role === "assistant" &&
+                        (last.content || "").trim() !== "") {
+                        await loadConversation(convID);
+                        return true;
+                    }
+                } catch (e) { /* transient — keep waiting */ }
+
+                if (running === false) {
+                    // Turn is done and produced nothing we can show.
+                    if (notice) {
+                        notice.textContent =
+                            "Connection lost and the turn ended without a saved reply. Reload to check.";
+                    }
+                    return false;
+                }
+                if (notice) {
+                    const secs = Math.round((Date.now() - (deadline - 615000)) / 1000);
+                    notice.textContent =
+                        "Connection lost. The turn is still running on the server — waiting for it to finish (" +
+                        secs + "s).";
+                }
+            }
+            if (notice) {
+                notice.textContent =
+                    "Connection lost and the turn did not finish in time. Reload to check for a saved reply.";
+            }
+            return false;
+        }
+
         async function loadConversation(id) {
             exitSplash();
             localState.conversationId = id;
@@ -1323,12 +1386,16 @@
             return wrap;
         }
 
+        // Returns the node so callers that keep waiting on something
+        // (e.g. recovering an interrupted turn) can update the text in
+        // place instead of stacking new error rows.
         function renderError(msg) {
             const e = document.createElement("div");
             e.className = "chat-error";
             e.textContent = msg;
             messagesEl.appendChild(e);
             messagesEl.scrollTop = messagesEl.scrollHeight;
+            return e;
         }
 
         async function send() {
@@ -1689,13 +1756,18 @@
                 // User hit stop → keep the partial answer and finalize
                 // normally (fall through). Any other error is surfaced.
                 if (e.name !== "AbortError") {
-                    renderError("Stream error: " + e.message);
+                    // Keep whatever streamed so far and try to pick up the
+                    // completed turn instead of declaring failure — the
+                    // server is very likely still working on it.
                     dropIndicator();
                     thinkLabel.textContent = "Thinking";
                     assistantBubble.classList.remove("chat-msg-streaming");
                     localState.streaming = false;
                     localState.currentAbort = null;
                     setComposerStreaming(false);
+                    const notice = renderError(
+                        "Connection lost. Checking whether the turn finished on the server\u2026");
+                    recoverInterruptedTurn(localState.conversationId, notice).catch(() => {});
                     return;
                 }
                 aborted = true;

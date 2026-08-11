@@ -629,6 +629,61 @@
         // reloadThread force-refetches the conversation, bypassing
         // openThread's "same id already loaded" short-circuit, so the
         // just-delivered research summary appears.
+        // A dropped stream does not mean the turn died. Server-side a
+        // turn is detached from the request (pipeline WithoutCancel +
+        // turnHardCap), so after a mobile network blip the model keeps
+        // going, finishes, and persists — the old behaviour just printed
+        // a warning in the bubble and abandoned it, making completed work
+        // look lost. Recover by OBSERVING only: re-sending would start a
+        // second concurrent turn, duplicate the user message, and re-run
+        // tool side effects.
+        async function recoverInterruptedTurn(convID, bubble) {
+            if (!convID) return;
+            var started = Date.now();
+            var deadline = started + 615000; // server caps a turn at 600s
+            var delay = 1500;
+            while (Date.now() < deadline) {
+                await new Promise(function (r) { setTimeout(r, delay); });
+                delay = Math.min(delay * 1.6, 5000);
+
+                var running = null;
+                try {
+                    var st = await apiJSON('/api/chat/status?conversation_id=' +
+                        encodeURIComponent(convID));
+                    running = !!(st && st.running);
+                } catch (e) { /* advisory only */ }
+
+                try {
+                    var resp = await apiJSON('/console/api/conversations/' +
+                        encodeURIComponent(convID));
+                    var msgs = (resp && resp.messages) || [];
+                    var last = msgs[msgs.length - 1];
+                    if (last && last.role === 'assistant' &&
+                        (last.content || '').trim() !== '') {
+                        await reloadThread(convID);
+                        return;
+                    }
+                } catch (e) { /* transient — keep waiting */ }
+
+                if (running === false) {
+                    if (bubble) {
+                        bubble.textContent = '\u26a0 Connection lost and the turn ended ' +
+                            'without a saved reply. Pull to refresh to check.';
+                    }
+                    return;
+                }
+                if (bubble) {
+                    bubble.textContent = '\u26a0 Connection lost. The turn is still running ' +
+                        'on the server \u2014 waiting (' +
+                        Math.round((Date.now() - started) / 1000) + 's).';
+                }
+            }
+            if (bubble) {
+                bubble.textContent = '\u26a0 Connection lost and the turn did not finish in ' +
+                    'time. Pull to refresh to check for a saved reply.';
+            }
+        }
+
         async function reloadThread(id) {
             try {
                 var resp = await apiJSON('/console/api/conversations/' + encodeURIComponent(id));
@@ -1047,7 +1102,13 @@ var reader = resp.body.getReader();
             } catch (e) {
                 // User hit stop → keep the partial answer; other errors show.
                 if (e.name === 'AbortError') { aborted = true; }
-                else { aBubble.textContent = '⚠ ' + (e.message || e); }
+                else {
+                    // Keep the partial text and try to pick up the
+                    // completed turn rather than declaring failure.
+                    aBubble.textContent = '\u26a0 Connection lost. Checking whether the ' +
+                        'turn finished on the server\u2026';
+                    recoverInterruptedTurn(state.currentId, aBubble).catch(function () {});
+                }
             } finally {
                 state.streaming = false;
                 state.currentAbort = null;

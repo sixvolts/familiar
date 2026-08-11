@@ -252,6 +252,22 @@ func (p *Pipeline) StopTurn(sessID string) bool {
 	return true
 }
 
+// TurnRunning reports whether a turn is currently in flight for sessID.
+// Detached turns outlive the request that started them, so a client that
+// lost its stream has no way to tell "still working" from "finished, and
+// I missed the result" — this lets it ask instead of guessing.
+func (p *Pipeline) TurnRunning(sessID string) bool {
+	if sessID == "" {
+		return false
+	}
+	v, ok := p.stopReg.Load(sessID)
+	if !ok {
+		return false
+	}
+	st, ok := v.(*turnStopper)
+	return ok && st != nil
+}
+
 // turnHardCap bounds one turn's total generation + tool work once it's
 // detached from the request context. Matches the per-LLM-call ceiling;
 // a turn that blows it is a stuck model, not a slow one.

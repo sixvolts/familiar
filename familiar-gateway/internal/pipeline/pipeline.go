@@ -1743,6 +1743,34 @@ func (p *Pipeline) runToolLoop(
 	// commitAndExtract persists those into the session so subsequent
 	// turns inherit the work.
 	baseLen := len(messages)
+	// Prose the model emits ALONGSIDE tool calls. Such content used to be
+	// fed back to the model (via the echoed assistant turn) but never
+	// returned to the caller, which only ever saw the final iteration's
+	// Content. A model that writes its answer and calls one more tool in
+	// the same response therefore had that answer silently dropped: the
+	// arXiv digest on 2026-08-11 emitted 3777 chars of paper summaries
+	// plus a save_fact call, then closed with a 250-char "Saved to
+	// memory." wrap-up — and only the wrap-up was delivered and
+	// persisted. Streaming clients had already seen the real text go by
+	// via onChunk, so the loss showed up only in non-streaming consumers
+	// (scheduled actions) and in the persisted transcript.
+	var priorContent []string
+	// mergePriorContent folds the accumulated prose into the response
+	// being returned. includeOwn is false when r's own Content was
+	// already accumulated (the max-iters path, where the last response
+	// had tool calls and so went through the accumulate branch).
+	mergePriorContent := func(r *llm.CompletionResponse, includeOwn bool) {
+		if r == nil {
+			return
+		}
+		parts := priorContent
+		if includeOwn && strings.TrimSpace(r.Content) != "" {
+			parts = append(append([]string{}, priorContent...), r.Content)
+		}
+		if len(parts) > 0 {
+			r.Content = strings.Join(parts, "\n\n")
+		}
+	}
 	maxIters := p.maxToolIters
 	if maxIters <= 0 {
 		maxIters = 5
@@ -1867,6 +1895,7 @@ func (p *Pipeline) runToolLoop(
 			if errors.Is(context.Cause(ctx), errUserStopped) {
 				resp.FinishReason = "stopped"
 			}
+			mergePriorContent(resp, true)
 			return resp, messages[baseLen:], nil
 		}
 
@@ -1895,6 +1924,7 @@ func (p *Pipeline) runToolLoop(
 				log.Printf("[tools] iter=%d no tool_calls despite %d tools advertised (content_len=%d tool_shaped=%t)",
 					i, len(advertisedNames), len(resp.Content), looksToolShaped)
 			}
+			mergePriorContent(resp, true)
 			return resp, messages[baseLen:], nil
 		}
 
@@ -1913,6 +1943,11 @@ func (p *Pipeline) runToolLoop(
 			Content:   resp.Content,
 			ToolCalls: resp.ToolCalls,
 		})
+
+		// Keep that prose for the caller too — see priorContent above.
+		if strings.TrimSpace(resp.Content) != "" {
+			priorContent = append(priorContent, resp.Content)
+		}
 
 		for _, tc := range resp.ToolCalls {
 			// Shard allowlist enforcement. A non-nil allowlist restricts
@@ -2038,6 +2073,9 @@ func (p *Pipeline) runToolLoop(
 		lastResp.OutputTokens = accumOut
 		lastResp.DecodeMs = accumDecodeMs
 	}
+	// includeOwn=false: lastResp had tool calls, so its Content is
+	// already the final element of priorContent.
+	mergePriorContent(lastResp, false)
 	return lastResp, messages[baseLen:], nil
 }
 

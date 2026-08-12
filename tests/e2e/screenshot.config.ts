@@ -13,6 +13,8 @@ export default defineConfig({
     workers: 1,
     timeout: 180_000,
     expect: { timeout: 10_000 },
+    // See playwright.config.ts — a stray .only must not silently narrow CI.
+    forbidOnly: !!process.env.CI,
     reporter: "list",
     projects: [
         {

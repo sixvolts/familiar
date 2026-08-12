@@ -22,9 +22,37 @@ git fetch origin || fail "git fetch failed"
 git reset --hard origin/main || fail "git reset to origin/main failed"
 NEW_HEAD=$(git rev-parse HEAD)
 
+export PATH="$PATH:/usr/local/go/bin"
+
+# Test BEFORE building or restarting. Until this point the running services
+# still hold the previous binary, so bailing here leaves production untouched —
+# a bad commit on main never reaches the service.
+#
+# `make test` is the hermetic suite: no DSN, so it CANNOT touch a database.
+# That matters here — the DB-backed tests mutate whatever FAMILIAR_TEST_DSN
+# points at (they TRUNCATE), so running them against the production DSN would
+# destroy live data. They are opt-in below and only against a DSN you have
+# explicitly designated as throwaway.
+step "Running hermetic test suite..."
+cd "$REPO"
+make test || fail "tests failed — NOT deploying (services still on the previous build)"
+step "Hermetic tests passed"
+
+# Opt-in DB-backed coverage. Set FAMILIAR_DEPLOY_TEST_DSN to a THROWAWAY
+# database/schema — never the production one. Unset = skipped with a notice, so
+# the gap is visible rather than silent.
+if [[ -n "${FAMILIAR_DEPLOY_TEST_DSN:-}" ]]; then
+    step "Running DB-backed tests against FAMILIAR_DEPLOY_TEST_DSN..."
+    FAMILIAR_TEST_DSN="$FAMILIAR_DEPLOY_TEST_DSN" make test-integration \
+        || fail "DB-backed tests failed — NOT deploying"
+    step "DB-backed tests passed"
+else
+    warn "FAMILIAR_DEPLOY_TEST_DSN unset — DB-backed tests skipped (~161 tests)."
+    warn "Set it to a THROWAWAY database to cover them; never the production DSN."
+fi
+
 # Build gateway (the engine is now in-process Go — no separate build)
 step "Building gateway..."
-export PATH="$PATH:/usr/local/go/bin"
 cd "$GATEWAY"
 go build -o familiar-gateway ./cmd/gateway/ || fail "gateway build failed"
 step "Gateway built"
@@ -76,6 +104,26 @@ WS_STATUS=$(systemctl is-active familiar-workspace || true)
 if [[ "$GW_STATUS" == "active" && "$WS_STATUS" == "active" ]]; then
     step "Gateway running"
     step "Workspace running"
+
+    # systemctl is-active only proves systemd started the process — it stays
+    # "active" for a gateway that is failing every request. Probe the HTTP
+    # surface too, with a few retries to cover a slow boot.
+    GW_HEALTH_URL="${FAMILIAR_HEALTH_URL:-http://127.0.0.1:8000/api/health}"
+    HEALTH_OK=false
+    for _ in 1 2 3 4 5; do
+        if curl -fsS -m 5 "$GW_HEALTH_URL" >/dev/null 2>&1; then
+            HEALTH_OK=true
+            break
+        fi
+        sleep 2
+    done
+    if [[ "$HEALTH_OK" == true ]]; then
+        step "Gateway answering on $GW_HEALTH_URL"
+    else
+        journalctl -u familiar-gateway --no-pager -n 20
+        fail "Gateway process is active but not answering $GW_HEALTH_URL"
+    fi
+
     echo ""
     journalctl -u familiar-gateway --no-pager -n 5
 else

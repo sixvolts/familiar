@@ -13,6 +13,9 @@ export default defineConfig({
     workers: 1,
     timeout: 60_000,
     expect: { timeout: 5_000 },
+    // A committed test.only would silently shrink the CI run to one test and
+    // still report green. Fail the run instead; locally .only stays usable.
+    forbidOnly: !!process.env.CI,
     retries: process.env.CI ? 2 : 0,
     reporter: process.env.CI
         ? [["github"], ["html", { open: "never" }]]

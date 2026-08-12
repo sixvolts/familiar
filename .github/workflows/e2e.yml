@@ -53,12 +53,39 @@ jobs:
         with:
           go-version: '1.26.x'
           cache-dependency-path: familiar-gateway/go.sum
-      - name: gateway unit + integration tests
+      # Formatting + vet are free (both modules are clean today) and stop
+      # style/correctness drift from reaching main, where deploys pull from.
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l familiar-gateway familiar-workspace)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:"; echo "$unformatted"; exit 1
+          fi
+      - name: go vet
+        run: |
+          (cd familiar-gateway && go vet ./...)
+          (cd familiar-workspace && go vet ./...)
+
+      # Route through the Makefile so CI and local runs share ONE definition
+      # of "the Go suite". That buys two things a bare `go test ./...` misses:
+      #   -count=1 — some tests read files OUTSIDE their module (the shipped
+      #     prompts/ guards); Go's test cache does not key on those, and
+      #     setup-go restores GOCACHE, so a prompt-only change could replay a
+      #     stale PASS.
+      #   guard-dsn — refuses to run without FAMILIAR_TEST_DSN instead of
+      #     letting ~161 DB-backed tests skip themselves into a green run.
+      - name: gateway + workspace tests (via make, -count=1 + guard-dsn)
+        run: make test-integration
+
+      # guard-dsn proves the DSN is SET; this proves the DB-backed tests
+      # actually RAN. A canary that cannot pass by skipping: if the DB were
+      # unreachable this test would skip, and `--- PASS` would be absent.
+      - name: verify DB-backed tests actually ran
         working-directory: familiar-gateway
-        run: go test ./...
-      - name: workspace tests
-        working-directory: familiar-workspace
-        run: go test ./...
+        run: |
+          go test -count=1 -run TestMigrateFreshDatabase -v ./internal/db/ \
+            | tee /dev/stderr | grep -q '^--- PASS: TestMigrateFreshDatabase' \
+            || { echo "DB-backed canary did not run — integration coverage is not being exercised"; exit 1; }
 
   e2e:
     runs-on: ubuntu-latest
@@ -118,8 +145,12 @@ jobs:
         working-directory: tests/e2e
         run: npm test
 
+      # always(), not failure(): CI retries each test twice, so a test that
+      # failed once and passed on retry leaves the job green — and that is
+      # exactly the run whose trace you want. `trace: on-first-retry` captured
+      # it; failure() was throwing it away.
       - uses: actions/upload-artifact@v4
-        if: failure()
+        if: always()
         with:
           name: playwright-artifacts
           path: |

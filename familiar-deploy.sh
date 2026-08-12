@@ -24,31 +24,81 @@ NEW_HEAD=$(git rev-parse HEAD)
 
 export PATH="$PATH:/usr/local/go/bin"
 
-# Test BEFORE building or restarting. Until this point the running services
-# still hold the previous binary, so bailing here leaves production untouched —
-# a bad commit on main never reaches the service.
+# ── Gate: verify this commit before it reaches the service ──────────────
 #
-# `make test` is the hermetic suite: no DSN, so it CANNOT touch a database.
-# That matters here — the DB-backed tests mutate whatever FAMILIAR_TEST_DSN
-# points at (they TRUNCATE), so running them against the production DSN would
-# destroy live data. They are opt-in below and only against a DSN you have
-# explicitly designated as throwaway.
-step "Running hermetic test suite..."
-cd "$REPO"
-make test || fail "tests failed — NOT deploying (services still on the previous build)"
-step "Hermetic tests passed"
+# This runs ON THE PRODUCTION BOX, which shapes the whole design: there is no
+# throwaway database here, and the DB-backed tests TRUNCATE whatever
+# FAMILIAR_TEST_DSN points at. So we never run them here — that is CI's job,
+# where an ephemeral pgvector service exists purely to be mutated.
+#
+# Preferred gate: ASK CI. Every push to main runs the full suite (including the
+# ~161 DB-backed tests) against that disposable database. Consulting the result
+# for this exact SHA is both stronger coverage and cheaper than anything we can
+# do locally — no prod CPU spent, no data at risk.
+#
+# Fallback: if CI can't be consulted (gh missing/unauthenticated, no run for
+# this SHA, or the run is still going), fall back to the hermetic suite. It
+# takes no DSN, so it cannot touch a database — it is safe here by construction,
+# just narrower than CI.
+#
+# Either way the gate runs BEFORE the build and restart, so the services keep
+# serving the previous binary if it fails.
+ci_conclusion_for() {
+    # Echoes: success | failure | pending | unknown
+    local sha="$1"
+    command -v gh >/dev/null 2>&1 || { echo unknown; return; }
+    gh auth status >/dev/null 2>&1 || { echo unknown; return; }
+    local out
+    out=$(gh run list --commit "$sha" --json status,conclusion --limit 20 2>/dev/null) || { echo unknown; return; }
+    [[ -n "$out" && "$out" != "[]" ]] || { echo unknown; return; }
+    # Any run still going → pending. Any concluded run that isn't success or
+    # skipped → failure. Otherwise success.
+    if grep -q '"status":"\(queued\|in_progress\|waiting\|requested\|pending\)"' <<<"$out"; then
+        echo pending; return
+    fi
+    if grep -q '"conclusion":"\(failure\|timed_out\|cancelled\|startup_failure\|action_required\)"' <<<"$out"; then
+        echo failure; return
+    fi
+    grep -q '"conclusion":"success"' <<<"$out" && echo success || echo unknown
+}
 
-# Opt-in DB-backed coverage. Set FAMILIAR_DEPLOY_TEST_DSN to a THROWAWAY
-# database/schema — never the production one. Unset = skipped with a notice, so
-# the gap is visible rather than silent.
-if [[ -n "${FAMILIAR_DEPLOY_TEST_DSN:-}" ]]; then
-    step "Running DB-backed tests against FAMILIAR_DEPLOY_TEST_DSN..."
-    FAMILIAR_TEST_DSN="$FAMILIAR_DEPLOY_TEST_DSN" make test-integration \
-        || fail "DB-backed tests failed — NOT deploying"
-    step "DB-backed tests passed"
-else
-    warn "FAMILIAR_DEPLOY_TEST_DSN unset — DB-backed tests skipped (~161 tests)."
-    warn "Set it to a THROWAWAY database to cover them; never the production DSN."
+CI_WAIT="${FAMILIAR_DEPLOY_CI_WAIT:-600}"   # seconds to wait on an in-flight run
+GATE_PASSED=false
+step "Checking CI for ${NEW_HEAD:0:8}..."
+DEADLINE=$(( $(date +%s) + CI_WAIT ))
+while :; do
+    CI_STATE=$(ci_conclusion_for "$NEW_HEAD")
+    case "$CI_STATE" in
+        success)
+            step "CI green for ${NEW_HEAD:0:8} (full suite incl. DB-backed tests)"
+            GATE_PASSED=true
+            break
+            ;;
+        failure)
+            fail "CI FAILED for ${NEW_HEAD:0:8} — NOT deploying (services still on the previous build)"
+            ;;
+        pending)
+            if (( $(date +%s) >= DEADLINE )); then
+                warn "CI still running after ${CI_WAIT}s — falling back to local tests"
+                break
+            fi
+            echo "  CI in progress; waiting…"
+            sleep 15
+            ;;
+        *)
+            warn "CI status unavailable (gh missing/unauthenticated, or no run for this SHA)"
+            break
+            ;;
+    esac
+done
+
+if [[ "$GATE_PASSED" != true ]]; then
+    # Hermetic only: no DSN is passed, so this cannot reach any database.
+    warn "Falling back to the hermetic suite — narrower than CI (~161 DB-backed tests skip)"
+    step "Running hermetic test suite..."
+    cd "$REPO"
+    make test || fail "tests failed — NOT deploying (services still on the previous build)"
+    step "Hermetic tests passed"
 fi
 
 # Build gateway (the engine is now in-process Go — no separate build)

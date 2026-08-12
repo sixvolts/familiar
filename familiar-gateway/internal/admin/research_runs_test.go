@@ -41,6 +41,13 @@ func runStoreForTest(t *testing.T) (*ResearchRunStore, string) {
 	if err := db.Migrate(ctx, pool); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
+	// research_run_test is created IF NOT EXISTS and never dropped, so rows
+	// from previous runs persist — including runs left ACTIVE, which the next
+	// run's FailOrphaned sweeps. Tests that count or list runs then depend on
+	// what a sibling happened to leave behind. Start each run from empty.
+	if _, err := pool.ExecContext(ctx, `TRUNCATE research_runs CASCADE`); err != nil {
+		t.Fatalf("truncate research_runs: %v", err)
+	}
 	if _, err := pool.ExecContext(ctx, `
 		INSERT INTO users (id, display_name, status, role)
 		VALUES ('ru', 'Run User', 'approved', 'user') ON CONFLICT (id) DO NOTHING`); err != nil {

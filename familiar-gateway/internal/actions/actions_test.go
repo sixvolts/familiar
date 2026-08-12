@@ -60,6 +60,16 @@ func storeForTest(t *testing.T) *Store {
 	if err := db.Migrate(ctx, pool); err != nil {
 		t.Fatalf("db.Migrate: %v", err)
 	}
+	// The actions_test schema is created IF NOT EXISTS and outlives the run,
+	// so without this every past test's rows accumulate — and they are not
+	// inert: Runner.Start reloads ALL enabled actions, so a thousand stale
+	// cron/page_saved rows fire through each new test's fake pipeline. That
+	// both slows the suite and lets a sibling's leftovers satisfy (or break)
+	// an assertion. Truncate to make each run start from a known-empty store.
+	if _, err := pool.ExecContext(ctx,
+		`TRUNCATE scheduled_action_runs, scheduled_actions CASCADE`); err != nil {
+		t.Fatalf("truncate actions tables: %v", err)
+	}
 
 	s, err := NewStore(pool)
 	if err != nil {

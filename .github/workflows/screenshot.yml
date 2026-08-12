@@ -12,11 +12,12 @@
 
 name: screenshot
 
+# BRING-UP STATE (2026-08-12): the push trigger is disabled. This workflow has
+# `contents: write` and commits a regenerated screenshot back to the repo, and
+# any run it creates against a main SHA is visible to zuul's deploy gate. Both
+# are things to re-enable deliberately, not to discover by surprise the first
+# time Actions is switched on. Manual dispatch only for now.
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'familiar-workspace/static/**'
   workflow_dispatch:
 
 concurrency:

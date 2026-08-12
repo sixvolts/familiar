@@ -19,10 +19,17 @@
 
 name: e2e
 
+# BRING-UP STATE (2026-08-12): main and pull_request are deliberately NOT
+# triggers. zuul deploy gate reads run conclusions for the SHA it just pulled
+# and HARD-ABORTS on a failure, so a red run against a main SHA would block
+# every deploy. Until the icecube runner is green, only an explicit dispatch or
+# a push to a ci/** branch runs this.
+#
+# Restore `push: branches: [main]` and `pull_request:` once icecube is green
+# (ci-rollout-plan.md step 5).
 on:
   push:
-    branches: [main]
-  pull_request:
+    branches: ['ci/**']
   workflow_dispatch:
 
 concurrency:
@@ -30,23 +37,19 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  FAMILIAR_TEST_DSN: postgres://postgres:test@localhost:5432/postgres?sslmode=disable
+  # icecube owns this value: the runner uses a persistent local Postgres, not a
+  # service container (unavailable on a self-hosted macOS runner). Set the repo
+  # variable FAMILIAR_TEST_DSN to match that instance; the literal below is only
+  # a fallback so the workflow stays runnable without it.
+  FAMILIAR_TEST_DSN: ${{ vars.FAMILIAR_TEST_DSN || 'postgres://postgres:test@localhost:5432/postgres?sslmode=disable' }}
 
 jobs:
   go-test:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macos, arm64, icecube, mlx]
     timeout-minutes: 15
-    services:
-      postgres:
-        image: pgvector/pgvector:pg16
-        env:
-          POSTGRES_PASSWORD: test
-        ports: ['5432:5432']
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
+    # No `services:` block: service containers are Linux-runner only and do
+    # not work on a self-hosted macOS runner. Postgres is a persistent
+    # launchd-managed instance on the box; FAMILIAR_TEST_DSN points at it.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -88,19 +91,11 @@ jobs:
             || { echo "DB-backed canary did not run — integration coverage is not being exercised"; exit 1; }
 
   e2e:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macos, arm64, icecube, mlx]
     timeout-minutes: 20
-    services:
-      postgres:
-        image: pgvector/pgvector:pg16
-        env:
-          POSTGRES_PASSWORD: test
-        ports: ['5432:5432']
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
+    # No `services:` block: service containers are Linux-runner only and do
+    # not work on a self-hosted macOS runner. Postgres is a persistent
+    # launchd-managed instance on the box; FAMILIAR_TEST_DSN points at it.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -120,19 +115,20 @@ jobs:
         run: npm ci
 
       # Cache the Playwright browser download keyed on the lockfile's
-      # Playwright version — install --with-deps still runs to cover
-      # OS packages, but skips the ~150MB browser fetch on a hit.
+      # Playwright version. --with-deps is dropped: it only installs OS
+      # packages on Ubuntu. On a persistent box the browser usually survives
+      # between jobs anyway, so this cache is belt-and-braces.
       - name: resolve playwright version
         id: pw
         working-directory: tests/e2e
         run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v4
         with:
-          path: ~/.cache/ms-playwright
+          path: ~/Library/Caches/ms-playwright
           key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
       - name: install chromium
         working-directory: tests/e2e
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install chromium
 
       # Fail fast with a readable compile error; the fixture would
       # otherwise surface it wrapped in a boot-timeout message.

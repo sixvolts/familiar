@@ -49,7 +49,12 @@ ci_conclusion_for() {
     command -v gh >/dev/null 2>&1 || { echo unknown; return; }
     gh auth status >/dev/null 2>&1 || { echo unknown; return; }
     local out
-    out=$(gh run list --commit "$sha" --json status,conclusion --limit 20 2>/dev/null) || { echo unknown; return; }
+    # Scope to the ONE workflow that constitutes the gate. Without this the
+    # query returns every run for the SHA, so an unrelated workflow (the
+    # screenshot job, say) failing would hard-abort a deploy, and an unrelated
+    # workflow passing could satisfy the gate while the real suite never ran.
+    out=$(gh run list --commit "$sha" --workflow "$GATE_WORKFLOW" \
+            --json status,conclusion --limit 20 2>/dev/null) || { echo unknown; return; }
     [[ -n "$out" && "$out" != "[]" ]] || { echo unknown; return; }
     # Any run still going → pending. Any concluded run that isn't success or
     # skipped → failure. Otherwise success.
@@ -62,6 +67,7 @@ ci_conclusion_for() {
     grep -q '"conclusion":"success"' <<<"$out" && echo success || echo unknown
 }
 
+GATE_WORKFLOW="${FAMILIAR_DEPLOY_CI_WORKFLOW:-e2e.yml}"  # the workflow that gates
 CI_WAIT="${FAMILIAR_DEPLOY_CI_WAIT:-600}"   # seconds to wait on an in-flight run
 GATE_PASSED=false
 step "Checking CI for ${NEW_HEAD:0:8}..."

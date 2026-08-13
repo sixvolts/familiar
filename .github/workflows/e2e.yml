@@ -51,8 +51,8 @@ jobs:
     # not work on a self-hosted macOS runner. Postgres is a persistent
     # launchd-managed instance on the box; FAMILIAR_TEST_DSN points at it.
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.26.x'
           cache-dependency-path: familiar-gateway/go.sum
@@ -97,14 +97,14 @@ jobs:
     # not work on a self-hosted macOS runner. Postgres is a persistent
     # launchd-managed instance on the box; FAMILIAR_TEST_DSN points at it.
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.26.x'
           cache-dependency-path: |
             familiar-gateway/go.sum
             familiar-workspace/go.sum
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
           cache: npm
@@ -122,7 +122,7 @@ jobs:
         id: pw
         working-directory: tests/e2e
         run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/Library/Caches/ms-playwright
           key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
@@ -145,7 +145,7 @@ jobs:
       # failed once and passed on retry leaves the job green — and that is
       # exactly the run whose trace you want. `trace: on-first-retry` captured
       # it; failure() was throwing it away.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: playwright-artifacts

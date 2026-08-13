@@ -43,6 +43,18 @@ func wikiStoreForTest(t *testing.T) (*WikiStore, string) {
 	if err := db.Migrate(ctx, pool); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
+	// wiki_conc_test is created IF NOT EXISTS and never dropped, so books and
+	// pages from previous runs persist and every test in this package shares
+	// them. Anything that counts rows across the schema — SweepResearchEvidence
+	// most of all, since it reaps schema-wide — then depends on what a sibling
+	// happened to leave behind. Start each run from empty. Same fix 32346f9
+	// applied to research_runs and actions; this helper was missed.
+	// CASCADE reaches wiki_pages and the rest of the book-referencing tables;
+	// users is not referenced by books in that direction, so the seed below
+	// still stands.
+	if _, err := pool.ExecContext(ctx, `TRUNCATE books CASCADE`); err != nil {
+		t.Fatalf("truncate books: %v", err)
+	}
 	if _, err := pool.ExecContext(ctx, `
 		INSERT INTO users (id, display_name, status, role)
 		VALUES ('wu', 'Wiki User', 'approved', 'user') ON CONFLICT (id) DO NOTHING`); err != nil {
@@ -364,14 +376,14 @@ func TestSweepResearchEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
-	// SweepResearchEvidence reaps across the WHOLE schema, which every test in
-	// this package shares (wikiStoreForTest does CREATE SCHEMA IF NOT EXISTS,
-	// no per-test truncation) — so a sibling test's aged research pages inflate
-	// this count and an exact `== 1` is fragile on ordering. The per-page
-	// assertions below prove the real contract: the aged research page is
-	// reaped, the fresh one and the normal-book page survive.
-	if n < 1 {
-		t.Errorf("sweep reaped %d pages, want at least the aged research page", n)
+	// Exact count, restored. This was relaxed to `n < 1` in 73abb45 because the
+	// shared schema let a sibling test's aged research pages inflate the number;
+	// wikiStoreForTest now truncates, so this test sees only its own rows and
+	// the precise contract is testable again. `n < 1` passed while asserting
+	// strictly less: it could not distinguish reaping one page from reaping the
+	// whole schema.
+	if n != 1 {
+		t.Errorf("sweep reaped %d pages, want exactly 1 (the aged research page)", n)
 	}
 	// The old research page is gone; the fresh one and the normal-book
 	// page survive.

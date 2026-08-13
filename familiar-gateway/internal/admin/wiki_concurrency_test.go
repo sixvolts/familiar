@@ -334,6 +334,50 @@ func TestEnsureResearchBook_PerUserAndHidden(t *testing.T) {
 	}
 }
 
+// wikiStoreForTest must hand every run an empty schema. This asserts that
+// contract directly instead of relying on a sibling test to leave pollution
+// behind, which is what made the old ordering-dependent failure so slippery:
+// each run's aged research page is consumed by its own sweep, so aged pages do
+// not accumulate on their own and TestSweepResearchEvidence passes with or
+// without the TRUNCATE. That meant nothing proved the isolation was
+// load-bearing, and a silent removal would go unnoticed.
+//
+// Two calls in one test, so it holds regardless of run order or -shuffle: seed
+// a book through the first store, then assert the second sees a clean schema.
+// Delete the TRUNCATE in the helper and this fails.
+func TestWikiStoreForTestTruncatesBetweenRuns(t *testing.T) {
+	first, user := wikiStoreForTest(t)
+	ctx := context.Background()
+
+	if _, err := first.CreateBook(ctx, user, "Leftover", "should not survive", ""); err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+	if books, err := first.ListBooks(ctx, user, true); err != nil {
+		t.Fatalf("ListBooks (first): %v", err)
+	} else if len(books) == 0 {
+		t.Fatal("seeded book absent from the first store — test cannot prove anything")
+	}
+
+	second, user2 := wikiStoreForTest(t)
+	books, err := second.ListBooks(ctx, user2, true)
+	if err != nil {
+		t.Fatalf("ListBooks (second): %v", err)
+	}
+	if len(books) != 0 {
+		names := make([]string, 0, len(books))
+		for _, b := range books {
+			names = append(names, b.Slug)
+		}
+		t.Errorf("second store saw %d book(s) %v, want 0 — wikiStoreForTest is not truncating", len(books), names)
+	}
+
+	// The seed survives the truncate: books.created_by points AT users, and
+	// TRUNCATE CASCADE follows inbound references only, so users is untouched.
+	if _, err := second.CreateBook(ctx, user2, "After", "seed still valid", ""); err != nil {
+		t.Fatalf("CreateBook after truncate (user seed lost?): %v", err)
+	}
+}
+
 // SweepResearchEvidence reaps hidden research-book pages older than the
 // retention window while leaving fresh ones and pages in ordinary books
 // untouched — the only bound on the hidden books' growth (§6.6).

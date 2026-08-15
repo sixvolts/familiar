@@ -68,6 +68,12 @@ jobs:
     # launchd-managed instance on the box; FAMILIAR_TEST_DSN points at it.
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # setup-go and setup-node stay, and are NOT redundant on a self-hosted
+      # box. They pin the toolchain rather than inheriting whatever Homebrew
+      # last upgraded to: icecube currently has node v26.7.0 system-wide while
+      # this suite is validated on 22, so dropping setup-node would silently
+      # move Playwright a major version. They also make the toolchain
+      # independent of the runner's non-login PATH.
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.26.x'
@@ -121,17 +127,16 @@ jobs:
         working-directory: tests/e2e
         run: npm ci
 
-      # Cache the browser download keyed on the lockfile's Playwright version.
-      # --with-deps is Linux-only sugar and is omitted deliberately; the macOS
-      # cache path differs from the Linux one.
-      - name: resolve playwright version
-        id: pw
-        working-directory: tests/e2e
-        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ~/Library/Caches/ms-playwright
-          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
+      # No browser cache action. On a GitHub-hosted runner the machine is new
+      # every time, so caching ~150MB of chromium is a real saving. This runner
+      # is a persistent Mac: ~/Library/Caches/ms-playwright survives between
+      # jobs on its own (the --ephemeral flag re-registers the runner, it does
+      # not wipe the user's home), so the cache action bought nothing and cost
+      # an action to allowlist, pin and maintain. `playwright install` is a
+      # no-op when the browser is already present.
+      #
+      # --with-deps is also omitted deliberately: it only installs OS packages
+      # on Ubuntu.
       - name: install chromium
         working-directory: tests/e2e
         run: npx playwright install chromium

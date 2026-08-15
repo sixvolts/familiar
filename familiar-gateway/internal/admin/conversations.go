@@ -512,6 +512,24 @@ func (s *ConversationStore) AppendIntermediateMessages(ctx context.Context, conv
 	if _, err := uuid.Parse(conversationID); err != nil {
 		return nil
 	}
+	// Shape is not existence. The pipeline passes sess.ID here, which for a
+	// console chat IS the conversation id, but a scheduled action gets a
+	// freshly generated session UUID that was never a conversation row — so
+	// it passes the uuid.Parse guard above and then trips
+	// messages_conversation_id_fkey on every single run. That was logged and
+	// swallowed ("continuing"), so it never surfaced, but it meant a failed
+	// transaction per action run and it drowns out FK errors that would
+	// matter. Actions persist their output through the delivery path instead,
+	// so there is nothing to write here; skip quietly, as with a non-UUID id.
+	var exists bool
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM conversations WHERE id = $1::uuid)`,
+		conversationID).Scan(&exists); err != nil {
+		return fmt.Errorf("messages: check conversation: %w", err)
+	}
+	if !exists {
+		return nil
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("messages: begin tx: %w", err)

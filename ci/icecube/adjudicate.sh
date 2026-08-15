@@ -47,13 +47,14 @@ TIMEOUT_SECS=600
 # The raw response is written to the artifacts dir, and its modelUsage block
 # records what actually answered, so a verdict can always be traced to a model.
 MODEL="${FAMILIAR_ADJUDICATOR_MODEL:-claude-sonnet-5}"
-MAX_TURNS=30
+MAX_TURNS=40
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --artifacts) ARTIFACTS="$2"; shift 2 ;;
         --enforce)   ENFORCE=true; shift ;;
         --timeout)   TIMEOUT_SECS="$2"; shift 2 ;;
+        --max-turns) MAX_TURNS="$2"; shift 2 ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
@@ -124,11 +125,29 @@ reported success. Your ONLY job is to decide whether that pass is REAL.
 You have read-only access. You cannot edit code, and you must not try.
 
 You are in the repo root. The artifacts are at the absolute path given
-after this prompt; read them from there. Read these files:
-  manifest.json  — what was actually configured and what each tier counted
-  tier1.json / tier2.json — "go test -json" output
-  tier3.json / tier4.json — Playwright JSON reporter output
-  tier3.raw / tier4.raw   — human-readable run logs
+after this prompt.
+
+READ manifest.json FIRST, and expect it to be enough. It is ~2KB of
+derived summary, and every checklist item below is answerable from its
+fields alone. On most runs it is the only artifact you need to open.
+
+DO NOT read tier1.json or tier2.json. Each is a raw "go test -json"
+stream of roughly 1.1MB, about a thousand test events apiece. Reading
+them is what turned a previous run into 1.3 million tokens and a
+max-turns failure that produced no verdict at all. tier3.json and
+tier4.json are Playwright reporter output at ~150KB and are also not
+worth opening whole.
+
+If, and only if, a specific manifest claim looks wrong and you need to
+corroborate it, grep that ONE pattern instead of opening the file:
+  grep -c '"Action":"fail"' <artifacts>/tier2.json
+  grep -m5 'TestMigrateFreshDatabase' <artifacts>/tier2.json
+tier3.raw / tier4.raw are ~15KB human-readable logs, safe to read whole
+if you need run detail.
+
+Budget: reach a verdict in under ten tool calls. Ranging over the repo is
+not part of the job. You are judging a manifest against a checklist, with
+the git diff in item 3 as the single exception.
 
 Work through this checklist. Each item is a false green this project has
 actually produced, so treat each as a live hypothesis, not a formality:
@@ -204,7 +223,7 @@ ARTIFACTS DIRECTORY: $ARTIFACTS" \
         --max-turns "$MAX_TURNS" \
         --model "$MODEL" \
         --allowedTools "Read" "Glob" "Grep" \
-                       "Bash(cat:*)" "Bash(ls:*)" "Bash(head:*)" \
+                       "Bash(ls:*)" "Bash(head:*)" \
                        "Bash(tail:*)" "Bash(wc:*)" "Bash(git log:*)" \
                        "Bash(git show:*)" "Bash(git diff:*)"
 ) > "$RAW" 2>"$ARTIFACTS/adjudicator.err" &

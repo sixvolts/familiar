@@ -81,7 +81,18 @@ while :; do
             break
             ;;
         failure)
-            fail "CI FAILED for ${NEW_HEAD:0:8} — NOT deploying (services still on the previous build)"
+            # Break-glass. Without it, the first red run on main leaves no way
+            # to deploy anything — including the fix for whatever turned it
+            # red. Loud on purpose: this is the one path that ships code CI
+            # has actively rejected, so it must be a deliberate act, never a
+            # default. Everything else (pending timeout, unknown) already
+            # degrades to the local suite on its own.
+            if [[ -n "${FAMILIAR_DEPLOY_ALLOW_FAILED_CI:-}" ]]; then
+                warn "CI FAILED for ${NEW_HEAD:0:8} — OVERRIDDEN via FAMILIAR_DEPLOY_ALLOW_FAILED_CI"
+                warn "Deploying code that CI rejected. Running the local suite as a floor."
+                break
+            fi
+            fail "CI FAILED for ${NEW_HEAD:0:8} — NOT deploying (services still on the previous build). Override: FAMILIAR_DEPLOY_ALLOW_FAILED_CI=1 ./familiar-deploy.sh"
             ;;
         pending)
             if (( $(date +%s) >= DEADLINE )); then

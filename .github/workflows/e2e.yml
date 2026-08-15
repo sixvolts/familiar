@@ -163,6 +163,15 @@ jobs:
       # Flip to --enforce once its verdicts have a track record.
       - name: tier 5 — adjudicate
         if: always()
+        env:
+          # The native installer puts the launcher at ~/.local/bin/claude,
+          # which is NOT on a non-login shell PATH — and adjudicate.sh gates
+          # on `command -v claude`, so without this it reports
+          # adjudicator-unavailable however well the install went. Note the
+          # runner user needs its OWN install and its OWN credentials: a
+          # binary in another user's home is unreadable (mode 700), and
+          # Claude Code credentials are per-user.
+          PATH: /Users/familiar-runner/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin
         run: ci/icecube/adjudicate.sh --artifacts "$ARTIFACTS" --timeout 600
 
       # always(), not failure(): retries can leave a job green while hiding

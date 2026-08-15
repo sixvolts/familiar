@@ -31,6 +31,22 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ARTIFACTS=""
 ENFORCE=false
 TIMEOUT_SECS=600
+# Pin the model explicitly. Left unset, `claude -p` inherits whatever the CLI
+# default happens to be that week (it resolved to claude-sonnet-5 when this was
+# written) — so a CLI update could silently change both the cost and the
+# judgement of a step whose entire job is deciding whether a green run can be
+# trusted. Nothing in the repo would record that it had changed.
+#
+# Sonnet rather than Haiku: the §5.3 check is spotting an assertion that was
+# weakened rather than fixed, which means reading a diff for intent, and that is
+# where a stronger model earns its cost. Sonnet rather than Opus: this is
+# checklist-shaped reading, not deep reasoning.
+#
+# Note this pins WHICH model, not determinism — `claude -p` exposes no
+# temperature control, so two runs over identical artifacts can still differ.
+# The raw response is written to the artifacts dir, and its modelUsage block
+# records what actually answered, so a verdict can always be traced to a model.
+MODEL="${FAMILIAR_ADJUDICATOR_MODEL:-claude-sonnet-5}"
 MAX_TURNS=30
 
 while [[ $# -gt 0 ]]; do
@@ -186,6 +202,7 @@ RAW="$ARTIFACTS/adjudicator-raw.json"
 ARTIFACTS DIRECTORY: $ARTIFACTS" \
         --output-format json \
         --max-turns "$MAX_TURNS" \
+        --model "$MODEL" \
         --allowedTools "Read" "Glob" "Grep" \
                        "Bash(cat:*)" "Bash(ls:*)" "Bash(head:*)" \
                        "Bash(tail:*)" "Bash(wc:*)" "Bash(git log:*)" \

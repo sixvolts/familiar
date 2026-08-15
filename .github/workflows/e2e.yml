@@ -30,17 +30,20 @@
 
 name: e2e
 
-# BRING-UP STATE (2026-08-12): main and pull_request are deliberately NOT
-# triggers. zuul deploy gate reads run conclusions for the SHA it just pulled
-# and HARD-ABORTS on a failure, so a red run against a main SHA would block
-# every deploy. Until the icecube runner is green, only an explicit dispatch or
-# a push to a ci/** branch runs this.
+# Bring-up complete (2026-08-15). main and pull_request were held back while
+# the icecube runner was being stood up, because zuul's deploy gate reads run
+# conclusions for the SHA it just pulled and hard-aborts on a failure, so a red
+# run against a main SHA would have blocked every deploy with no way out. Both
+# preconditions are now met: the suite has gone green repeatedly on icecube,
+# and FAMILIAR_DEPLOY_ALLOW_FAILED_CI exists as a break-glass.
 #
-# Restore `push: branches: [main]` and `pull_request:` once icecube is green
-# (ci-rollout-plan.md step 5).
+# pull_request runs against the MERGE RESULT, not the branch tip, so it catches
+# the case a push-triggered branch run structurally cannot: a branch that is
+# green alone but breaks once combined with main.
 on:
   push:
-    branches: ['ci/**']
+    branches: [main, 'ci/**']
+  pull_request:
   workflow_dispatch:
 
 concurrency:

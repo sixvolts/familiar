@@ -55,6 +55,10 @@ env:
   # service container (unavailable on a self-hosted macOS runner). Set the repo
   # variable FAMILIAR_TEST_DSN to match that instance; the literal below is only
   # a fallback so the workflow stays runnable without it.
+  # Model-backed specs (tier 4) run against icecube's local MLX model, which is
+  # much slower than production furnace. A run measured ~230s there against the
+  # spec default of 120s. See tests/e2e/flows/scheduled*.spec.ts.
+  FAMILIAR_E2E_RUN_TIMEOUT: '360000'
   FAMILIAR_TEST_DSN: ${{ vars.FAMILIAR_TEST_DSN || 'postgres://postgres:test@localhost:5432/postgres?sslmode=disable' }}
   # The MLX server, loopback-only on the box. Tier 4 points the E2E specs at
   # it; tier 3 overrides this with a closed port so the model-backed specs

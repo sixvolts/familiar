@@ -43,6 +43,18 @@ func wikiStoreForTest(t *testing.T) (*WikiStore, string) {
 	if err := db.Migrate(ctx, pool); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
+	// wiki_conc_test is created IF NOT EXISTS and never dropped, so books and
+	// pages from previous runs persist and every test in this package shares
+	// them. Anything that counts rows across the schema — SweepResearchEvidence
+	// most of all, since it reaps schema-wide — then depends on what a sibling
+	// happened to leave behind. Start each run from empty. Same fix 32346f9
+	// applied to research_runs and actions; this helper was missed.
+	// CASCADE reaches wiki_pages and the rest of the book-referencing tables;
+	// users is not referenced by books in that direction, so the seed below
+	// still stands.
+	if _, err := pool.ExecContext(ctx, `TRUNCATE books CASCADE`); err != nil {
+		t.Fatalf("truncate books: %v", err)
+	}
 	if _, err := pool.ExecContext(ctx, `
 		INSERT INTO users (id, display_name, status, role)
 		VALUES ('wu', 'Wiki User', 'approved', 'user') ON CONFLICT (id) DO NOTHING`); err != nil {
@@ -322,6 +334,50 @@ func TestEnsureResearchBook_PerUserAndHidden(t *testing.T) {
 	}
 }
 
+// wikiStoreForTest must hand every run an empty schema. This asserts that
+// contract directly instead of relying on a sibling test to leave pollution
+// behind, which is what made the old ordering-dependent failure so slippery:
+// each run's aged research page is consumed by its own sweep, so aged pages do
+// not accumulate on their own and TestSweepResearchEvidence passes with or
+// without the TRUNCATE. That meant nothing proved the isolation was
+// load-bearing, and a silent removal would go unnoticed.
+//
+// Two calls in one test, so it holds regardless of run order or -shuffle: seed
+// a book through the first store, then assert the second sees a clean schema.
+// Delete the TRUNCATE in the helper and this fails.
+func TestWikiStoreForTestTruncatesBetweenRuns(t *testing.T) {
+	first, user := wikiStoreForTest(t)
+	ctx := context.Background()
+
+	if _, err := first.CreateBook(ctx, user, "Leftover", "should not survive", ""); err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+	if books, err := first.ListBooks(ctx, user, true); err != nil {
+		t.Fatalf("ListBooks (first): %v", err)
+	} else if len(books) == 0 {
+		t.Fatal("seeded book absent from the first store — test cannot prove anything")
+	}
+
+	second, user2 := wikiStoreForTest(t)
+	books, err := second.ListBooks(ctx, user2, true)
+	if err != nil {
+		t.Fatalf("ListBooks (second): %v", err)
+	}
+	if len(books) != 0 {
+		names := make([]string, 0, len(books))
+		for _, b := range books {
+			names = append(names, b.Slug)
+		}
+		t.Errorf("second store saw %d book(s) %v, want 0 — wikiStoreForTest is not truncating", len(books), names)
+	}
+
+	// The seed survives the truncate: books.created_by points AT users, and
+	// TRUNCATE CASCADE follows inbound references only, so users is untouched.
+	if _, err := second.CreateBook(ctx, user2, "After", "seed still valid", ""); err != nil {
+		t.Fatalf("CreateBook after truncate (user seed lost?): %v", err)
+	}
+}
+
 // SweepResearchEvidence reaps hidden research-book pages older than the
 // retention window while leaving fresh ones and pages in ordinary books
 // untouched — the only bound on the hidden books' growth (§6.6).
@@ -364,14 +420,14 @@ func TestSweepResearchEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
-	// SweepResearchEvidence reaps across the WHOLE schema, which every test in
-	// this package shares (wikiStoreForTest does CREATE SCHEMA IF NOT EXISTS,
-	// no per-test truncation) — so a sibling test's aged research pages inflate
-	// this count and an exact `== 1` is fragile on ordering. The per-page
-	// assertions below prove the real contract: the aged research page is
-	// reaped, the fresh one and the normal-book page survive.
-	if n < 1 {
-		t.Errorf("sweep reaped %d pages, want at least the aged research page", n)
+	// Exact count, restored. This was relaxed to `n < 1` in 73abb45 because the
+	// shared schema let a sibling test's aged research pages inflate the number;
+	// wikiStoreForTest now truncates, so this test sees only its own rows and
+	// the precise contract is testable again. `n < 1` passed while asserting
+	// strictly less: it could not distinguish reaping one page from reaping the
+	// whole schema.
+	if n != 1 {
+		t.Errorf("sweep reaped %d pages, want exactly 1 (the aged research page)", n)
 	}
 	// The old research page is gone; the fresh one and the normal-book
 	// page survive.

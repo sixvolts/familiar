@@ -22,7 +22,17 @@ import { start, GatewayStack } from "../fixtures/gateway";
 import { createTestUser, TestUser } from "../fixtures/user";
 
 const MODEL_URL = process.env.FAMILIAR_TEST_CHAT_MODEL_URL || "http://127.0.0.1:8090";
-const RUN_TIMEOUT = 120_000;
+// Deadline for a scheduled/research run to finish. Configurable because the
+// right value depends entirely on the backend: production furnace answers far
+// faster than icecube's local MLX model, where a single run measured ~230s
+// against this 120s default. Left hardcoded, model-backed specs fail, Playwright
+// retries them twice (retries: 2 in CI), and three ~4min attempts per test
+// exhausted the job's 60min budget — which is how the last two runs on
+// ci/consolidate died without producing a verdict.
+//
+// Default stays tight so a real slowdown still shows up locally; CI raises it
+// explicitly in e2e.yml, where the value is visible rather than buried.
+const RUN_TIMEOUT = Number(process.env.FAMILIAR_E2E_RUN_TIMEOUT ?? 120_000);
 
 async function modelIsUp(): Promise<boolean> {
     try {

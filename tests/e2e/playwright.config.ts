@@ -44,9 +44,14 @@ export default defineConfig({
             // Mobile SPA (mobile.html / mobile.js). Phone viewport +
             // touch + isMobile via the Pixel 7 descriptor (still
             // Chromium, so the WebAuthn virtual authenticator + CDP
-            // work). Runs ONLY the mobile spec.
+            // work). Runs the mobile spec, plus the pixel baselines —
+            // visual.spec.ts is deliberately in BOTH projects so a
+            // regression that only shows at phone width (the tap-target
+            // and checkbox class of bug) can't hide behind a green
+            // desktop baseline. Playwright keys snapshots by project,
+            // so the two viewports keep independent baselines.
             name: "mobile",
-            testMatch: /mobile\.spec\.ts/,
+            testMatch: /(mobile|visual)\.spec\.ts/,
             use: {
                 ...devices["Pixel 7"],
                 launchOptions: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH

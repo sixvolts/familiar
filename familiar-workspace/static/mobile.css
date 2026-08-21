@@ -2184,3 +2184,68 @@ select.mob-sa-input {
 .mob-switch.is-on { background: var(--sun-500, #C69A27); border-color: var(--sun-400); }
 .mob-switch.is-on::after { left: 21px; }
 .mob-switch:disabled { opacity: 0.6; }
+
+/* ---------------------------------------------------------------------------
+   Task-list checkbox tap target (iOS)
+
+   Toast UI draws the checkbox as an 18x18 absolutely-positioned ::before, and
+   decides whether a tap toggled it by hit-testing the event offset against
+   that box:
+
+       i = width  + paddingLeft + paddingRight
+       s = height + paddingTop  + paddingBottom
+       return x >= left && x <= left+i && y >= top && y <= top+s
+
+   18px is well under the 44px iOS minimum and sits in a narrow gutter beside
+   the label text, so taps miss often enough to make ticking a list a chore. A
+   miss is worse than a no-op: the handler returns false, default caret
+   placement wins, and the tap reads as "the cursor moved instead of checking
+   the box".
+
+   Because that hit test adds the pseudo-element's own padding to the accepted
+   region, padding it out grows the target through Toast UI's own math.
+
+   THE TRAP THAT BROKE THIS LAST TIME (c8b0d58, reverted in 22fc8b9): padding
+   alone tiles the image into a grid of boxes over the label. The vendor rule
+   is ordered
+
+       background-position: 50%;
+       background-repeat: no-repeat;
+       background-size: 18px 18px;
+       background: transparent url(data:image/svg+xml;...);   <- SHORTHAND, LAST
+
+   and that trailing shorthand RESETS size to `auto` and repeat to `repeat`.
+   At 18x18 the 18px SVG tiles exactly once, so the reset is invisible. At
+   44x44 it tiles ~2.4x2.4. So the three background properties must be
+   re-declared AFTER the padding. They are, below.
+
+   Geometry: box becomes 44x44 (18 + 13 + 13). background-origin is padding-box
+   and position is 50%, so the image centres in the padded box; shifting
+   left/top by the padding keeps it pixel-identical.
+
+       before: centre x = 0 + 9  = 9,  y = 1 + 9  = 10
+       after:  centre x = -13+22 = 9,  y = -12+22 = 10
+
+   Two intentional side effects on touch: the region spans the full row height,
+   so anywhere in that line's left gutter toggles; and it reaches ~7px into the
+   label, so a tap on the first character or two toggles rather than placing a
+   caret.
+
+   Specificity matches the vendor rule (two classes + pseudo-element) and
+   mobile.css loads after both vendor sheets, so this wins on cascade order.
+   The dark theme re-declares this pseudo-element for colours only. Mobile-only:
+   mobile.css is loaded solely by mobile.html.
+
+   Guarded by the task-list-checkboxes pixel baselines in
+   tests/e2e/flows/visual.spec.ts — if this ever tiles again, that test fails.
+   --------------------------------------------------------------------------- */
+.toastui-editor-contents .task-list-item::before {
+    padding: 13px;
+    left: -13px;
+    top: -12px;
+    /* Re-assert what the vendor's trailing `background:` shorthand reset.
+       Without these three lines the SVG tiles across the padded box. */
+    background-repeat: no-repeat;
+    background-size: 18px 18px;
+    background-position: 50%;
+}

@@ -40,10 +40,28 @@ name: e2e
 # pull_request runs against the MERGE RESULT, not the branch tip, so it catches
 # the case a push-triggered branch run structurally cannot: a branch that is
 # green alone but breaks once combined with main.
+# Deliberately NO `pull_request:` trigger. Three runs per change is one too
+# many, and this is the one to cut.
+#
+# The floor is two: one pre-merge to gate the merge, one post-merge to gate the
+# deploy. The post-merge run is unavoidable — familiar-deploy.sh keys the gate
+# on a SHA, and GitHub's merge/squash/rebase buttons all mint a new commit, so
+# the merge commit is a SHA nothing has tested.
+#
+# That leaves a choice of pre-merge trigger, and push wins on ergonomics: the
+# check attaches to the branch head, so by the time a PR is opened it is
+# ALREADY green and the merge button is live. With pull_request instead,
+# opening the PR starts a fresh ~8min run while the button sits greyed out.
+#
+# What this gives up: pull_request tests the branch MERGED WITH main, catching
+# a branch that is green alone and breaks once combined. On a solo repo where
+# main only advances through these same PRs, a branch is nearly always already
+# current, and the post-merge run still catches it — just after the merge
+# rather than before. If main ever gets busier, put pull_request back and drop
+# the push trigger instead.
 on:
   push:
     branches: [main, 'ci/**']
-  pull_request:
   workflow_dispatch:
 
 concurrency:

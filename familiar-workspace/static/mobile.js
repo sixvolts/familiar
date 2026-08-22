@@ -1798,29 +1798,42 @@ var reader = resp.body.getReader();
 
             host.addEventListener('pointerdown', function (e) {
                 if (e.pointerType === 'mouse') return;
-                if (!e.target || !e.target.closest) return;
-                var li = e.target.closest('.task-list-item');
-                if (!li) return;
 
-                // The ::before sits at left:0 of the li and is 18px wide; the
-                // label starts at the li's 24px padding-left. Accept the gutter
-                // plus a few px of slop, and reject taps out in the text so
-                // normal editing still works.
-                var rect = li.getBoundingClientRect();
-                var x = e.clientX - rect.left;
-                if (x < -8 || x > 30) return;
+                // Find the row by GEOMETRY, not by e.target.
+                //
+                // The li has margin-left:-24px / padding-left:24px and the
+                // ::before is pushed out to left:-13px, so the left end of the
+                // checkbox lies OUTSIDE the li's own box. A tap there has the
+                // <ul> or the editor div as its target, closest() returns null,
+                // and the tap silently bypasses this handler while Toast UI's
+                // hit test still accepts it — so it fell through to the caret
+                // race. That was a whole slice of taps missing the fix.
+                //
+                // Walking the rows and testing the point against each band
+                // does not care what the browser picked as the target.
+                var band = null;
+                var rows = host.querySelectorAll('.task-list-item');
+                for (var i = 0; i < rows.length; i++) {
+                    var r = rows[i].getBoundingClientRect();
+                    if (e.clientY < r.top || e.clientY > r.bottom) continue;
+                    // Accept the gutter (which starts left of the li box) but
+                    // stop short of the label so normal editing still works.
+                    if (e.clientX < r.left - 16 || e.clientX > r.left + 30) continue;
+                    band = { li: rows[i], rect: r };
+                    break;
+                }
+                if (!band) return;
 
                 e.preventDefault();
                 e.stopPropagation();
 
-                // Aim at the centre of the real box (x=9), and stay on the row
-                // that was actually tapped so multi-line items toggle the right
-                // one. Dispatch on the li so Toast UI reads the ::before of the
-                // element it expects.
-                li.dispatchEvent(new MouseEvent('mousedown', {
+                // Aim at the centre of the real 18px box (x=9) and stay on the
+                // tapped row, so a wrapped item toggles the right one. Dispatch
+                // on the li so Toast UI reads the ::before it expects.
+                band.li.dispatchEvent(new MouseEvent('mousedown', {
                     bubbles: true,
                     cancelable: true,
-                    clientX: rect.left + 9,
+                    clientX: band.rect.left + 9,
                     clientY: e.clientY,
                 }));
             }, true);

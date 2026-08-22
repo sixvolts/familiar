@@ -67,13 +67,74 @@ ci_conclusion_for() {
     grep -q '"conclusion":"success"' <<<"$out" && echo success || echo unknown
 }
 
+# Same question, asked of the CONTENT rather than the commit id.
+#
+# GitHub's merge button always mints a new commit, so a merge SHA never has a
+# run of its own even when the branch it came from was exhaustively tested. If
+# main did not move while that branch was in flight, the merge commit's TREE is
+# byte-identical to the branch tip's tree — same source, different identity —
+# and re-running the suite proves nothing we do not already know.
+#
+# If main DID move, the merge commit is the branch plus whatever main gained,
+# and the trees differ. That combination genuinely has not been tested (it is
+# the case the pull_request trigger used to cover), so no verdict is reused and
+# the normal wait applies. The tree hash draws that line exactly.
+#
+# Limitation worth stating: identical trees mean identical SOURCE, not an
+# identical environment. A test that depends on wall-clock time, prior database
+# state, or a model's output could pass on one and fail on the other. That risk
+# already exists in trusting the branch run at all; this does not add a new
+# kind, only a new place it applies.
+ci_conclusion_for_tree() {
+    # Echoes the 40-hex sha of a commit with an identical tree that already
+    # passed, or nothing. Never failure or pending — a non-success on a
+    # DIFFERENT commit says nothing about this one, so the caller falls through
+    # to the SHA-based ladder.
+    #
+    # Returns the sha on stdout rather than setting a global: this is called in
+    # a command substitution, which is a subshell, so an assignment here would
+    # never reach the caller.
+    local sha="$1"
+    command -v gh >/dev/null 2>&1 || return 1
+    local want
+    want=$(git rev-parse "${sha}^{tree}" 2>/dev/null) || return 1
+
+    local heads
+    heads=$(gh run list --workflow "$GATE_WORKFLOW" --status success \
+              --json headSha --limit 30 2>/dev/null \
+              | grep -o '"headSha":"[0-9a-f]*"' | cut -d'"' -f4) || return 1
+
+    local h t
+    for h in $heads; do
+        # A run can reference a commit this clone has never fetched.
+        t=$(git rev-parse "${h}^{tree}" 2>/dev/null) || continue
+        if [[ "$t" == "$want" ]]; then
+            echo "$h"; return
+        fi
+    done
+    return 1
+}
+
 GATE_WORKFLOW="${FAMILIAR_DEPLOY_CI_WORKFLOW:-e2e.yml}"  # the workflow that gates
 CI_WAIT="${FAMILIAR_DEPLOY_CI_WAIT:-600}"   # seconds to wait on an in-flight run
 GATE_PASSED=false
 step "Checking CI for ${NEW_HEAD:0:8}..."
 DEADLINE=$(( $(date +%s) + CI_WAIT ))
+TREE_MATCH_SHA=""
 while :; do
     CI_STATE=$(ci_conclusion_for "$NEW_HEAD")
+    # No verdict for this exact SHA yet? Before waiting out the timeout, check
+    # whether some other commit with IDENTICAL content already passed. That is
+    # the ordinary merge case: the branch was green, main had not moved, and the
+    # merge commit is the same tree under a new id.
+    if [[ "$CI_STATE" != "success" && "$CI_STATE" != "failure" ]]; then
+        TREE_MATCH_SHA=$(ci_conclusion_for_tree "$NEW_HEAD" || true)
+        if [[ "$TREE_MATCH_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            step "CI green for the tree of ${NEW_HEAD:0:8} — identical content already passed as ${TREE_MATCH_SHA:0:8}"
+            GATE_PASSED=true
+            break
+        fi
+    fi
     case "$CI_STATE" in
         success)
             step "CI green for ${NEW_HEAD:0:8} (full suite incl. DB-backed tests)"

@@ -1094,24 +1094,44 @@
                     window.familiarMermaid.syncShareRenders(
                         { bookSlug: "personal", pageId: n.id }, patch.content);
                 }
-                // Bump in list view.
+                // Bump in list view — but ONLY re-render when something the
+                // tree actually shows has changed.
+                //
+                // A row renders title (+ pinned styling) and snippet, and the
+                // snippet is deliberately carried over unchanged below. So a
+                // body-only edit produces byte-identical DOM, and calling
+                // renderTree() on every autosave tore down and rebuilt the whole
+                // list to draw exactly what was already there. With a 500ms
+                // save debounce that is a full rebuild every time you pause
+                // mid-sentence, which is what made the sidebar visibly glitch
+                // while typing.
                 const idx = localState.list.findIndex((x) => x.id === n.id);
+                let visibleChange = false;
                 if (idx >= 0) {
+                    const prev = localState.list[idx];
+                    visibleChange =
+                        prev.title !== n.title ||
+                        (prev.folder || "") !== (n.folder || "") ||
+                        !!prev.pinned !== !!n.pinned;
                     localState.list[idx] = {
                         id: n.id, title: n.title, folder: n.folder || "",
-                        pinned: n.pinned, snippet: localState.list[idx].snippet,
+                        pinned: n.pinned, snippet: prev.snippet,
                         updated_at: n.updated_at,
                     };
-                    renderTree();
+                    if (visibleChange) renderTree();
                 }
-                // The sidebar row's updated-at meta only refreshed on a title
-                // blur before, so body-only edits (and folder moves) left it
-                // stale until reload. Coalesced to spare the rail on autosave.
+                // Same reasoning for the sidebar rail. It shows an updated-at
+                // meta, so it does want refreshing eventually, but not while
+                // the user is still typing: at 2s this fired ~2.5s after any
+                // pause (500ms save debounce + 2s), i.e. right as they resumed.
+                // Fire immediately when something visible changed, otherwise
+                // wait for a real idle gap so a body-only edit never yanks the
+                // rail mid-thought.
                 if (sidebarMetaTimer) clearTimeout(sidebarMetaTimer);
                 sidebarMetaTimer = setTimeout(() => {
                     sidebarMetaTimer = null;
                     window.dispatchEvent(new Event("familiar:sidebarRefresh"));
-                }, 2000);
+                }, visibleChange ? 0 : 15000);
                 saveFailedNotified = false;
                 setTimeout(() => {
                     if (savedDot.textContent === "Saved") savedDot.textContent = "";

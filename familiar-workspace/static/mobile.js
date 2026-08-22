@@ -1773,6 +1773,59 @@ var reader = resp.body.getReader();
                    ((t && t.value) || '') !== state.baseTitle;
         }
 
+
+        // Toggle a task checkbox on touch without losing the tap to the caret.
+        //
+        // Growing the hit target (mobile.css) cut the misses but could not fix
+        // the underlying race: the page is a contenteditable WYSIWYG, Toast UI
+        // binds `mousedown`, and on iOS that is a SYNTHETIC event delivered
+        // after the touch has already been resolved as a text interaction. Its
+        // preventDefault() therefore does not reliably stop the caret, so a tap
+        // on the box often places a cursor instead of ticking the item.
+        //
+        // Intercept at pointerdown, which fires BEFORE the browser commits to
+        // that interpretation. If the tap is in the checkbox gutter, cancel the
+        // default (no caret, no keyboard) and hand Toast UI a synthetic
+        // mousedown aimed at the middle of the box, so its own handler performs
+        // the toggle. Reusing its handler keeps undo history, markdown
+        // serialisation and the change event correct — we only redirect the tap.
+        //
+        // Mouse input is left alone: an 18px target is fine with a cursor, and
+        // desktop has never had this problem.
+        function wireTaskCheckboxTaps(host) {
+            if (!host || host.dataset.taskTapsWired === '1') return;
+            host.dataset.taskTapsWired = '1';
+
+            host.addEventListener('pointerdown', function (e) {
+                if (e.pointerType === 'mouse') return;
+                if (!e.target || !e.target.closest) return;
+                var li = e.target.closest('.task-list-item');
+                if (!li) return;
+
+                // The ::before sits at left:0 of the li and is 18px wide; the
+                // label starts at the li's 24px padding-left. Accept the gutter
+                // plus a few px of slop, and reject taps out in the text so
+                // normal editing still works.
+                var rect = li.getBoundingClientRect();
+                var x = e.clientX - rect.left;
+                if (x < -8 || x > 30) return;
+
+                e.preventDefault();
+                e.stopPropagation();
+
+                // Aim at the centre of the real box (x=9), and stay on the row
+                // that was actually tapped so multi-line items toggle the right
+                // one. Dispatch on the li so Toast UI reads the ::before of the
+                // element it expects.
+                li.dispatchEvent(new MouseEvent('mousedown', {
+                    bubbles: true,
+                    cancelable: true,
+                    clientX: rect.left + 9,
+                    clientY: e.clientY,
+                }));
+            }, true);
+        }
+
         async function mobileWikiNavigate(parsed) {
             var bookSlug = parsed.bookSlug || state.currentBookSlug;
             if (bookSlug !== state.currentBookSlug) {
@@ -1815,6 +1868,7 @@ var reader = resp.body.getReader();
                     ? [window.familiarMermaid.editorPlugin]
                     : [],
             });
+            wireTaskCheckboxTaps(host);
             if (window.familiarWikiLink) {
                 window.familiarWikiLink.wireClickHandler(host, mobileWikiNavigate);
             }

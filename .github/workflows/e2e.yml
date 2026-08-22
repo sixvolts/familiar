@@ -87,6 +87,14 @@ env:
 jobs:
   tiers:
     runs-on: [self-hosted, macos, arm64, icecube, mlx]
+    # Scoped explicitly. Declaring `permissions` REPLACES the defaults, so
+    # contents: read has to be listed or actions/checkout breaks.
+    # pull-requests: write is for the auto-PR step at the end — it uses the
+    # per-run GITHUB_TOKEN, which expires with the job, rather than a
+    # long-lived PAT carrying a standing permission.
+    permissions:
+      contents: read
+      pull-requests: write
     timeout-minutes: 60
     # No `services:` block: service containers are Linux-runner only and do
     # not work on a self-hosted macOS runner. Postgres is a persistent
@@ -210,3 +218,71 @@ jobs:
             tests/e2e/playwright-report/
             tests/e2e/test-results/
           retention-days: 7
+
+      # Open the PR automatically once the branch is green.
+      #
+      # The operator's job should be one click (Merge), not "open a PR, then
+      # wait". Because `pull_request` is no longer a trigger, the check is
+      # already attached to this branch head by the time the PR appears, so the
+      # merge button is live the moment it shows up.
+      #
+      # Uses the per-run GITHUB_TOKEN rather than a PAT: it is minted for this
+      # job and dies with it, so no long-lived credential gains a standing
+      # pull-requests permission. Note GitHub deliberately does not let a
+      # GITHUB_TOKEN-created PR trigger further workflow runs (loop
+      # prevention), which is exactly right here — the branch run IS the check.
+      #
+      # Requires Settings -> Actions -> General -> "Allow GitHub Actions to
+      # create and approve pull requests". Without it this step 403s; it is
+      # non-fatal by design (continue-on-error) so a missing setting never
+      # fails an otherwise green run.
+      - name: open PR if green
+        if: success() && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/ci/')
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess, urllib.request, urllib.error
+
+          repo   = os.environ["GITHUB_REPOSITORY"]
+          branch = os.environ["GITHUB_REF"].removeprefix("refs/heads/")
+          owner  = repo.split("/")[0]
+          token  = os.environ["GH_TOKEN"]
+
+          def api(path, data=None):
+              req = urllib.request.Request(
+                  "https://api.github.com" + path,
+                  data=json.dumps(data).encode() if data else None,
+                  headers={"Authorization": "Bearer " + token,
+                           "Accept": "application/vnd.github+json"},
+                  method="POST" if data else "GET")
+              with urllib.request.urlopen(req) as r:
+                  return json.load(r)
+
+          existing = api(f"/repos/{repo}/pulls?head={owner}:{branch}&state=open")
+          if existing:
+              print("PR already open:", existing[0]["html_url"])
+              raise SystemExit(0)
+
+          title = subprocess.run(["git", "log", "-1", "--format=%s"],
+                                 capture_output=True, text=True).stdout.strip()
+          body  = subprocess.run(["git", "log", "-1", "--format=%b"],
+                                 capture_output=True, text=True).stdout.strip()
+          sha   = os.environ.get("GITHUB_SHA", "")[:8]
+          note  = (f"Opened automatically after the `tiers` check passed on `{sha}`.\n\n"
+                   "The check is attached to this branch head, so this is mergeable now.")
+          try:
+              pr = api(f"/repos/{repo}/pulls",
+                       {"title": title or branch,
+                        "head": branch, "base": "main",
+                        "body": (body + "\n\n---\n" + note) if body else note})
+              print("opened", pr["html_url"])
+          except urllib.error.HTTPError as e:
+              detail = e.read().decode()[:300]
+              print(f"could not open PR (HTTP {e.code}): {detail}")
+              if e.code == 403:
+                  print("Likely: Settings -> Actions -> General -> "
+                        "'Allow GitHub Actions to create and approve pull requests' is off.")
+              raise SystemExit(0)
+          PY

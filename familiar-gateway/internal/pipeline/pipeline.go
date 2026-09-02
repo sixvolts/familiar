@@ -271,7 +271,27 @@ func (p *Pipeline) TurnRunning(sessID string) bool {
 // turnHardCap bounds one turn's total generation + tool work once it's
 // detached from the request context. Matches the per-LLM-call ceiling;
 // a turn that blows it is a stuck model, not a slow one.
-const turnHardCap = 600 * time.Second
+// Raised 600s -> 1800s on 2026-09-02. 600 was chosen when chat ran on
+// mainframe; since that box was retired, furnace carries chat AND research on
+// the same six slots and decodes at roughly 33-43 tok/s, so a single tool
+// iteration writing a 2.3k-token page costs 55-67s. A real turn of Canyon's
+// (read_page x4, update_page x2 over 10k-char pages) was guillotined at
+// exactly 10m0.002s on iteration 5 of 10.
+//
+// That failure is worse than it looks: the tool side effects had already
+// committed (both page updates landed, with revisions) while the transcript is
+// only persisted at end of turn, so the user saw an empty reply and reasonably
+// concluded nothing had happened — while their pages had in fact been
+// rewritten.
+//
+// A fixed ceiling is the wrong shape for this and 1800s is a stopgap, not a
+// fix: it still cannot distinguish a turn doing steady useful work from one
+// wedged on a hung backend, and the honest answer is an idle watchdog that
+// resets on progress (each completed iteration or tool dispatch), so a stuck
+// turn dies in ~2min while a productive one runs as long as it keeps earning
+// it. Until then, prefer erring long — a killed turn loses the transcript but
+// keeps the side effects, which is the confusing outcome.
+const turnHardCap = 1800 * time.Second
 
 // SetLifetime wires the gateway's root (shutdown) context. Call once at
 // startup, before serving. It's the cancellation source for detached

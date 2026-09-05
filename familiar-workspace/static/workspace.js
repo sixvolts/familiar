@@ -1756,7 +1756,26 @@
             const childList = document.querySelector('.sidebar-children[data-category="' + category + '"]');
             if (!childList) continue;
             const items = await fetchCategoryChildren(category);
+            // Skip the repaint when nothing this category shows has changed.
+            //
+            // renderCategoryChildren opens with host.innerHTML = "" — a hard
+            // teardown-and-rebuild with no diffing — so every call visibly
+            // flashes the rail. This function repaints ALL expanded categories,
+            // and it fires on sidebarRefresh / notesChanged, which chat.js and
+            // notes.js dispatch off their own 500ms autosaves. Net effect: type
+            // in a chat or a note (or a wiki page whose panel shares the
+            // signal) and the wiki rows tear down and repaint every debounce,
+            // even though the wiki data is untouched.
+            //
+            // A structural JSON compare against the cached copy is enough:
+            // fetchCategoryChildren returns plain data, so identical bytes mean
+            // an identical render. Only repaint when they differ. This mirrors
+            // the notes.js sidebar fix (only re-render on a real change).
+            const prev = sidebarCatState.cache[category];
+            const same = prev !== undefined &&
+                JSON.stringify(prev) === JSON.stringify(items);
             sidebarCatState.cache[category] = items;
+            if (same) continue;
             renderCategoryChildren(childList, category, items);
         }
     }

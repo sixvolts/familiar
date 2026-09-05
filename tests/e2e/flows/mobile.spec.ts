@@ -153,3 +153,79 @@ test("MOBILE: a pending account gets friendly copy, not a raw error", async ({ s
     await expect(err).not.toContainText(/account pending approval/i); // the raw string
     await expect(page.locator("#mob-app")).toBeHidden();
 });
+
+
+test("a stickied wiki page opens even when a different book is active", async ({
+    stack,
+    page,
+    context,
+    request,
+}) => {
+    // Regression: tapping a Home-pinned wiki page intermittently showed
+    // "Page not found" + a blank editable page. The pin routed to
+    // #wiki/<pageId> (id only); openPage guessed the book by scanning the
+    // ACTIVE book's page list, so whenever a different book was active the id
+    // was never found. Fix routes #wiki/<bookSlug>/<pageId> and selects the
+    // book before resolving. This forces the exact failing condition: page
+    // pinned in book A, book B active, then tap the pin.
+    const user = await createTestUser({ role: "admin" });
+    const headers = { Cookie: user.cookieHeader, "Content-Type": "application/json" };
+    const suffix = Date.now().toString(36);
+
+    const bookA = await (
+        await request.post(`${stack.workspaceURL}/console/api/books`, {
+            headers,
+            data: { name: `Alpha ${suffix}` },
+        })
+    ).json();
+    const bookB = await (
+        await request.post(`${stack.workspaceURL}/console/api/books`, {
+            headers,
+            data: { name: `Bravo ${suffix}` },
+        })
+    ).json();
+
+    const pageTitle = `Groceries ${suffix}`;
+    const pageA = await (
+        await request.post(`${stack.workspaceURL}/console/api/books/${bookA.slug}/pages`, {
+            headers,
+            data: { title: pageTitle, content: "eggs, milk, bread" },
+        })
+    ).json();
+    // Book B gets a page too so its own page list is non-empty and unrelated.
+    await request.post(`${stack.workspaceURL}/console/api/books/${bookB.slug}/pages`, {
+        headers,
+        data: { title: `Other ${suffix}`, content: "unrelated" },
+    });
+    // Pin page A so it appears in Home's Pinned section.
+    await request.post(
+        `${stack.workspaceURL}/console/api/books/${bookA.slug}/page-by-id/${pageA.id}/pin`,
+        { headers, data: { pinned: true } },
+    );
+
+    await attachSession(context, stack.workspaceURL, user);
+    await page.goto(stack.workspaceURL);
+    await expect(page.locator("#mob-app")).toBeVisible({ timeout: 15_000 });
+
+    // Make book B the active wiki book through the real UI: open the wiki tab
+    // and tap B's card. This is the precondition that used to break the pin.
+    await page.locator('.mob-tab[data-tab="wiki"]').click();
+    const bookBCard = page.locator(`.mob-book-card[data-book-slug="${bookB.slug}"]`);
+    await expect(bookBCard).toBeVisible({ timeout: 10_000 });
+    await bookBCard.click();
+    await expect(bookBCard).toHaveClass(/is-active/);
+
+    // Back to Home, tap the pinned page (which lives in book A, not B).
+    await page.locator('.mob-tab[data-tab="home"]').click();
+    const pin = page.locator("#mob-home-pins .mob-row", { hasText: pageTitle });
+    await expect(pin).toBeVisible({ timeout: 10_000 });
+    await pin.click();
+
+    // It must open A's real page, not the "Page not found" blank.
+    const titleInput = page.locator("#mob-wiki-page-title");
+    await expect(titleInput).toHaveValue(pageTitle, { timeout: 10_000 });
+    await expect(titleInput).not.toHaveAttribute("placeholder", "Page not found");
+    await expect
+        .poll(() => page.evaluate(() => location.hash))
+        .toContain(`wiki/${bookA.slug}/`);
+});

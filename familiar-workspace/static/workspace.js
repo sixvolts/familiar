@@ -1751,31 +1751,39 @@
     // Refresh sidebar children for all currently-expanded categories.
     // Called when titles change or docs are created/deleted so the
     // sidebar list stays current without a page refresh.
-    async function refreshSidebarChildren() {
+    // force=true (default): always repaint. force=false: skip the repaint
+    // when neither the fetched category data NOR the expanded set changed —
+    // used ONLY by the autosave-driven sidebarRefresh path to stop the rail
+    // flashing on every 500ms debounce.
+    //
+    // Safe-by-default is deliberate. The first cut inverted this: it diffed
+    // the category data and skipped on a match, which silently suppressed a
+    // caret toggle (expansion state lives outside that data) and a
+    // created/deleted page (page trees live in sidebarWikiPagesCache, also
+    // outside it). Any mutation path — notesChanged clearing the cache, a
+    // caret toggle, a drag — must force the repaint; only the pure autosave
+    // signal opts out.
+    async function refreshSidebarChildren(force = true) {
         for (const category of sidebarCatState.expanded) {
             const childList = document.querySelector('.sidebar-children[data-category="' + category + '"]');
             if (!childList) continue;
             const items = await fetchCategoryChildren(category);
-            // Skip the repaint when nothing this category shows has changed.
-            //
-            // renderCategoryChildren opens with host.innerHTML = "" — a hard
-            // teardown-and-rebuild with no diffing — so every call visibly
-            // flashes the rail. This function repaints ALL expanded categories,
-            // and it fires on sidebarRefresh / notesChanged, which chat.js and
-            // notes.js dispatch off their own 500ms autosaves. Net effect: type
-            // in a chat or a note (or a wiki page whose panel shares the
-            // signal) and the wiki rows tear down and repaint every debounce,
-            // even though the wiki data is untouched.
-            //
-            // A structural JSON compare against the cached copy is enough:
-            // fetchCategoryChildren returns plain data, so identical bytes mean
-            // an identical render. Only repaint when they differ. This mirrors
-            // the notes.js sidebar fix (only re-render on a real change).
-            const prev = sidebarCatState.cache[category];
-            const same = prev !== undefined &&
-                JSON.stringify(prev) === JSON.stringify(items);
-            sidebarCatState.cache[category] = items;
-            if (same) continue;
+            if (!force) {
+                const expandedSet = sidebarTreeExpanded.get(category);
+                const expandedSig = expandedSet ? Array.from(expandedSet).sort().join(",") : "";
+                const sig = JSON.stringify(items) + "|" + expandedSig;
+                if (!sidebarCatState.renderSig) sidebarCatState.renderSig = {};
+                const same = sidebarCatState.renderSig[category] === sig;
+                sidebarCatState.renderSig[category] = sig;
+                sidebarCatState.cache[category] = items;
+                if (same) continue;
+            } else {
+                sidebarCatState.cache[category] = items;
+                // Invalidate the skip-cache so the NEXT autosave refresh, if it
+                // fetches this same data, still repaints once to reflect this
+                // forced change before it starts skipping again.
+                if (sidebarCatState.renderSig) delete sidebarCatState.renderSig[category];
+            }
             renderCategoryChildren(childList, category, items);
         }
     }
@@ -1960,7 +1968,7 @@
     });
 
     // Listen for sidebar refresh requests from surface modules.
-    window.addEventListener("familiar:sidebarRefresh", refreshSidebarChildren);
+    window.addEventListener("familiar:sidebarRefresh", () => refreshSidebarChildren(false));
 
     // AI tool calls that mutate notes / pages dispatch
     // familiar:notesChanged via chat.js when the gateway emits the

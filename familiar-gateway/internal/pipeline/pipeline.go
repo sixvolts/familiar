@@ -1860,11 +1860,43 @@ func (p *Pipeline) runToolLoop(
 	// the entire turn (only some skills self-cap; wiki/memory/notes
 	// don't). The notices keep the context bounded and nudge the model
 	// to synthesize.
+	// Scale BOTH tool budgets to the model actually being called, the same
+	// way the context assembler does (effCfg.WindowSize = ContextWindow).
+	// Previously both read p.ctxCfg raw, which has two consequences:
+	//
+	//   - toolTokenBudget was computed from the GLOBAL context.window_size
+	//     (65536 here) no matter which model ran the turn. On a 32k chat
+	//     backend the loop happily accumulated ~10.7k tokens of tool results
+	//     while the assembler packed for 32k — over-filling the real slot.
+	//   - perResultCap was a flat max_tool_result_tokens (2500 = ~10k chars)
+	//     forever, so moving to a bigger-context backend did nothing for the
+	//     single biggest complaint: a wiki page over ~10k chars comes back
+	//     with its MIDDLE dropped (CapToolResult keeps head+tail). Reading
+	//     ~10k-char transcript pages, that silently loses the body every time.
+	//
+	// The configured value is now treated as the floor at the 64k window it
+	// was tuned for, and scales linearly with the window from there, so a
+	// larger backend genuinely buys larger reads.
+	toolCfg := p.ctxCfg
+	if toolCfg.WindowSize == 0 {
+		toolCfg = ctxbuild.DefaultConfig()
+	}
+	if modelCfg := p.router.GetRegistry().GetModelConfig(baseReq.Model); modelCfg != nil && modelCfg.ContextWindow > 0 {
+		toolCfg.WindowSize = modelCfg.ContextWindow
+	}
+
 	perResultCap := p.ctxCfg.MaxToolResultTokens
 	if perResultCap <= 0 {
 		perResultCap = 2000
 	}
-	toolTokenBudget := p.ctxCfg.Resolve().Tools
+	// Grow (never shrink) the per-result cap with the window, using 64k as the
+	// reference point the configured value was chosen against.
+	if toolCfg.WindowSize > 65536 {
+		if scaled := perResultCap * toolCfg.WindowSize / 65536; scaled > perResultCap {
+			perResultCap = scaled
+		}
+	}
+	toolTokenBudget := toolCfg.Resolve().Tools
 	var toolTokensUsed int
 	for i := 0; i < maxIters; i++ {
 		// User Stop (or hard cap / shutdown) landing between iterations:

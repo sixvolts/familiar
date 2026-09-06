@@ -207,13 +207,23 @@ test("a stickied wiki page opens even when a different book is active", async ({
     await page.goto(stack.workspaceURL);
     await expect(page.locator("#mob-app")).toBeVisible({ timeout: 15_000 });
 
-    // Make book B the active wiki book through the real UI: open the wiki tab
-    // and tap B's card. This is the precondition that used to break the pin.
+    // The bug needs a book OTHER than A (the pinned page's book) active when
+    // the pin is tapped. Open the wiki tab, and if A is the active card, switch
+    // to B. Books order by updated_at DESC so which one defaults active is not
+    // fixed — assert the precondition rather than assume it.
     await page.locator('.mob-tab[data-tab="wiki"]').click();
+    const bookACard = page.locator(`.mob-book-card[data-book-slug="${bookA.slug}"]`);
     const bookBCard = page.locator(`.mob-book-card[data-book-slug="${bookB.slug}"]`);
-    await expect(bookBCard).toBeVisible({ timeout: 10_000 });
-    await bookBCard.click();
-    await expect(bookBCard).toHaveClass(/is-active/);
+    await expect(bookACard).toBeVisible({ timeout: 10_000 });
+    // A click on an already-active card is a no-op, so only click B if A is the
+    // one currently active, then poll until A is definitively not active.
+    const aActive = await bookACard.evaluate((el) => el.classList.contains("is-active"));
+    if (aActive) {
+        await bookBCard.click();
+    }
+    await expect
+        .poll(() => bookACard.evaluate((el) => el.classList.contains("is-active")))
+        .toBe(false);
 
     // Back to Home, tap the pinned page (which lives in book A, not B).
     await page.locator('.mob-tab[data-tab="home"]').click();

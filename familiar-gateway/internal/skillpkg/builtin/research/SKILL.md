@@ -1,10 +1,18 @@
 ---
 name: research
 description: >-
-  Web research expert. ALWAYS use this skill when the user asks to research,
-  investigate, dig into, or get an overview of a topic. Effort tiers: quick,
-  standard (default), deep — keyword anywhere in the request. Not for simple
-  lookups answerable with a single search.
+  Web research expert for EXPLICIT research requests: the user asks to
+  research, investigate, dig into, look into, or compile sources on a topic.
+  Effort tiers: quick, standard (default), deep — keyword anywhere in the
+  request.
+  DO NOT use this skill when the user just wants an answer written from what
+  you already know. "Give me an overview of X", "summarize X", "explain X",
+  "tell me about X" are ordinary knowledge requests — answer them directly.
+  A length hint ("1-page", "short") is a FORMAT, not a request to research.
+  If the classifier tier for the turn is trivial or knowledge, that is a strong
+  signal the user wants a direct answer; do not start a research run to satisfy
+  it. Never research a topic that is answerable from training knowledge unless
+  the user asked for sources, citations, or current/recent information.
 license: MIT
 metadata:
   version: "1.0"

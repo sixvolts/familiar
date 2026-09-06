@@ -4021,6 +4021,13 @@ code {
 .chat-messages {
     flex: 1 1 auto;
     overflow-y: auto;
+    /* Never scroll the conversation sideways: a wide child should scroll
+       inside itself (see .chat-msg-body pre) rather than widen the column.
+       min-width:0 is required because a flex item defaults to min-width:auto,
+       which lets content set the floor — .chat-right having it does not
+       propagate, each flex container needs its own. */
+    overflow-x: hidden;
+    min-width: 0;
     padding: 24px 32px;
     display: flex;
     flex-direction: column;
@@ -4056,6 +4063,7 @@ code {
     display: flex;
     flex-direction: column;
     gap: 6px;
+    min-width: 0;
     /* Cap width at the readable 760px on wide panels, but keep a
        10% gap against the opposite edge on narrower ones so the
        back-and-forth reads at a glance. */
@@ -4088,6 +4096,21 @@ code {
     font-size: var(--text-md);
     line-height: 1.65;
     color: var(--fg-2);
+    min-width: 0;
+    /* Long URLs and unbroken tokens wrap instead of widening the panel. */
+    overflow-wrap: anywhere;
+}
+/* Code blocks keep their formatting, so they cannot wrap — let them scroll
+   inside their own box rather than stretching the message column and taking
+   the whole conversation sideways with it. */
+.chat-msg-body pre {
+    max-width: 100%;
+    overflow-x: auto;
+}
+.chat-msg-body table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
 }
 .chat-msg-body > :first-child { margin-top: 0; }
 .chat-msg-body > :last-child { margin-bottom: 0; }

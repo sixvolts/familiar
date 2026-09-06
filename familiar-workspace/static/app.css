@@ -4107,11 +4107,48 @@ code {
     max-width: 100%;
     overflow-x: auto;
 }
+/* Markdown tables in chat. The model emits plain | pipe | tables and they
+   arrived completely unstyled: no header rule, no cell padding, no column
+   gap — adjacent cells ran together ("Rest of Europe / other" abutting
+   "remainder"). Matches the .memory-table / .users-table idiom used elsewhere
+   in the app so tables look the same wherever they appear.
+
+   display:block + overflow-x:auto keeps a wide table scrolling inside its own
+   box instead of widening the message column (see the overflow fix above).
+   width:max-content lets narrow tables stay narrow rather than being stretched
+   to the panel, while still allowing wide ones to scroll. */
 .chat-msg-body table {
     display: block;
+    width: max-content;
     max-width: 100%;
     overflow-x: auto;
+    border-collapse: collapse;
+    font-size: var(--text-sm);
+    margin: 12px 0;
 }
+.chat-msg-body thead th {
+    text-align: left;
+    color: var(--fg-3);
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    font-weight: 500;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    padding: 8px 16px 8px 0;
+    border-bottom: 1px solid var(--border-default);
+    white-space: nowrap;
+}
+.chat-msg-body tbody td {
+    padding: 8px 16px 8px 0;
+    border-bottom: 1px solid var(--border-subtle);
+    color: var(--fg-2);
+    vertical-align: top;
+}
+/* Last column carries no trailing gutter, and the final row no hairline, so
+   the table ends cleanly instead of looking clipped. */
+.chat-msg-body thead th:last-child,
+.chat-msg-body tbody td:last-child { padding-right: 0; }
+.chat-msg-body tbody tr:last-child td { border-bottom: 0; }
 .chat-msg-body > :first-child { margin-top: 0; }
 .chat-msg-body > :last-child { margin-bottom: 0; }
 .chat-msg-body p { margin: 0 0 12px; }

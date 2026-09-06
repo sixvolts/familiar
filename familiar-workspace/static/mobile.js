@@ -1849,7 +1849,7 @@ var reader = resp.body.getReader();
                 var p = await apiJSON(
                     '/console/api/books/' + encodeURIComponent(bookSlug) +
                     '/pages/' + encodeURIComponent(parsed.pageSlug));
-                if (p && p.id) location.hash = 'wiki/' + encodeURIComponent(p.id);
+                if (p && p.id) location.hash = 'wiki/' + encodeURIComponent(bookSlug) + '/' + encodeURIComponent(p.id);
             } catch (e) {
                 console.warn('mobile wiki: link target not found', parsed, e);
             }
@@ -2071,15 +2071,40 @@ var reader = resp.body.getReader();
                     '</div>' +
                     '<div class="chev">' + chevSVG() + '</div>';
                 row.addEventListener('click', function () {
-                    location.hash = 'wiki/' + encodeURIComponent(p.id);
+                    location.hash = 'wiki/' +
+                        (state.currentBookSlug ? encodeURIComponent(state.currentBookSlug) + '/' : '') +
+                        encodeURIComponent(p.id);
                 });
                 listEl.appendChild(row);
             });
         }
 
-        async function openPage(pageId) {
+        async function openPage(detail) {
+            // detail is either "pageId" (legacy sticky / deep-link) or
+            // "bookSlug/pageId". The bare-id form guesses the book by scanning
+            // the currently-loaded page list, which fails whenever the app
+            // reopened onto a different book than the page lives in — the
+            // intermittent "Page not found + blank page" bug. When the book is
+            // qualified, select it (and load its pages) FIRST so the id
+            // resolves against the right book every time.
+            var pageId = detail;
+            var wantBook = null;
+            var slash = detail.indexOf('/');
+            if (slash > 0) {
+                wantBook = decodeURIComponent(detail.slice(0, slash));
+                pageId = detail.slice(slash + 1);
+            }
+
             // Same id already loaded? skip the re-fetch.
             if (state.page && state.page.id === pageId) return;
+
+            if (wantBook && wantBook !== state.currentBookSlug) {
+                if (!state.books.length) { await refresh(); }
+                if (state.books.find(function (b) { return b.slug === wantBook; })) {
+                    state.currentBookSlug = wantBook;
+                    await loadPagesForCurrentBook();
+                }
+            }
 
             // Flush a pending save from the previously-open page.
             if (state.saveTimer) {
@@ -2263,7 +2288,9 @@ var reader = resp.body.getReader();
                     id: p.id, slug: p.slug, title: p.title,
                     snippet: '', updated_at: p.updated_at, updated_by: p.updated_by,
                 });
-                location.hash = 'wiki/' + encodeURIComponent(p.id);
+                location.hash = 'wiki/' +
+                    (state.currentBookSlug ? encodeURIComponent(state.currentBookSlug) + '/' : '') +
+                    encodeURIComponent(p.id);
             } catch (e) {
                 alert('Couldn\'t create page: ' + (e.message || e));
             }
@@ -2518,7 +2545,14 @@ var reader = resp.body.getReader();
                 '</div>' +
                 '<div class="chev">' + chev() + '</div>';
             row.addEventListener('click', function () {
-                location.hash = route + encodeURIComponent(it.id);
+                // Wiki pins qualify the route with the book slug so the target
+                // resolves regardless of which book is active (see openPage).
+                if (kind === 'wiki' && it.book_slug) {
+                    location.hash = 'wiki/' + encodeURIComponent(it.book_slug) +
+                                    '/' + encodeURIComponent(it.id);
+                } else {
+                    location.hash = route + encodeURIComponent(it.id);
+                }
             });
             return row;
         }

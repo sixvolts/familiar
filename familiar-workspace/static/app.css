@@ -544,7 +544,7 @@ code {
        viewport; scrolling stays inside individual panels via
        their own overflow:auto. The shell never scrolls. */
     display: grid;
-    grid-template-columns: var(--sidebar-w, 240px) 1fr;
+    grid-template-columns: var(--sidebar-w, 240px) minmax(0, 1fr);
     height: 100%;
 }
 .view-shell > .sidebar { /* default placement, col 1 */ }
@@ -3520,8 +3520,8 @@ code {
 
 /* Layout: single. One panel, no handles. */
 .ws-grid-single {
-    grid-template-columns: 1fr;
-    grid-template-rows: 1fr;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
     grid-template-areas: "pA";
 }
 .ws-grid-single .ws-resize-col,
@@ -3530,8 +3530,8 @@ code {
 /* Layout: split-2x1 — two side-by-side panels with a vertical
    resize handle between them. */
 .ws-grid-split-2x1 {
-    grid-template-columns: var(--col-1-fr) var(--resize-thickness) var(--col-2-fr);
-    grid-template-rows: 1fr;
+    grid-template-columns: minmax(0, var(--col-1-fr)) var(--resize-thickness) minmax(0, var(--col-2-fr));
+    grid-template-rows: minmax(0, 1fr);
     grid-template-areas: "pA rc pB";
 }
 .ws-grid-split-2x1 .ws-resize-row { display: none; }
@@ -3540,8 +3540,8 @@ code {
    Conceptually "side-by-side rotated 90°" — full-width top
    space, full-width bottom space. */
 .ws-grid-split-1x2 {
-    grid-template-columns: 1fr;
-    grid-template-rows: var(--row-1-fr) var(--resize-thickness) var(--row-2-fr);
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, var(--row-1-fr)) var(--resize-thickness) minmax(0, var(--row-2-fr));
     grid-template-areas:
         "pA"
         "rr"
@@ -3551,8 +3551,8 @@ code {
 
 /* Layout: t-top — A spans full width on top, B + C split bottom. */
 .ws-grid-t-top {
-    grid-template-columns: var(--col-1-fr) var(--resize-thickness) var(--col-2-fr);
-    grid-template-rows: var(--row-1-fr) var(--resize-thickness) var(--row-2-fr);
+    grid-template-columns: minmax(0, var(--col-1-fr)) var(--resize-thickness) minmax(0, var(--col-2-fr));
+    grid-template-rows: minmax(0, var(--row-1-fr)) var(--resize-thickness) minmax(0, var(--row-2-fr));
     grid-template-areas:
         "pA pA pA"
         "rr rr rr"
@@ -4021,12 +4021,13 @@ code {
 .chat-messages {
     flex: 1 1 auto;
     overflow-y: auto;
-    /* Never scroll the conversation sideways: a wide child should scroll
-       inside itself (see .chat-msg-body pre) rather than widen the column.
-       min-width:0 is required because a flex item defaults to min-width:auto,
-       which lets content set the floor — .chat-right having it does not
-       propagate, each flex container needs its own. */
-    overflow-x: hidden;
+    /* min-width:0 because a flex item defaults to min-width:auto, which lets
+       content set the floor; .chat-right having it does not propagate, each
+       flex container needs its own. Deliberately NO overflow-x:hidden — that
+       clipped the text rather than fixing anything, and left no way to reach
+       what was cut off. The real cause was unconstrained `1fr` grid tracks
+       above (.view-shell and the .ws-grid layouts); with those bounded, a wide
+       table scrolls inside its own box. */
     min-width: 0;
     padding: 24px 32px;
     display: flex;

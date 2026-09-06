@@ -4105,8 +4105,26 @@ code {
    inside their own box rather than stretching the message column and taking
    the whole conversation sideways with it. */
 .chat-msg-body pre {
+    /* width:0 makes this contribute nothing to the parent's max-content size,
+       so .chat-msg-body is sized by its other children instead of by the
+       longest code line; min-width:100% then expands it back to whatever the
+       parent resolved to. max-width:100% alone cannot work here — it resolves
+       against a parent that has no definite width and is being stretched by
+       this element. Measured: PRE was 2864px, dragging .chat-msg-body and both
+       <p> siblings to 2864px with it. */
+    width: 0;
+    min-width: 100%;
     max-width: 100%;
     overflow-x: auto;
+}
+/* highlight.js sets its own display/padding on the inner <code>; keep it from
+   re-establishing the wide intrinsic size the pre just gave up. */
+.chat-msg-body pre code {
+    display: block;
+    /* No width here. The <pre> above is the scroll container and already has
+       width:0/min-width:100% to keep its intrinsic size out of the parent's
+       sizing; giving the inner <code> width:max-content re-introduced exactly
+       the 2834px the pre had just given up. */
 }
 /* Markdown tables in chat. The model emits plain | pipe | tables and they
    arrived completely unstyled: no header rule, no cell padding, no column
@@ -4120,7 +4138,13 @@ code {
    to the panel, while still allowing wide ones to scroll. */
 .chat-msg-body table {
     display: block;
-    width: max-content;
+    /* Same circular-width fix as .chat-msg-body pre: width:0 keeps the table's
+       intrinsic size out of the parent's max-content calculation, min-width
+       expands it back to the resolved parent width, and overflow-x scrolls the
+       remainder inside the table's own box. width:max-content here made the
+       table force the bubble wide (measured: bubble client=408, content=818). */
+    width: 0;
+    min-width: 100%;
     max-width: 100%;
     overflow-x: auto;
     border-collapse: collapse;

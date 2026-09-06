@@ -912,6 +912,7 @@
                 const row = document.createElement("button");
                 row.type = "button";
                 row.className = "notes-row";
+                row.dataset.pageId = p.id;
                 if (p.slug === localState.pageSlug) row.classList.add("is-active");
                 const t = document.createElement("div");
                 t.className = "notes-row-title";
@@ -1596,7 +1597,29 @@
                         snippet: localState.pages[idx].snippet,
                         updated_at: p.updated_at, updated_by: p.updated_by,
                     };
-                    renderPageList();
+                    // Patch just this row. renderPageList() opens with
+                    // tree.innerHTML = "" and rebuilds every row, so calling it
+                    // from the 500ms autosave made the page list visibly flash
+                    // on every debounce while typing. A row shows title +
+                    // relTime(updated_at) and nothing else, and both live on
+                    // this one row, so there is nothing a full rebuild would
+                    // achieve here that this does not.
+                    //
+                    // Falls back to a full render only if the row is missing
+                    // (list not built yet, or the page is newly added), so a
+                    // structural change still repaints correctly.
+                    let rowEl = null;
+                    for (const r of tree.querySelectorAll(".notes-row")) {
+                        if (r.dataset.pageId === p.id) { rowEl = r; break; }
+                    }
+                    if (rowEl) {
+                        const titleEl = rowEl.querySelector(".notes-row-title");
+                        const metaEl = rowEl.querySelector(".notes-row-meta");
+                        if (titleEl) titleEl.textContent = p.title || "Untitled";
+                        if (metaEl) metaEl.textContent = relTime(p.updated_at);
+                    } else {
+                        renderPageList();
+                    }
                 }
                 setTimeout(() => {
                     if (savedDot.textContent === savedMsg) savedDot.textContent = "";

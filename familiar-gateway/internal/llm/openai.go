@@ -12,6 +12,26 @@ import (
 	"time"
 )
 
+// thinkingKwargs builds the chat_template_kwargs payload.
+//
+// reasoning_effort MUST travel inside chat_template_kwargs, not as a
+// top-level request field. Measured against rune (Qwen 3.8 on llama.cpp) with
+// one fixed prompt: as a top-level field, low/medium/xhigh all produced ~420
+// characters of reasoning — silently ignored. Inside chat_template_kwargs the
+// same prompt gave 430 chars at low and 991 at xhigh. The server's
+// --reasoning-effort launch flag sets the default; this overrides it per
+// request.
+//
+// An empty Effort omits the key entirely, so the server default still applies
+// and backends without an effort dial are unaffected.
+func thinkingKwargs(req CompletionRequest) map[string]any {
+	kw := map[string]any{"enable_thinking": req.EnableThinking}
+	if req.EnableThinking && req.ReasoningEffort != "" {
+		kw["reasoning_effort"] = req.ReasoningEffort
+	}
+	return kw
+}
+
 // OpenAIProvider implements Provider for OpenAI-compatible endpoints
 // (llama-server, Ollama, vLLM, etc.).
 type OpenAIProvider struct {
@@ -322,7 +342,7 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req CompletionRequest) (*
 		// to Qwen3.5-122B, hardcoding true forced thinking on everywhere,
 		// which broke tier 3's "fast structured output, no thinking"
 		// contract. Respect the request field now. See BUGS.md Bug 2.
-		ChatTemplateKwargs: map[string]any{"enable_thinking": req.EnableThinking},
+		ChatTemplateKwargs: thinkingKwargs(req),
 	}
 	if req.ToolChoice != "" {
 		body.ToolChoice = req.ToolChoice
@@ -417,7 +437,7 @@ func (p *OpenAIProvider) CompleteStream(ctx context.Context, req CompletionReque
 		Tools:         tools,
 		// See Complete() for why this respects req.EnableThinking rather
 		// than forcing true. Same rationale applies for streaming.
-		ChatTemplateKwargs: map[string]any{"enable_thinking": req.EnableThinking},
+		ChatTemplateKwargs: thinkingKwargs(req),
 	}
 	if req.ToolChoice != "" {
 		body.ToolChoice = req.ToolChoice

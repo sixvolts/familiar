@@ -61,6 +61,16 @@ type CompletionRequest struct {
 	MaxTokens      int
 	Stream         bool
 	EnableThinking bool
+	// ReasoningEffort selects the model's native thinking depth when the
+	// backend supports it (Qwen 3.8 exposes low/medium/xhigh). Empty means
+	// "do not send it" — the server's launch default then applies, which is
+	// what happened for every turn before this existed.
+	//
+	// This is the knob EnableThinking/MaxThinkingTokens could not provide.
+	// MaxThinkingTokens only ever widened max_tokens headroom; it never told
+	// the model to think less, so a trivial question still reasoned at
+	// whatever depth the server was started with.
+	ReasoningEffort string
 	// MaxThinkingTokens is a soft budget for the model's reasoning tokens.
 	// Zero means "no explicit budget" — providers pick their own default.
 	// Providers that don't expose a thinking budget ignore this field.

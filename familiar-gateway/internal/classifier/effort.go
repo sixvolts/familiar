@@ -14,6 +14,14 @@ package classifier
 type ThinkingBudget struct {
 	Enabled     bool
 	TokenBudget int
+	// Effort is the backend's native thinking-depth selector (Qwen 3.8:
+	// low/medium/xhigh). Empty leaves it unset so the server default
+	// applies. Unlike TokenBudget — which only grants headroom and is
+	// deliberately NOT allowed to bound the trusted path (see the comment
+	// at the thinkingHeadroom assignment in pipeline.go) — this tells the
+	// model to think less, which is safe: it cannot truncate a thought
+	// mid-stream, it just produces a shorter one.
+	Effort string
 }
 
 // MemoryBudget is the resolved retrieval shape for one MemoryDepth.
@@ -52,9 +60,13 @@ func DefaultResolver() *EffortResolver {
 	return &EffortResolver{
 		Thinking: map[ThinkingLevel]ThinkingBudget{
 			ThinkingOff:    {Enabled: false},
-			ThinkingLow:    {Enabled: true, TokenBudget: 500},
-			ThinkingMedium: {Enabled: true, TokenBudget: 2000},
-			ThinkingHigh:   {Enabled: true, TokenBudget: 8000},
+			ThinkingLow:    {Enabled: true, TokenBudget: 500, Effort: "low"},
+			ThinkingMedium: {Enabled: true, TokenBudget: 2000, Effort: "medium"},
+			// High maps to medium, not xhigh, on purpose. The level is a small
+			// model's one-shot guess, and xhigh is a large jump in latency for
+			// a guess to be spending. Operators can raise it per-level via
+			// [effort.thinking.high] effort = "xhigh".
+			ThinkingHigh: {Enabled: true, TokenBudget: 8000, Effort: "medium"},
 		},
 		Memory: map[MemoryDepth]MemoryBudget{
 			MemoryNone:    {Skip: true},

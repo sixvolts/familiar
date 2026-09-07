@@ -113,6 +113,10 @@ type EffortThinkingConfig struct {
 type EffortThinkingLevel struct {
 	Enabled     *bool `toml:"enabled"` // nil = use level-default
 	TokenBudget int   `toml:"token_budget"`
+	// Effort overrides the backend's native thinking depth for this level
+	// (e.g. "low", "medium", "xhigh" on Qwen 3.8). Empty = use the
+	// level-default; set it to "" explicitly nowhere — omit the key instead.
+	Effort string `toml:"effort"`
 }
 
 // EffortMemoryDepthConfig — retrieval knobs per MemoryDepth.

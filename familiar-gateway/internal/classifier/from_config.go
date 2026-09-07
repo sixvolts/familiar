@@ -33,6 +33,9 @@ func ResolverFromConfig(cfg config.EffortConfig) *EffortResolver {
 		if src.TokenBudget > 0 {
 			merged.TokenBudget = src.TokenBudget
 		}
+		if src.Effort != "" {
+			merged.Effort = src.Effort
+		}
 		r.Thinking[level] = merged
 	}
 

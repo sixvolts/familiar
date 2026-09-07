@@ -2502,7 +2502,11 @@ func (p *Pipeline) buildLLMRequest(messages []llm.Message, route *routeResult, i
 		// headroom we really granted rather than the level's nominal
 		// budget, for whenever a provider does gain a separate knob.
 		MaxThinkingTokens: thinkingHeadroom,
-		OnReasoningChunk:  onReasoningChunk,
+		// The classifier's level now actually reaches the model. Previously
+		// it only widened max_tokens headroom, so every turn reasoned at the
+		// server's launch default regardless of how trivial the question was.
+		ReasoningEffort:  thinkingBudget.Effort,
+		OnReasoningChunk: onReasoningChunk,
 	}
 	if overrides != nil {
 		req.Temperature = overrides.Temperature

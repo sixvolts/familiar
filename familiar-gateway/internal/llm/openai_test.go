@@ -476,3 +476,80 @@ func TestOpenAIProviderCompleteStream_UsageWinsOverPredictedN(t *testing.T) {
 		t.Errorf("DecodeMs = %v, want 4000", resp.DecodeMs)
 	}
 }
+
+// TestOpenAIComplete_ReasoningEffort pins the TRANSPORT of the effort knob,
+// which is the part that fails invisibly.
+//
+// Measured against rune (Qwen 3.8 on llama.cpp): a TOP-LEVEL "reasoning_effort"
+// request field is silently ignored — low/medium/xhigh all produced ~420 chars
+// of reasoning on one fixed prompt. Inside chat_template_kwargs the same prompt
+// gave 430 chars at low and 991 at xhigh. A change moving this back to a
+// top-level field would break nothing at runtime; it would just quietly stop
+// working. Hence this test.
+//
+// Also pins the guard: effort only rides along when thinking is on, so a
+// backend without an effort dial (MLX/Gemma on the tier-4 path) keeps
+// receiving exactly what it received before. Verified live that MLX returns
+// HTTP 200 and ignores the key rather than erroring.
+func TestOpenAIComplete_ReasoningEffort(t *testing.T) {
+	capture := func(t *testing.T, req CompletionRequest) map[string]any {
+		t.Helper()
+		var body struct {
+			ChatTemplateKwargs map[string]any `json:"chat_template_kwargs"`
+			ReasoningEffort    string         `json:"reasoning_effort"`
+		}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+		}))
+		defer srv.Close()
+
+		p := NewOpenAIProvider("test", srv.URL, "")
+		if _, err := p.Complete(context.Background(), req); err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		if body.ReasoningEffort != "" {
+			t.Errorf("reasoning_effort must NOT be a top-level field (the server ignores it there), got %q",
+				body.ReasoningEffort)
+		}
+		return body.ChatTemplateKwargs
+	}
+
+	t.Run("forwarded inside chat_template_kwargs when thinking is on", func(t *testing.T) {
+		kw := capture(t, CompletionRequest{
+			Model:           "m",
+			Messages:        []Message{{Role: "user", Content: "hi"}},
+			EnableThinking:  true,
+			ReasoningEffort: "low",
+		})
+		if got, ok := kw["reasoning_effort"]; !ok || got != "low" {
+			t.Errorf("expected chat_template_kwargs.reasoning_effort=low, got %+v", kw)
+		}
+	})
+
+	t.Run("omitted when thinking is off", func(t *testing.T) {
+		kw := capture(t, CompletionRequest{
+			Model:           "m",
+			Messages:        []Message{{Role: "user", Content: "hi"}},
+			EnableThinking:  false,
+			ReasoningEffort: "xhigh",
+		})
+		if _, ok := kw["reasoning_effort"]; ok {
+			t.Errorf("reasoning_effort must not be sent when thinking is off, got %+v", kw)
+		}
+	})
+
+	t.Run("omitted when unset so the server default applies", func(t *testing.T) {
+		kw := capture(t, CompletionRequest{
+			Model:          "m",
+			Messages:       []Message{{Role: "user", Content: "hi"}},
+			EnableThinking: true,
+		})
+		if _, ok := kw["reasoning_effort"]; ok {
+			t.Errorf("reasoning_effort must be omitted when unset, got %+v", kw)
+		}
+		if got, ok := kw["enable_thinking"]; !ok || got != true {
+			t.Errorf("enable_thinking must still be forwarded, got %+v", kw)
+		}
+	})
+}

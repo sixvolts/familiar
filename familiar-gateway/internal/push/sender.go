@@ -60,6 +60,12 @@ func (s *Sender) Send(ctx context.Context, userID string, p Payload) (int, error
 		return 0, err
 	}
 	if len(subs) == 0 {
+		// This is the failure mode that went unnoticed for two days: Apple
+		// 410'd the only endpoint, it was correctly pruned, and afterwards
+		// every notification silently went nowhere. A working system and a
+		// completely dead one produced identical logs. Say so.
+		log.Printf("[push] NO SUBSCRIPTIONS for user %s — notification dropped (%q). "+
+			"Re-enable notifications in the app to register a new endpoint.", userID, p.Title)
 		return 0, nil
 	}
 	msg, err := json.Marshal(p)
@@ -101,6 +107,18 @@ func (s *Sender) Send(ctx context.Context, userID string, p Payload) (int, error
 		default:
 			log.Printf("[push] endpoint %s returned %d", shorten(sub.Endpoint), resp.StatusCode)
 		}
+	}
+	// Summarise every send. Previously ONLY failures logged, so a healthy
+	// system and a totally dead one were indistinguishable in the journal —
+	// which is exactly how a pruned endpoint went unnoticed for two days.
+	// Push volume is a handful of notifications a day, so a line per send is
+	// cheap and makes "is push working?" answerable by grep.
+	if delivered == 0 {
+		log.Printf("[push] delivered 0/%d for user %s (%q) — nothing reached a device",
+			len(subs), userID, p.Title)
+	} else {
+		log.Printf("[push] delivered %d/%d for user %s (%q)",
+			delivered, len(subs), userID, p.Title)
 	}
 	return delivered, nil
 }

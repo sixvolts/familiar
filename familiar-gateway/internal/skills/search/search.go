@@ -275,43 +275,96 @@ func (s *Skill) executePageRead(ctx context.Context, params json.RawMessage) (sk
 	}, nil
 }
 
-// formatPageRead renders sources newest-style: numbered header with title
-// and URL, then the extracted passages. Stops at the budget and says what
-// it dropped.
+// formatPageRead renders sources under a total character budget, split
+// FAIR-SHARE rather than first-come.
+//
+// The greedy version this replaces filled sources in order until the
+// budget ran out. Measured against the live endpoint, one source came
+// back with 42 snippets totalling ~5.5k characters — so on a 5-source
+// request the first page consumed the entire 6000-char budget and the
+// other four were dropped. That inverts the point of the tool, which is
+// breadth across sources for grounding, not depth on whichever page
+// Brave happened to rank first.
+//
+// Each source now gets budget/N to start. Sources shorter than their
+// share hand the remainder back, and a second pass redistributes it to
+// the ones that were clipped, so a short source never wastes its slice
+// and a long one still gets more than its floor when there is room.
+// Every source that came back is represented, and any that is trimmed
+// says so inline.
 func formatPageRead(sources []brave.ContextSource, budget int) string {
-	var b strings.Builder
-	used := 0
+	if len(sources) == 0 {
+		return ""
+	}
+
+	// Render each source's full text once, then decide what fits.
+	full := make([]string, len(sources))
+	head := make([]string, len(sources))
 	for i, src := range sources {
 		title := src.Title
 		if title == "" {
 			title = "(untitled)"
 		}
-		head := fmt.Sprintf("%d. %s\n   %s", i+1, title, src.URL)
+		head[i] = fmt.Sprintf("%d. %s\n   %s", i+1, title, src.URL)
 		body := strings.Join(src.Snippets, "\n\n")
-		entry := head
+		full[i] = head[i]
 		if body != "" {
-			entry += "\n\n" + body
+			full[i] += "\n\n" + body
 		}
+	}
 
-		if used+len(entry) > budget {
-			// Partial entry is better than none: the header alone tells the
-			// model what source it is missing.
-			remain := budget - used
-			if remain > len(head) {
-				b.WriteString(entry[:remain])
-				b.WriteString("\n   [truncated]")
-			}
-			if left := len(sources) - i; left > 0 {
-				b.WriteString(fmt.Sprintf(
-					"\n\n[%d more source(s) omitted — raise max_chars or narrow the query]", left))
-			}
-			return strings.TrimSpace(b.String())
+	// Reserve the headers: a source is worthless without its URL, and the
+	// model needs to see that the source exists even if the body is cut.
+	reserved := 0
+	for i := range head {
+		reserved += len(head[i]) + 2 // +2 for the blank line between entries
+	}
+	bodyBudget := budget - reserved
+	if bodyBudget < 0 {
+		bodyBudget = 0
+	}
+
+	// Pass 1: equal shares, collecting what the short sources do not use.
+	share := bodyBudget / len(sources)
+	alloc := make([]int, len(sources))
+	spare := 0
+	for i := range full {
+		want := len(full[i]) - len(head[i])
+		if want <= share {
+			alloc[i] = want
+			spare += share - want
+		} else {
+			alloc[i] = share
 		}
+	}
+	// Pass 2: hand the spare to whoever is still short, in order.
+	for i := range full {
+		if spare == 0 {
+			break
+		}
+		want := len(full[i]) - len(head[i])
+		if alloc[i] < want {
+			give := want - alloc[i]
+			if give > spare {
+				give = spare
+			}
+			alloc[i] += give
+			spare -= give
+		}
+	}
+
+	var b strings.Builder
+	for i := range full {
 		if i > 0 {
 			b.WriteString("\n\n")
 		}
-		b.WriteString(entry)
-		used += len(entry)
+		bodyLen := len(full[i]) - len(head[i])
+		if alloc[i] >= bodyLen {
+			b.WriteString(full[i])
+			continue
+		}
+		b.WriteString(full[i][:len(head[i])+alloc[i]])
+		b.WriteString("\n   [trimmed — raise max_chars or ask about one source]")
 	}
 	return strings.TrimSpace(b.String())
 }

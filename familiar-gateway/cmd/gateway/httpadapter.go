@@ -28,6 +28,7 @@ import (
 	"github.com/familiar/gateway/internal/pipeline"
 	"github.com/familiar/gateway/internal/push"
 	"github.com/familiar/gateway/internal/router"
+	"github.com/familiar/gateway/internal/safego"
 	"github.com/familiar/gateway/internal/session"
 	"github.com/familiar/gateway/internal/shards"
 	"github.com/familiar/gateway/internal/sidecar"
@@ -230,18 +231,31 @@ func runHTTPAdapter(ctx context.Context, d httpAdapterDeps, adminHOut **admin.Ha
 					// step). New() returns nil if everything's
 					// missing, in which case we don't bother
 					// installing the hooks.
-					kp := wikiknowledge.New(wikiknowledge.Deps{
-						Engine:      eng,
-						Sidecar:     sc,
-						MemoryStore: memStore,
-						RelStore:    relStore,
+					//
+					// The nil checks matter: a nil *sidecar.Client (or
+					// store) put straight into an interface field is not
+					// a nil interface, so the pipeline took it as wired
+					// and every page save panicked in its goroutine when
+					// the sidecar was disabled.
+					kd := wikiknowledge.Deps{
+						Engine: eng,
 						Embedder: func(ctx context.Context, text string) ([]float32, error) {
 							if embedder == nil {
 								return nil, nil
 							}
 							return embedder(ctx, text)
 						},
-					})
+					}
+					if sc != nil {
+						kd.Sidecar = sc
+					}
+					if memStore != nil {
+						kd.MemoryStore = memStore
+					}
+					if relStore != nil {
+						kd.RelStore = relStore
+					}
+					kp := wikiknowledge.New(kd)
 					// resolveActorName returns the display string the
 					// SSE payload puts in UpdatedBy. For shard
 					// writes it's the shard's name (so idle
@@ -323,6 +337,24 @@ func runHTTPAdapter(ctx context.Context, d httpAdapterDeps, adminHOut **admin.Ha
 					})
 					if kp != nil {
 						log.Printf("[admin] wiki knowledge pipeline installed")
+					}
+					// One-time wiki knowledge re-index (see
+					// wikiknowledge/reindex.go): gives back the facts the
+					// slug-to-page-id re-key dropped. Needs the extractor;
+					// without a sidecar it waits for a boot that has one.
+					if kp != nil && sc != nil && cfg.Memory.WikiReindex {
+						rx := &wikiknowledge.Reindexer{
+							Pipeline: kp,
+							Store: &wikiknowledge.PgReindexStore{
+								DB:    sharedPool,
+								Links: wikiStore.ListPageLinks,
+							},
+						}
+						safego.Go("wiki knowledge re-index", func() {
+							if err := rx.Run(ctx); err != nil && ctx.Err() == nil {
+								log.Printf("[wikiknowledge] re-index stopped: %v (resumes on next boot)", err)
+							}
+						})
 					}
 
 					// Research workers (RESEARCH-SKILL-SPEC §6.2):

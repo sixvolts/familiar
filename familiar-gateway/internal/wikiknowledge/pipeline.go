@@ -233,7 +233,7 @@ func (p *Pipeline) fire(pageID string, st *pageState, due uint64) {
 	evt, gen, live := st.latest, st.gen, p.pages[pageID] == st
 	p.mu.Unlock()
 	if live {
-		p.ingest(context.Background(), evt, st, gen)
+		_ = p.ingest(context.Background(), evt, st, gen)
 	}
 
 	// Forget an idle page, so the map (and the content in latest)
@@ -269,12 +269,29 @@ func (p *Pipeline) OnPageSaved(ctx context.Context, evt SaveEvent) {
 	if p == nil || skipBook(evt.BookSlug) {
 		return
 	}
-	p.ingest(ctx, evt, nil, 0)
+	_ = p.ingest(ctx, evt, nil, 0)
 }
+
+// Outcome is what one ingestion did with a page.
+type Outcome int
+
+const (
+	// Committed: the page's facts now come from this content (a body too
+	// short to extract from committed none).
+	Committed Outcome = iota
+	// Superseded: a newer save or a delete overtook the run, which
+	// changed nothing; the newer save's own run handles the page.
+	Superseded
+	// Skipped: the page isn't ingested (research evidence, or gone).
+	Skipped
+	// Failed: extraction or the write failed; the page's existing
+	// facts were left as they were.
+	Failed
+)
 
 // ingest runs one ingestion. With st set, it commits only while gen is
 // still the page's newest save (see pageState.gen).
-func (p *Pipeline) ingest(ctx context.Context, evt SaveEvent, st *pageState, gen uint64) {
+func (p *Pipeline) ingest(ctx context.Context, evt SaveEvent, st *pageState, gen uint64) Outcome {
 	ctx, cancel := context.WithTimeout(ctx, p.deps.Timeout)
 	defer cancel()
 
@@ -323,15 +340,17 @@ func (p *Pipeline) ingest(ctx context.Context, evt SaveEvent, st *pageState, gen
 		defer st.commit.Unlock()
 		if !p.current(evt.PageID, st, gen) {
 			log.Printf("[wikiknowledge] discarding superseded run for %s", sourceRef)
-			return
+			return Superseded
 		}
 	}
+	outcome := Failed
 	if extracted && p.deps.Engine != nil && evt.PageID != "" {
 		removed, err := p.deps.Engine.ReplaceSourceFacts(ctx, "wiki:"+evt.BookID, "wiki_page", sourceRef, scopeTag, facts)
 		if err != nil {
 			log.Printf("[wikiknowledge] replacing facts for %s failed (keeping the old ones): %v", sourceRef, err)
 		} else {
 			log.Printf("[wikiknowledge] %s: %d fact(s), replacing %d", sourceRef, len(facts), removed)
+			outcome = Committed
 		}
 	}
 	if extracted {
@@ -340,6 +359,49 @@ func (p *Pipeline) ingest(ctx context.Context, evt SaveEvent, st *pageState, gen
 
 	// 3. Wiki link triples for resolved outbound links.
 	p.upsertLinkTriples(ctx, evt, scopeTag)
+	return outcome
+}
+
+// Reingest re-extracts one page now, for the re-index job, reading its
+// content through load (false: the page is gone). It runs under the same
+// per-page rules as a save:
+//
+//   - a page with a save pending or being ingested is left to that run,
+//     which has content at least as new (Superseded);
+//   - the content is read only after the page is registered here, so a
+//     save that lands after the read bumps the page's generation, and
+//     this run's result is discarded rather than committed over it.
+func (p *Pipeline) Reingest(ctx context.Context, pageID string, load func(context.Context) (SaveEvent, bool, error)) (Outcome, error) {
+	if p == nil || pageID == "" {
+		return Skipped, nil
+	}
+	p.mu.Lock()
+	if p.pages[pageID] != nil {
+		p.mu.Unlock()
+		return Superseded, nil
+	}
+	st := &pageState{gen: 1}
+	p.pages[pageID] = st
+	p.mu.Unlock()
+
+	st.run.Lock()
+	defer func() {
+		st.run.Unlock()
+		p.mu.Lock()
+		if p.pages[pageID] == st && st.gen == 1 && st.timer == nil {
+			delete(p.pages, pageID)
+		}
+		p.mu.Unlock()
+	}()
+
+	evt, ok, err := load(ctx)
+	if err != nil {
+		return Failed, err
+	}
+	if !ok || skipBook(evt.BookSlug) {
+		return Skipped, nil
+	}
+	return p.ingest(ctx, evt, st, 1), nil
 }
 
 // OnPageDeleted clears memory rows for the page, and stops any pending

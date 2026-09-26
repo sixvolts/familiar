@@ -1646,6 +1646,23 @@ DO $wiki_id$ BEGIN
     END IF;
 END $wiki_id$;`,
 	},
+	{
+		// Per-page progress of the one-time wiki knowledge re-index
+		// (wikiknowledge.Reindexer), so a restart resumes it instead of
+		// starting over. done_at is set once the page's facts were
+		// re-extracted; attempts counts failed extractions, and a page
+		// that failed too often is given up on (left for its next save).
+		// The whole job records itself done in applied_data_fixes
+		// ('wiki_knowledge_reindex').
+		name: "wiki_reindex_progress",
+		ddl: `
+CREATE TABLE IF NOT EXISTS wiki_reindex_progress (
+    page_id    UUID PRIMARY KEY REFERENCES wiki_pages(id) ON DELETE CASCADE,
+    done_at    TIMESTAMPTZ,
+    attempts   INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT
+);`,
+	},
 }
 
 // migrateLockKey is the pg_advisory_lock key that serializes Migrate

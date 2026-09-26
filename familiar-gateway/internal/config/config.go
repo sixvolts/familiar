@@ -570,6 +570,15 @@ type MemoryConfig struct {
 	// superseding is destructive, so it wants more confidence than
 	// retrieval and less than exact duplication. Default 0.75.
 	SupersedeThreshold float64 `toml:"supersede_threshold"`
+
+	// WikiReindex runs the one-time wiki knowledge re-index in the
+	// background after boot: every live page's facts are re-extracted
+	// and stored under the page's id. Wiki facts used to be keyed by
+	// slug, and the migration that re-keyed them dropped the facts no
+	// live page's slug still matched (most pages renamed after their
+	// first save). The job resumes across restarts and records itself
+	// done in applied_data_fixes. Default true; false skips it.
+	WikiReindex bool `toml:"wiki_reindex"`
 }
 
 // SupersedeThresholdOrDefault returns the configured floor, or the 0.75
@@ -1146,6 +1155,7 @@ func DefaultConfig() *Config {
 			RelevanceThreshold: 0.72,
 			MaxInjected:        10,
 			DedupThreshold:     0.95,
+			WikiReindex:        true,
 		},
 		Rerank: RerankConfig{
 			Enabled:  false,

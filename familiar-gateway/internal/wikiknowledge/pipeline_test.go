@@ -68,6 +68,8 @@ type fakeSidecar struct {
 	// started reports each call as it begins.
 	gate    chan struct{}
 	started chan string
+	// failOn fails every extraction whose page body contains it.
+	failOn string
 }
 
 func (f *fakeSidecar) extract(ctx context.Context, turns []sidecar.Turn, large bool) (sidecar.ExtractionResult, error) {
@@ -94,6 +96,9 @@ func (f *fakeSidecar) extract(ctx context.Context, turns []sidecar.Turn, large b
 	defer f.mu.Unlock()
 	if f.err != nil {
 		return sidecar.ExtractionResult{}, f.err
+	}
+	if f.failOn != "" && strings.Contains(body, f.failOn) {
+		return sidecar.ExtractionResult{}, errors.New("extractor rejected this page")
 	}
 	res := f.result
 	if len(res.Facts) == 0 {

@@ -319,6 +319,17 @@ dedup_threshold = 0.95                # cosine above this = duplicate
 # and less than treating it as an outright duplicate. Validated at boot.
 supersede_threshold = 0.75
 
+# One-time wiki knowledge re-index, run in the background after boot:
+# every live wiki page's facts are re-extracted and stored under the
+# page's id. Needed once after upgrading past slug-keyed wiki facts,
+# whose migration dropped the facts of pages renamed since their first
+# save. One page at a time through the extract model (a large page can
+# hold that model for minutes, so chat may wait if they share it);
+# resumes across restarts and then records itself done. To run it
+# again:  DELETE FROM applied_data_fixes WHERE name LIKE 'wiki_knowledge_reindex%';
+#         TRUNCATE wiki_reindex_progress;   (then restart the gateway)
+wiki_reindex = true
+
 # DEPRECATED, parsed but ignored: use_sidecar_embedder. It routed
 # embedding through a sidecar method that always returned an error, so
 # every call silently fell through to the HTTP embedder anyway.

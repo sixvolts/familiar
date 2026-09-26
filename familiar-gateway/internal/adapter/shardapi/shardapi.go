@@ -263,6 +263,12 @@ func (h *Handler) authenticate(ctx context.Context, r *http.Request, shardID str
 	if !sh.Active() {
 		return nil, http.StatusGone, "shard is disabled"
 	}
+	// The panel's "API invoke enabled" box is the owner's kill switch
+	// for every token at once; shards/types.go promises invocation
+	// refuses while it's off.
+	if !sh.APIEnabled {
+		return nil, http.StatusForbidden, "api invocation is disabled for this shard"
+	}
 	if sh.OwnerID != user.ID {
 		// Defensive: token ownership already matched, but double-check.
 		log.Printf("[shards] auth failed: shard owner drift email=%s shard_owner=%s",

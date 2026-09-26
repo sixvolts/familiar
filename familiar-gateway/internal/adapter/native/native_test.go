@@ -17,12 +17,14 @@ import (
 // the conversation-ownership gate via the cookie path (no resolver
 // needed).
 type fakeSessionReader struct {
-	uid string
-	ok  bool
+	uid     string
+	ok      bool
+	shardID string // non-empty = a shard (kiosk) session owned by uid
+	canChat bool
 }
 
-func (f fakeSessionReader) UserIDFromRequest(*http.Request) (string, bool) {
-	return f.uid, f.ok
+func (f fakeSessionReader) PrincipalFromRequest(*http.Request) (string, string, bool, bool) {
+	return f.uid, f.shardID, f.canChat, f.ok
 }
 
 // fakeConvOwner records the ownership question and returns a canned
@@ -233,5 +235,77 @@ func TestHealthEndpoint(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), `"status":"ok"`) {
 		t.Errorf("health body = %q", w.Body.String())
+	}
+}
+
+// ── Shard (kiosk) sessions ─────────────────────────────────────────
+//
+// A shard session's user id is its owner's. These pin that it can never
+// reach the owner's trusted path: the pipeline is nil in every case, so
+// a request that slipped past the gate would panic instead of passing.
+
+const kioskConv = "22222222-2222-2222-2222-222222222222"
+
+func kioskAdapter(canChat bool, target *ShardChatTarget) *Adapter {
+	a := &Adapter{sessions: session.NewManager()}
+	a.SetSessionReader(fakeSessionReader{uid: "owner", ok: true, shardID: "kitchen", canChat: canChat})
+	a.SetConversationOwner(&fakeConvOwner{owned: true})
+	a.SetShardChatResolver(func(context.Context, string, string) (*ShardChatTarget, string, error) {
+		return target, "", nil
+	})
+	return a
+}
+
+func postChat(t *testing.T, a *Adapter, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("POST", "/api/chat", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	a.handleChat(w, req)
+	return w
+}
+
+func TestChat_ShardSessionWithoutConversationRefused(t *testing.T) {
+	a := kioskAdapter(true, &ShardChatTarget{ShardID: "kitchen"})
+	w := postChat(t, a, `{"message":"what do you remember about me"}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: the no-conversation path is the owner's trusted session (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+func TestChat_ShardSessionChatDisabledRefused(t *testing.T) {
+	a := kioskAdapter(false, &ShardChatTarget{ShardID: "kitchen"})
+	w := postChat(t, a, `{"message":"hi","conversation_id":"`+kioskConv+`"}`)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for a shard with chat disabled (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+func TestChat_ShardSessionOnTrustedConversationRefused(t *testing.T) {
+	// The owner owns the conversation, but it isn't shard-bound: the
+	// resolver returns no target, which means "run the trusted path".
+	a := kioskAdapter(true, nil)
+	w := postChat(t, a, `{"message":"read my journal","conversation_id":"`+kioskConv+`"}`)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for an owner conversation not bound to the shard (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+func TestChat_ShardSessionOnOtherShardsConversationRefused(t *testing.T) {
+	a := kioskAdapter(true, &ShardChatTarget{ShardID: "garage"})
+	w := postChat(t, a, `{"message":"hi","conversation_id":"`+kioskConv+`"}`)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for a conversation bound to a different shard (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+func TestStop_ShardSessionCannotStopOwnerTurn(t *testing.T) {
+	a := kioskAdapter(true, nil) // key resolves to a trusted (owner) conversation
+	a.sessions.GetOrCreateWithID(kioskConv, "workspace", "owner").SetIdentity("workspace", "owner")
+	req := httptest.NewRequest("POST", "/api/chat/stop", strings.NewReader(`{"session_id":"`+kioskConv+`"}`))
+	w := httptest.NewRecorder()
+	a.handleStop(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403: a kiosk must not address its owner's sessions (body: %s)", w.Code, w.Body.String())
 	}
 }

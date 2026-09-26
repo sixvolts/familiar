@@ -325,6 +325,12 @@ func (h *Handler) deleteUserPasskey(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// Deleting a compromised key must also end what it already signed
+	// in; the credential row alone doesn't gate an existing session.
+	if err := h.endCredentialSessions(r.Context(), rawID); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "passkey deleted, but ending its sessions failed: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":            true,
 		"credential_id": stored.ID,

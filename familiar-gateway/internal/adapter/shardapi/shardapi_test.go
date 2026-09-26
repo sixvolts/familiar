@@ -214,6 +214,7 @@ func buildFixtures(t *testing.T) (*fakeStore, *fakeUsers, *fakePipeline, *Handle
 		ID:            testShard,
 		OwnerID:       testOwner,
 		Name:          "Charger Extractor",
+		APIEnabled:    true,
 		Persistence:   shards.PersistenceEphemeral,
 		Visibility:    shards.VisibilityIsolated,
 		ScopeTag:      "shard:charger-extractor",
@@ -330,6 +331,7 @@ func TestInvoke_TokenShardMismatch403(t *testing.T) {
 	st.addShard(&shards.Shard{
 		ID:           "other-shard",
 		OwnerID:      testOwner,
+		APIEnabled:   true,
 		Persistence:  shards.PersistenceEphemeral,
 		Visibility:   shards.VisibilityIsolated,
 		ScopeTag:     "shard:other",
@@ -415,6 +417,25 @@ func TestInvoke_DisabledShard410(t *testing.T) {
 	}
 	if pipe.calls != 0 {
 		t.Errorf("pipeline should not run")
+	}
+}
+
+// The panel's "API invoke enabled" box is the owner's kill switch for
+// every token at once: a valid token must stop working when it's off.
+func TestInvoke_APIDisabled403(t *testing.T) {
+	st, _, pipe, h := buildFixtures(t)
+	st.mu.Lock()
+	st.shards[testShard].APIEnabled = false
+	st.mu.Unlock()
+	rr := doInvoke(t, h, testShard, testEmail, testToken, validBody)
+	if rr.Code != 403 {
+		t.Errorf("code = %d, want 403", rr.Code)
+	}
+	if !strings.Contains(decodeErr(t, rr.Body.Bytes()), "api invocation is disabled") {
+		t.Errorf("expected api-disabled message, got %q", decodeErr(t, rr.Body.Bytes()))
+	}
+	if pipe.calls != 0 {
+		t.Errorf("pipeline ran %d time(s) for an api-disabled shard", pipe.calls)
 	}
 }
 

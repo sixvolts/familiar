@@ -768,6 +768,14 @@ func (h *Handler) deleteShard(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// End the shard's kiosk sessions now. Leaving them for the per-
+	// request revocation check isn't enough: shard ids are owner-chosen
+	// slugs, so recreating "kitchen" would have revived them.
+	if h.sessions != nil {
+		if err := h.sessions.DeleteByShard(r.Context(), id); err != nil {
+			log.Printf("[admin] shard %s delete: ending sessions: %v", id, err)
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": "deleted", "id": id,
 		"disabled_actions": disabledActions,
@@ -817,6 +825,14 @@ func (h *Handler) setShardDisabled(w http.ResponseWriter, r *http.Request, disab
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	// Disabling is the kill switch for a lost kiosk: end its sessions
+	// so re-enabling later requires a fresh passkey login instead of
+	// reviving whatever cookie was out there.
+	if disable && h.sessions != nil {
+		if err := h.sessions.DeleteByShard(r.Context(), id); err != nil {
+			log.Printf("[admin] shard %s disable: ending sessions: %v", id, err)
+		}
 	}
 	loaded, _ := h.shards.GetShard(r.Context(), id)
 	toks, _ := h.shards.ListTokens(r.Context(), id)

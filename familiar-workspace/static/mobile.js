@@ -3861,6 +3861,29 @@ var reader = resp.body.getReader();
             location.reload();
         }
 
+        // A shard (kiosk) session sees only the surfaces its envelope
+        // grants. The gateway refuses the rest, so showing them would
+        // only produce errors, and owner-only surfaces (shards, push,
+        // scheduled actions) never apply to a kiosk. CSS hides
+        // [data-owner-only] for shard sessions; this handles the
+        // panel-gated tabs and menu items.
+        function applyShardEnvelope(status) {
+            if (status.principal_type !== 'shard') return;
+            var perms = status.permissions || {};
+            var panels = Array.isArray(perms.panels) ? perms.panels : null; // null = every panel
+            function granted(name) { return panels === null || panels.indexOf(name) !== -1; }
+            var TAB_PANEL = { chat: 'chat', notes: 'notes', wiki: 'books', scheduled: '' };
+            document.querySelectorAll('.mob-tab[data-tab]').forEach(function (tab) {
+                var t = tab.dataset.tab;
+                if (!Object.prototype.hasOwnProperty.call(TAB_PANEL, t)) return;
+                var p = TAB_PANEL[t];
+                if (!p || !granted(p) || (t === 'chat' && perms.can_chat === false)) tab.hidden = true;
+            });
+            document.querySelectorAll('[data-shard-panel]').forEach(function (el) {
+                if (!granted(el.dataset.shardPanel)) el.hidden = true;
+            });
+        }
+
         async function boot() {
             showView('loading');
             try {
@@ -3876,6 +3899,7 @@ var reader = resp.body.getReader();
                     if (status.permissions && status.permissions.can_chat === false) {
                         document.body.dataset.canChat = 'false';
                     }
+                    applyShardEnvelope(status);
                     hideAll();
                     startApp();
                     applyMaintenanceBanner(status.maintenance);

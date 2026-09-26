@@ -238,3 +238,57 @@ func TestSession_SlidingRenewal(t *testing.T) {
 		t.Errorf("backfilled ttl_seconds = %d, want ~3600", backfilled)
 	}
 }
+
+// Deleting or revoking a passkey must end exactly the sessions it
+// minted: sliding renewal otherwise keeps a stolen session alive.
+func TestSession_DeleteByCredentialEndsOnlyThatKeysSessions(t *testing.T) {
+	s := sessionStoreForTest(t)
+	ctx := context.Background()
+	stolen, err := s.CreateBound(ctx, PrincipalTypeUser, "sess-cred-user", "sess-cred-user", "cred-stolen", time.Hour)
+	if err != nil {
+		t.Fatalf("CreateBound: %v", err)
+	}
+	other, err := s.CreateBound(ctx, PrincipalTypeUser, "sess-cred-user", "sess-cred-user", "cred-other", time.Hour)
+	if err != nil {
+		t.Fatalf("CreateBound: %v", err)
+	}
+	if err := s.DeleteByCredential(ctx, "cred-stolen"); err != nil {
+		t.Fatalf("DeleteByCredential: %v", err)
+	}
+	if _, err := s.Validate(ctx, stolen); !errors.Is(err, ErrSessionInvalid) {
+		t.Errorf("session minted by the deleted key still validates (err=%v)", err)
+	}
+	if _, err := s.Validate(ctx, other); err != nil {
+		t.Errorf("session from a different key was ended too: %v", err)
+	}
+}
+
+// Deleting or disabling a shard ends its kiosk sessions and no others,
+// so a recreated shard with the same id starts clean.
+func TestSession_DeleteByShardEndsOnlyThatShard(t *testing.T) {
+	s := sessionStoreForTest(t)
+	ctx := context.Background()
+	kiosk, err := s.CreateBound(ctx, PrincipalTypeShard, "sess-kitchen", "sess-shard-owner", "cred-k", time.Hour)
+	if err != nil {
+		t.Fatalf("CreateBound: %v", err)
+	}
+	garage, err := s.CreateBound(ctx, PrincipalTypeShard, "sess-garage", "sess-shard-owner", "cred-g", time.Hour)
+	if err != nil {
+		t.Fatalf("CreateBound: %v", err)
+	}
+	owner, err := s.Create(ctx, "sess-shard-owner", time.Hour)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := s.DeleteByShard(ctx, "sess-kitchen"); err != nil {
+		t.Fatalf("DeleteByShard: %v", err)
+	}
+	if _, err := s.Validate(ctx, kiosk); !errors.Is(err, ErrSessionInvalid) {
+		t.Errorf("deleted shard's session still validates (err=%v)", err)
+	}
+	for name, tok := range map[string]string{"other shard": garage, "owner": owner} {
+		if _, err := s.Validate(ctx, tok); err != nil {
+			t.Errorf("%s session was ended too: %v", name, err)
+		}
+	}
+}

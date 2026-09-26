@@ -110,6 +110,13 @@ func (h *Handler) serveMedia(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// A shard session's user id is its owner, so the membership check
+	// below would pass for every owner book. Apply the shard's book
+	// envelope first, as scopeForWiki does for the page routes.
+	if !au.CanAccessBook(m.BookID) {
+		writeJSONError(w, http.StatusNotFound, "not found")
+		return
+	}
 	if !au.IsAdmin() {
 		role, err := h.wiki.MemberRole(r.Context(), m.BookID, au.UserID)
 		if err != nil || role == "" {
@@ -178,6 +185,13 @@ func (h *Handler) deleteMedia(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// A shard session's user id is its owner, so the membership check
+	// below would pass for every owner book. Apply the shard's book
+	// envelope first, as scopeForWiki does for the page routes.
+	if !au.CanAccessBook(m.BookID) {
+		writeJSONError(w, http.StatusNotFound, "not found")
 		return
 	}
 	if !au.IsAdmin() {

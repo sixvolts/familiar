@@ -268,14 +268,14 @@ func (h *Handler) deleteShardPasskey(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	owns := false
-	for _, p := range rows {
-		if p.ID == pid {
-			owns = true
+	var target *StoredShardPasskey
+	for i := range rows {
+		if rows[i].ID == pid {
+			target = &rows[i]
 			break
 		}
 	}
-	if !owns {
+	if target == nil {
 		writeJSONError(w, http.StatusNotFound, "passkey not found")
 		return
 	}
@@ -285,6 +285,12 @@ func (h *Handler) deleteShardPasskey(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// The panel promises "any session it minted is invalidated";
+	// stamping revoked_at alone never touched those sessions.
+	if err := h.endCredentialSessions(r.Context(), target.Credential.ID); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "passkey revoked, but ending its sessions failed: "+err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "revoked", "id": pid})

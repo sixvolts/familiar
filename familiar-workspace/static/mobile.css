@@ -1807,6 +1807,13 @@ button { font-family: inherit; }
     align-items: stretch;
     padding: 4px 6px 0;
 }
+/* Shard (kiosk) sessions: owner-only surfaces never render, and
+   applyShardEnvelope sets [hidden] on tabs and items the envelope
+   doesn't grant. Both beat the author display rules below. */
+body[data-principal-type="shard"] [data-owner-only] { display: none !important; }
+.mob-tab[hidden],
+.mob-overflow-item[hidden] { display: none; }
+
 .mob-tab {
     flex: 1 1 0;
     display: flex;

@@ -1536,6 +1536,20 @@ CREATE TABLE IF NOT EXISTS pending_embeds (
 CREATE INDEX IF NOT EXISTS pending_embeds_enqueued_idx
     ON pending_embeds (enqueued_at);`,
 	},
+	{
+		// The passkey that minted each session, so deleting a user
+		// passkey or revoking a shard passkey can end the sessions it
+		// created. NULL for sessions minted before this column existed.
+		// The principal index serves DeleteByShard.
+		name: "admin_sessions_credential",
+		ddl: `
+ALTER TABLE admin_sessions
+    ADD COLUMN IF NOT EXISTS credential_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_admin_sessions_credential
+    ON admin_sessions (credential_id) WHERE credential_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_admin_sessions_principal
+    ON admin_sessions (principal_type, principal_id);`,
+	},
 }
 
 // migrateLockKey is the pg_advisory_lock key that serializes Migrate

@@ -73,10 +73,41 @@ type ChatResponse struct {
 	MemHits   int    `json:"mem_hits,omitempty"`
 }
 
-// SessionReader resolves an HTTP request's admin session cookie to a
-// canonical user ID. Implemented by *admin.Handler.
+// SessionReader resolves an HTTP request's admin session cookie to the
+// calling principal. Implemented by *admin.Handler. userID is the
+// canonical user, which for a shard (kiosk) session is the shard's
+// OWNER; shardID is set only for shard sessions, and canChat is then
+// that shard's chat_enabled. Every handler here must treat a non-empty
+// shardID as "confined to this shard's own conversations": using
+// userID alone is how a kiosk used to chat as its owner.
 type SessionReader interface {
-	UserIDFromRequest(r *http.Request) (string, bool)
+	PrincipalFromRequest(r *http.Request) (userID, shardID string, canChat, ok bool)
+}
+
+// principal resolves the caller, or ok=false when unauthenticated.
+func (a *Adapter) principal(r *http.Request) (userID, shardID string, canChat, ok bool) {
+	if a.sessionReader == nil {
+		return "", "", false, false
+	}
+	userID, shardID, canChat, ok = a.sessionReader.PrincipalFromRequest(r)
+	if !ok || userID == "" {
+		return "", "", false, false
+	}
+	return userID, shardID, canChat, true
+}
+
+// shardMayAddress reports whether a shard session may act on the
+// session keyed by key. Only a conversation bound to that same shard
+// qualifies; without a resolver nothing does.
+func (a *Adapter) shardMayAddress(ctx context.Context, key, userID, shardID string) bool {
+	a.mu.RLock()
+	resolve := a.shardChat
+	a.mu.RUnlock()
+	if resolve == nil {
+		return false
+	}
+	t, refusal, err := resolve(ctx, key, userID)
+	return err == nil && refusal == "" && t != nil && t.ShardID == shardID
 }
 
 // ConversationOwner verifies that a client-supplied conversation_id
@@ -332,23 +363,32 @@ func (a *Adapter) handleChat(w http.ResponseWriter, r *http.Request) {
 	// accepted identity source: it carries a server-verified canonical
 	// user id, set by SessionStore.Validate during the WebAuthn
 	// handshake, and the cookie's status is re-checked on every
-	// request inside UserIDFromRequest.
+	// request inside PrincipalFromRequest.
 	//
 	// The legacy X-User-Email header path was removed (EXTERNAL-
 	// READINESS-REVIEW.md): it only proved an email was *approved*,
 	// never that the caller owned it, so honoring it on any reachable
 	// interface was an impersonation bypass. Senderless requests
 	// return 401; authenticate via the workspace session.
-	senderID := ""
-	if a.sessionReader != nil {
-		if uid, ok := a.sessionReader.UserIDFromRequest(r); ok {
-			senderID = uid
-		}
-	}
-	if senderID == "" {
+	senderID, shardID, canChat, authed := a.principal(r)
+	if !authed {
 		log.Printf("[http] no identity (no valid session cookie) — rejecting")
 		writeError(w, http.StatusUnauthorized, "no user identity: authenticate via the workspace session")
 		return
+	}
+	// A shard (kiosk) session carries its owner's user id. It may only
+	// chat inside a conversation bound to its own shard, which runs the
+	// shard's envelope; the no-conversation fallback below would run
+	// the owner's trusted path with full memory and every tool.
+	if shardID != "" {
+		if !canChat {
+			writeError(w, http.StatusForbidden, "chat disabled for this session")
+			return
+		}
+		if strings.TrimSpace(req.ConversationID) == "" {
+			writeError(w, http.StatusBadRequest, "conversation_id is required for shard sessions")
+			return
+		}
 	}
 
 	// Per-user concurrency cap on the expensive chat path: one user
@@ -416,6 +456,11 @@ func (a *Adapter) handleChat(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			shardTarget = t
+		}
+		if shardID != "" && (shardTarget == nil || shardTarget.ShardID != shardID) {
+			log.Printf("[http] rejected conversation %q: not bound to session shard %q", convID, shardID)
+			writeError(w, http.StatusForbidden, "conversation not found")
+			return
 		}
 		if shardTarget != nil && shardTarget.Ephemeral {
 			// Fresh, unregistered session per message — same posture
@@ -490,14 +535,13 @@ func (a *Adapter) handleStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	senderID := ""
-	if a.sessionReader != nil {
-		if uid, ok := a.sessionReader.UserIDFromRequest(r); ok {
-			senderID = uid
-		}
-	}
-	if senderID == "" {
+	senderID, shardID, _, authed := a.principal(r)
+	if !authed {
 		writeError(w, http.StatusUnauthorized, "no user identity: authenticate via the workspace session")
+		return
+	}
+	if shardID != "" && !a.shardMayAddress(r.Context(), key, senderID, shardID) {
+		writeError(w, http.StatusForbidden, "session not found")
 		return
 	}
 
@@ -541,14 +585,13 @@ func (a *Adapter) handleTurnStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	senderID := ""
-	if a.sessionReader != nil {
-		if uid, ok := a.sessionReader.UserIDFromRequest(r); ok {
-			senderID = uid
-		}
-	}
-	if senderID == "" {
+	senderID, shardID, _, authed := a.principal(r)
+	if !authed {
 		writeError(w, http.StatusUnauthorized, "no user identity: authenticate via the workspace session")
+		return
+	}
+	if shardID != "" && !a.shardMayAddress(r.Context(), key, senderID, shardID) {
+		writeError(w, http.StatusForbidden, "session not found")
 		return
 	}
 
@@ -763,10 +806,7 @@ func (a *Adapter) handleHealth(w http.ResponseWriter, _ *http.Request) {
 // to a conversation they own. Without this the endpoint streamed any
 // session's memory-write events to anyone who knew (or guessed) the UUID.
 func (a *Adapter) serveMemEvents(w http.ResponseWriter, r *http.Request) {
-	uid, authed := "", false
-	if a.sessionReader != nil {
-		uid, authed = a.sessionReader.UserIDFromRequest(r)
-	}
+	uid, shardID, _, authed := a.principal(r)
 	if !authed {
 		writeError(w, http.StatusUnauthorized, "no user identity: authenticate via the workspace session")
 		return
@@ -774,6 +814,10 @@ func (a *Adapter) serveMemEvents(w http.ResponseWriter, r *http.Request) {
 	sessionID := strings.TrimSpace(r.PathValue("session_id"))
 	if sessionID == "" {
 		writeError(w, http.StatusBadRequest, "missing session_id")
+		return
+	}
+	if shardID != "" && !a.shardMayAddress(r.Context(), sessionID, uid, shardID) {
+		http.NotFound(w, r)
 		return
 	}
 	// Ownership: the stream's session id is the conversation id. A
@@ -796,12 +840,13 @@ func (a *Adapter) serveMemEvents(w http.ResponseWriter, r *http.Request) {
 func (a *Adapter) handleTitle(w http.ResponseWriter, r *http.Request) {
 	// Same fail-closed auth as /api/chat: a valid session cookie is
 	// required. No sessionReader wired (or an invalid cookie) → 401.
-	authed := false
-	if a.sessionReader != nil {
-		_, authed = a.sessionReader.UserIDFromRequest(r)
-	}
+	_, shardID, canChat, authed := a.principal(r)
 	if !authed {
 		writeError(w, http.StatusUnauthorized, "no user identity: authenticate via the workspace session")
+		return
+	}
+	if shardID != "" && !canChat {
+		writeError(w, http.StatusForbidden, "chat disabled for this session")
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxChatBodyBytes)

@@ -62,6 +62,16 @@ func (s *SessionStore) Create(ctx context.Context, userID string, ttl time.Durat
 // the right user). principalID is the shard or user id depending
 // on principalType.
 func (s *SessionStore) CreatePrincipal(ctx context.Context, principalType, principalID, userID string, ttl time.Duration) (string, error) {
+	return s.CreateBound(ctx, principalType, principalID, userID, "", ttl)
+}
+
+// CreateBound mints a session tied to the passkey that authenticated
+// it. credentialID is the base64url credential id (encodeCredentialID),
+// empty when no passkey is involved. Recording it is what lets
+// DeleteByCredential end every session a revoked or deleted passkey
+// minted; without it, sliding renewal kept those sessions alive
+// indefinitely.
+func (s *SessionStore) CreateBound(ctx context.Context, principalType, principalID, userID, credentialID string, ttl time.Duration) (string, error) {
 	if principalType != PrincipalTypeUser && principalType != PrincipalTypeShard {
 		return "", fmt.Errorf("admin: invalid principal_type %q", principalType)
 	}
@@ -71,9 +81,9 @@ func (s *SessionStore) CreatePrincipal(ctx context.Context, principalType, princ
 	}
 	expires := time.Now().Add(ttl)
 	_, err = s.pool.ExecContext(ctx, `
-		INSERT INTO admin_sessions (token, user_id, principal_type, principal_id, expires_at, ttl_seconds)
-		VALUES ($1, $2, $3, $4, $5, $6)
-	`, token, userID, principalType, principalID, expires, int(ttl.Seconds()))
+		INSERT INTO admin_sessions (token, user_id, principal_type, principal_id, expires_at, ttl_seconds, credential_id)
+		VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''))
+	`, token, userID, principalType, principalID, expires, int(ttl.Seconds()), credentialID)
 	if err != nil {
 		return "", err
 	}
@@ -157,6 +167,30 @@ func (s *SessionStore) DeleteByUser(ctx context.Context, userID string) error {
 	return err
 }
 
+// DeleteByCredential ends every session minted by the given passkey
+// (base64url credential id). Called when a user passkey is deleted or a
+// shard passkey revoked. Sessions minted before credential ids were
+// recorded carry NULL and are not matched; they lapse on their idle TTL.
+func (s *SessionStore) DeleteByCredential(ctx context.Context, credentialID string) error {
+	if credentialID == "" {
+		return nil
+	}
+	_, err := s.pool.ExecContext(ctx, `DELETE FROM admin_sessions WHERE credential_id = $1`, credentialID)
+	return err
+}
+
+// DeleteByShard ends every session of one shard principal. Called when
+// the shard is deleted or disabled, so a recreated shard with the same
+// id can't inherit its predecessor's sessions.
+func (s *SessionStore) DeleteByShard(ctx context.Context, shardID string) error {
+	if shardID == "" {
+		return nil
+	}
+	_, err := s.pool.ExecContext(ctx,
+		`DELETE FROM admin_sessions WHERE principal_type = 'shard' AND principal_id = $1`, shardID)
+	return err
+}
+
 // Cleanup drops every expired session in one pass. Safe to run on a
 // timer — bounded by the size of the table.
 func (s *SessionStore) Cleanup(ctx context.Context) error {
@@ -191,6 +225,15 @@ func (s *SessionStore) StartGC(ctx context.Context, interval time.Duration) {
 			}
 		}
 	}()
+}
+
+// endCredentialSessions ends every session the given passkey minted.
+// A nil session store (test harnesses) has nothing to end.
+func (h *Handler) endCredentialSessions(ctx context.Context, rawCredentialID []byte) error {
+	if h.sessions == nil {
+		return nil
+	}
+	return h.sessions.DeleteByCredential(ctx, encodeCredentialID(rawCredentialID))
 }
 
 func randomToken() (string, error) {

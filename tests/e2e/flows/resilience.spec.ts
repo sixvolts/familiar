@@ -295,3 +295,154 @@ test("the client leaves the reply to the gateway when the gateway saves it", asy
         await ctx.close();
     }
 });
+
+function openConversation(page: Page, id: string) {
+    return page.evaluate((cid) => {
+        window.dispatchEvent(new CustomEvent("familiar:openDoc", { detail: { surface: "chat", id: cid } }));
+    }, id);
+}
+
+// holdRequests holds every request route matches until release(), then
+// lets it through. held() reports whether one arrived.
+async function holdRequests(page: Page, url: string, method: string) {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let arrived = false;
+    await page.route(url, async (route) => {
+        if (route.request().method() !== method) return route.fallback();
+        arrived = true;
+        await gate;
+        await route.continue();
+    });
+    return { release, held: () => arrived };
+}
+
+// A new chat whose create request is slow must not take the shell away
+// from a conversation opened while it was pending.
+test("a slow new chat doesn't take the shell from a conversation opened meanwhile", async ({
+    stack,
+    browser,
+    request,
+}) => {
+    const user = await createTestUser();
+    const a = await (
+        await request.post(`${stack.workspaceURL}/console/api/conversations`, {
+            headers: authed(user),
+            data: { title: "Thread A", model: "familiar" },
+        })
+    ).json();
+    const ctx = await browser.newContext();
+    await attachSession(ctx, stack.workspaceURL, user);
+    const page = await ctx.newPage();
+    try {
+        const create = await holdRequests(page, "**/console/api/conversations", "POST");
+        const shell = await openChat(page, stack); // starts a new chat
+        await expect.poll(create.held, { timeout: 10_000 }).toBe(true);
+
+        await openConversation(page, a.id);
+        await expect(shell.locator(".chat-conv-title")).toHaveValue("Thread A", { timeout: 10_000 });
+
+        const created = page.waitForResponse(
+            (r) => r.request().method() === "POST" && /\/console\/api\/conversations$/.test(r.url()),
+        );
+        create.release();
+        await created;
+        await page.waitForTimeout(500);
+        await expect(shell.locator(".chat-conv-title")).toHaveValue("Thread A");
+    } finally {
+        await ctx.close();
+    }
+});
+
+// Two opens in a row where the first answers last: the shell shows the
+// second, not the first's messages under the second's id.
+test("a slow conversation load doesn't paint over one opened after it", async ({ stack, browser, request }) => {
+    const user = await createTestUser();
+    const make = async (title: string, text: string) => {
+        const c = await (
+            await request.post(`${stack.workspaceURL}/console/api/conversations`, {
+                headers: authed(user),
+                data: { title, model: "familiar" },
+            })
+        ).json();
+        await request.post(`${stack.workspaceURL}/console/api/conversations/${c.id}/messages`, {
+            headers: authed(user),
+            data: { role: "user", content: text },
+        });
+        return c;
+    };
+    const a = await make("Thread A", "message in A");
+    const b = await make("Thread B", "message in B");
+    const ctx = await browser.newContext();
+    await attachSession(ctx, stack.workspaceURL, user);
+    const page = await ctx.newPage();
+    try {
+        const shell = await openChat(page, stack);
+        await expect(shell.locator(".chat-conv-title")).toHaveValue("Conversation", { timeout: 10_000 });
+
+        const loadA = await holdRequests(page, `**/console/api/conversations/${a.id}`, "GET");
+        await openConversation(page, a.id);
+        await expect.poll(loadA.held, { timeout: 10_000 }).toBe(true);
+        await openConversation(page, b.id);
+        await expect(shell.locator(".chat-conv-title")).toHaveValue("Thread B", { timeout: 10_000 });
+        await expect(shell.locator(".chat-messages")).toContainText("message in B");
+
+        const loadedA = page.waitForResponse((r) => r.url().endsWith(`/console/api/conversations/${a.id}`));
+        loadA.release();
+        await loadedA;
+        await page.waitForTimeout(500);
+        await expect(shell.locator(".chat-conv-title")).toHaveValue("Thread B");
+        await expect(shell.locator(".chat-messages")).not.toContainText("message in A");
+    } finally {
+        await ctx.close();
+    }
+});
+
+// A background reload of the open conversation (here: its research run
+// finishing) is not a switch: it must not cancel a New chat the user
+// started while it ran.
+test("a background refresh doesn't cancel a pending new chat", async ({ stack, browser, request }) => {
+    const user = await createTestUser();
+    const a = await (
+        await request.post(`${stack.workspaceURL}/console/api/conversations`, {
+            headers: authed(user),
+            data: { title: "Thread A", model: "familiar" },
+        })
+    ).json();
+    const ctx = await browser.newContext();
+    await attachSession(ctx, stack.workspaceURL, user);
+    const page = await ctx.newPage();
+    try {
+        let running = true;
+        await page.route("**/console/api/research/runs/active*", (route) =>
+            route.fulfill({
+                status: 200,
+                contentType: "application/json",
+                body: JSON.stringify({ run: running ? { id: "run-1", status: "researching", topic: "t" } : null }),
+            }),
+        );
+        const shell = await openChat(page, stack);
+        await expect(shell.locator(".chat-conv-title")).toHaveValue("Conversation", { timeout: 10_000 });
+        await openConversation(page, a.id);
+        await expect(shell.locator(".chat-conv-title")).toHaveValue("Thread A", { timeout: 10_000 });
+
+        const create = await holdRequests(page, "**/console/api/conversations", "POST");
+        await page.evaluate(() => {
+            window.dispatchEvent(new CustomEvent("familiar:openDoc", { detail: { surface: "chat" } }));
+        });
+        await expect.poll(create.held, { timeout: 10_000 }).toBe(true);
+
+        // The run finishes: the next poll reloads Thread A in the background.
+        const refetched = page.waitForRequest(
+            (r) => r.method() === "GET" && r.url().endsWith(`/console/api/conversations/${a.id}`),
+            { timeout: 15_000 },
+        );
+        running = false;
+        await refetched;
+
+        create.release();
+        await expect(shell.locator(".chat-conv-title")).toHaveValue("Conversation", { timeout: 10_000 });
+    } finally {
+        await ctx.close();
+    }
+});

@@ -264,6 +264,14 @@
             researchLastRun: null,
             researchOpenedRunId: null,
             researchEvTabId: null,
+            // navSeq counts switches of what the shell shows (open a
+            // conversation, start a new chat, back to the splash). A
+            // request started for an earlier switch that resolves after
+            // a later one must not repaint the shell: a slow new-chat
+            // POST used to take the shell away from a conversation
+            // opened meanwhile, and a slow load painted one
+            // conversation's messages under another's id.
+            navSeq: 0,
         };
 
         // ── Shell DOM ─────────────────────────────────────────
@@ -780,6 +788,7 @@
             });
         }
         function enterSplash() {
+            localState.navSeq++;
             // Clear conversation state so the workspace's isTabEmpty
             // sees this tab as "available" — the next sidebar nav
             // click will reuse it instead of stacking another splash.
@@ -846,7 +855,7 @@
                         // conversation; reloading unconditionally yanked
                         // them back from wherever they'd gone.
                         if (localState.conversationId === convID) {
-                            await loadConversation(convID);
+                            await loadConversation(convID, { refresh: true });
                         }
                         return true;
                     }
@@ -874,8 +883,13 @@
             return false;
         }
 
-        async function loadConversation(id) {
+        // opts.refresh marks a background reload of the conversation
+        // already open (a finished research run, a recovered reply). It
+        // isn't a switch, so it must not cancel one the user started
+        // meanwhile (a New chat whose create is still pending).
+        async function loadConversation(id, opts) {
             exitSplash();
+            const nav = opts && opts.refresh ? localState.navSeq : ++localState.navSeq;
             localState.conversationId = id;
             tab.state = { conversationId: id };
             // Scope the research poll to the conversation now open —
@@ -884,6 +898,7 @@
             renderConvList();
             try {
                 const resp = await apiJSON("/console/api/conversations/" + encodeURIComponent(id));
+                if (localState.navSeq !== nav) return; // the user has moved on
                 const conv = resp && resp.conversation;
                 const msgs = (resp && resp.messages) || [];
                 titleEl.value = (conv && conv.title) || "Conversation";
@@ -895,6 +910,7 @@
                     window.FamiliarWorkspace.updateTabTitle(tab.id, titleEl.value);
                 }
             } catch (e) {
+                if (localState.navSeq !== nav) return;
                 // Deleted on another device (or a stale localStorage
                 // tab restore) — land on the splash instead of a
                 // dead-end error tab, and drop the ghost row.
@@ -1008,7 +1024,7 @@
                 localState.researchLastRun = null;
                 // Refetch so the just-delivered summary (or failure
                 // note) appears, then the card is gone.
-                if (localState.conversationId === id) loadConversation(id);
+                if (localState.conversationId === id) loadConversation(id, { refresh: true });
                 // The note was written server-side (deep synthesis) or by
                 // the async writer, so no __TOOL_EFFECT__:note_changed
                 // reached the client — refresh the notes rail explicitly
@@ -1271,6 +1287,7 @@
         async function newConversation(shardID) {
             try {
                 exitSplash();
+                const nav = ++localState.navSeq;
                 const c = await apiJSON("/console/api/conversations", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -1278,7 +1295,9 @@
                 });
                 localState.conversations.unshift(c);
                 renderConvList();
-                loadConversation(c.id);
+                // Opened something else while this was being created:
+                // stay there; the new chat is in the list.
+                if (localState.navSeq === nav) loadConversation(c.id);
                 // Refresh the sidebar rail's Chat list so the new thread
                 // appears immediately — deletion already broadcasts
                 // (familiar:conversationDeleted), creation did not, so the

@@ -560,13 +560,40 @@ func TestSaveFact_PropagatesExcludeFromHot(t *testing.T) {
 // manager and lets a test dictate which (id, user) pairs "own" a row.
 type fakeManager struct {
 	owners       map[string]string // memoryID -> ownerUserID
+	scopes       map[string]string // memoryID -> scope_tag ("" = top-level)
+	isolated     map[string]bool   // scope tags that belong to an isolated shard
+	content      map[string]string // memoryID -> content, for SearchInScope
 	lastDelID    string
 	lastDelUser  string
 	deleteCalled bool
+	lastFilter   mem.MemoryFilter
+	scopedCalls  []string // scope tags SearchInScope was asked for
 }
 
-func (m *fakeManager) ListMemories(context.Context, mem.MemoryFilter, int, int) ([]mem.MemoryRow, error) {
+func (m *fakeManager) ListMemories(_ context.Context, f mem.MemoryFilter, _, _ int) ([]mem.MemoryRow, error) {
+	m.lastFilter = f
 	return nil, nil
+}
+
+func (m *fakeManager) SearchInScope(_ context.Context, _ []float32, _ int, _ float64, userID, scopeTag string) ([]mem.MemoryResult, error) {
+	m.scopedCalls = append(m.scopedCalls, scopeTag)
+	var out []mem.MemoryResult
+	for id, owner := range m.owners {
+		if owner == userID && m.scopes[id] == scopeTag {
+			out = append(out, mem.MemoryResult{ID: id, Content: m.content[id], Similarity: 0.9})
+		}
+	}
+	return out, nil
+}
+
+func (m *fakeManager) InView(_ context.Context, id, userID, scopeTag string) (bool, error) {
+	if m.owners[id] != userID {
+		return false, nil
+	}
+	if scopeTag != "" {
+		return m.scopes[id] == scopeTag, nil
+	}
+	return !m.isolated[m.scopes[id]], nil
 }
 func (m *fakeManager) UpdateMemoryContent(context.Context, string, string, string, []float32) error {
 	return nil
@@ -600,15 +627,17 @@ func TestForgetFact_ExplicitIDIsOwnerScoped(t *testing.T) {
 		t.Errorf("own delete content = %q, want a Forgot confirmation", res.Content)
 	}
 
-	// Alice names Bob's row → the scoped delete refuses (owner mismatch),
-	// surfaced as a benign not-found rather than a cross-user delete.
+	// Alice names Bob's row → refused (owner mismatch, caught by the
+	// view check before any delete), surfaced as a benign not-found
+	// rather than a cross-user delete. Any delete that does run must
+	// still be scoped to alice.
 	mgr.deleteCalled = false
 	res, err = s.Execute(ctx, "forget_fact", json.RawMessage(`{"id":"bobs-456"}`))
 	if err != nil {
 		t.Fatalf("forget other: %v", err)
 	}
-	if !mgr.deleteCalled || mgr.lastDelUser != "alice" {
-		t.Errorf("expected an owner-scoped delete attempt as alice, got called=%v user=%q", mgr.deleteCalled, mgr.lastDelUser)
+	if mgr.deleteCalled && mgr.lastDelUser != "alice" {
+		t.Errorf("cross-user delete ran as %q", mgr.lastDelUser)
 	}
 	if !strings.Contains(res.Content, "not found") {
 		t.Errorf("cross-user delete content = %q, want a not-found message", res.Content)
@@ -631,5 +660,109 @@ func TestRemember_PropagatesScopeTag(t *testing.T) {
 	}
 	if len(eng.committed) != 1 || eng.committed[0].ScopeTag != "shard:notes" {
 		t.Errorf("remember ScopeTag = %q, want shard:notes", eng.committed[0].ScopeTag)
+	}
+}
+
+// ── Shard scope ────────────────────────────────────────────────────
+//
+// A shard turn runs with its OWNER's user id. The memory tools must act
+// only on the shard's own scope; before, they read, listed, deleted and
+// rewrote the owner's whole memory from inside any shard.
+
+func shardCtx(owner, shardID, scope string) context.Context {
+	return skills.WithContext(context.Background(), skills.SessionContext{
+		UserID: owner, ShardID: shardID, ScopeTag: scope,
+	})
+}
+
+func scopedFixture() *fakeManager {
+	return &fakeManager{
+		owners:   map[string]string{"owner-fact": "alice", "kiosk-fact": "alice", "other-shard-fact": "alice"},
+		scopes:   map[string]string{"owner-fact": "", "kiosk-fact": "shard:kiosk", "other-shard-fact": "shard:clinic"},
+		isolated: map[string]bool{"shard:kiosk": true, "shard:clinic": true},
+		content:  map[string]string{"owner-fact": "salary is 90k", "kiosk-fact": "milk is low", "other-shard-fact": "patient notes"},
+	}
+}
+
+func TestForgetFact_ShardCannotDeleteOwnerFactByID(t *testing.T) {
+	mgr := scopedFixture()
+	s := New(nil, nil, func(context.Context, string) ([]float32, error) { return []float32{1}, nil }, WithManager(mgr))
+	res, err := s.Execute(shardCtx("alice", "kiosk", "shard:kiosk"), "forget_fact", json.RawMessage(`{"id":"owner-fact"}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if mgr.deleteCalled {
+		t.Fatalf("a shard turn deleted the owner's top-level fact (result %q)", res.Content)
+	}
+	if _, err := s.Execute(shardCtx("alice", "kiosk", "shard:kiosk"), "forget_fact", json.RawMessage(`{"id":"kiosk-fact"}`)); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if mgr.lastDelID != "kiosk-fact" {
+		t.Errorf("shard couldn't forget its own fact: last delete %q", mgr.lastDelID)
+	}
+}
+
+func TestForgetFact_TrustedPathCannotDeleteIsolatedShardFact(t *testing.T) {
+	mgr := scopedFixture()
+	s := New(nil, nil, func(context.Context, string) ([]float32, error) { return []float32{1}, nil }, WithManager(mgr))
+	ctx := skills.WithContext(context.Background(), skills.SessionContext{UserID: "alice"})
+	if _, err := s.Execute(ctx, "forget_fact", json.RawMessage(`{"id":"other-shard-fact"}`)); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if mgr.deleteCalled {
+		t.Fatal("the owner's assistant deleted an isolated shard's private fact")
+	}
+}
+
+func TestSearchMemory_ShardSearchesOnlyItsScope(t *testing.T) {
+	mgr := scopedFixture()
+	// A store whose Search returns the owner's top-level fact: the
+	// shard path must never consult it.
+	store := &fakeStore{results: []mem.MemoryResult{{ID: "owner-fact", Content: "salary is 90k", Similarity: 0.99}}}
+	s := New(nil, store, func(context.Context, string) ([]float32, error) { return []float32{1}, nil }, WithManager(mgr))
+	res, err := s.Execute(shardCtx("alice", "kiosk", "shard:kiosk"), "search_memory", json.RawMessage(`{"query":"salary"}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if strings.Contains(res.Content, "90k") {
+		t.Fatalf("shard search returned the owner's memory: %q", res.Content)
+	}
+	if len(mgr.scopedCalls) != 1 || mgr.scopedCalls[0] != "shard:kiosk" {
+		t.Errorf("scoped search calls = %v, want one for shard:kiosk", mgr.scopedCalls)
+	}
+}
+
+func TestListMyMemories_ScopedToView(t *testing.T) {
+	mgr := scopedFixture()
+	s := New(nil, nil, nil, WithManager(mgr))
+	if _, err := s.Execute(shardCtx("alice", "kiosk", "shard:kiosk"), "list_my_memories", json.RawMessage(`{"query":"x"}`)); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if mgr.lastFilter.ScopeTag != "shard:kiosk" || mgr.lastFilter.TopLevelOnly {
+		t.Errorf("shard list filter = scope %q top-level %v, want shard:kiosk only", mgr.lastFilter.ScopeTag, mgr.lastFilter.TopLevelOnly)
+	}
+	ctx := skills.WithContext(context.Background(), skills.SessionContext{UserID: "alice"})
+	if _, err := s.Execute(ctx, "list_my_memories", json.RawMessage(`{"query":"x"}`)); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if mgr.lastFilter.ScopeTag != "" || !mgr.lastFilter.TopLevelOnly {
+		t.Errorf("trusted list filter = scope %q top-level %v, want top-level only", mgr.lastFilter.ScopeTag, mgr.lastFilter.TopLevelOnly)
+	}
+}
+
+func TestMemoryTools_ShardWithoutScopeRefused(t *testing.T) {
+	mgr := scopedFixture()
+	s := New(nil, &fakeStore{}, func(context.Context, string) ([]float32, error) { return []float32{1}, nil }, WithManager(mgr))
+	for _, tool := range []string{"search_memory", "list_my_memories", "forget_fact", "correct_fact"} {
+		res, err := s.Execute(shardCtx("alice", "kiosk", ""), tool, json.RawMessage(`{"query":"x","id":"owner-fact","new_content":"y"}`))
+		if err != nil {
+			t.Fatalf("%s: %v", tool, err)
+		}
+		if res.Error == "" {
+			t.Errorf("%s ran inside a shard with no scope: %q", tool, res.Content)
+		}
+	}
+	if mgr.deleteCalled {
+		t.Error("forget_fact deleted a row from an unscoped shard turn")
 	}
 }

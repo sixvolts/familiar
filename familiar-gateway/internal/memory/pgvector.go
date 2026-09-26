@@ -119,6 +119,7 @@ func (s *PgVectorStore) Search(ctx context.Context, vector []float32, limit int,
 		        OR NOT EXISTS (
 		          SELECT 1 FROM shards sh
 		          WHERE sh.scope_tag = m.scope_tag
+		            AND sh.owner_id = m.user_id
 		            AND sh.visibility = 'isolated'
 		        ))
 		 ORDER BY embedding <=> $1::vector
@@ -208,6 +209,7 @@ func (s *PgVectorStore) HybridSearch(ctx context.Context, queryText string, vect
 		       AND (m.scope_tag IS NULL
 		            OR NOT EXISTS (SELECT 1 FROM shards sh
 		                            WHERE sh.scope_tag = m.scope_tag
+		                              AND sh.owner_id = m.user_id
 		                              AND sh.visibility = 'isolated'))
 		     ORDER BY m.embedding <=> $1::vector
 		     LIMIT $4
@@ -225,6 +227,7 @@ func (s *PgVectorStore) HybridSearch(ctx context.Context, queryText string, vect
 		       AND (m.scope_tag IS NULL
 		            OR NOT EXISTS (SELECT 1 FROM shards sh
 		                            WHERE sh.scope_tag = m.scope_tag
+		                              AND sh.owner_id = m.user_id
 		                              AND sh.visibility = 'isolated'))
 		     ORDER BY ts_rank_cd(to_tsvector('english', m.content), q) DESC
 		     LIMIT $4
@@ -371,10 +374,14 @@ func (s *PgVectorStore) NearestSimilarity(ctx context.Context, vector []float32,
 // scope_tag = callerScope would leave an isolated shard's own write path
 // with no candidate at all (so no dedup and no supersede, ever), and would
 // newly refuse to supersede *promoted* shard facts, which top-level
-// retrieval does surface. What must not happen is the reverse: a trusted
-// turn reaching into some isolated shard's private rows. So: rows sharing
-// the caller's own scope_tag are always fair game, and beyond that only
-// rows that belong to no isolated shard.
+// retrieval does surface. Two things must not happen. A trusted turn must
+// not reach into an isolated shard's private rows. And an ISOLATED caller
+// must not reach out: its replacement row is invisible to top-level
+// retrieval while the row it supersedes is hidden from it, so a shard fed
+// untrusted input could erase the owner's facts at will. So: rows sharing
+// the caller's own scope_tag are always fair game; beyond that, only a
+// caller that is not an isolated shard sees other rows, and only rows
+// that belong to no isolated shard.
 func (s *PgVectorStore) NearestLiveFacts(ctx context.Context, vector []float32, userID, scopeTag string, limit int) ([]NearestFact, error) {
 	if len(vector) == 0 || limit <= 0 {
 		return nil, nil
@@ -396,11 +403,16 @@ func (s *PgVectorStore) NearestLiveFacts(ctx context.Context, vector []float32, 
 		   AND NOT EXISTS (SELECT 1 FROM memories s WHERE s.supersedes = m.id)
 		   AND (m.user_id IS NULL OR m.user_id = $2)
 		   AND (m.scope_tag IS NOT DISTINCT FROM $3
-		        OR NOT EXISTS (
-		          SELECT 1 FROM shards sh
-		          WHERE sh.scope_tag = m.scope_tag
-		            AND sh.visibility = 'isolated'
-		        ))
+		        OR (NOT EXISTS (
+		              SELECT 1 FROM shards caller
+		              WHERE caller.scope_tag = $3
+		                AND caller.owner_id = $2
+		                AND caller.visibility = 'isolated')
+		            AND NOT EXISTS (
+		              SELECT 1 FROM shards sh
+		              WHERE sh.scope_tag = m.scope_tag
+		                AND sh.owner_id = m.user_id
+		                AND sh.visibility = 'isolated')))
 		 ORDER BY m.embedding <=> $1::vector
 		 LIMIT $4`,
 		vecStr, userID, scopeParam, limit)

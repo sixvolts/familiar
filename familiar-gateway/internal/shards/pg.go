@@ -247,7 +247,21 @@ func (s *PGStore) UpdateShard(ctx context.Context, sh *Shard) error {
 	if sh.SessionMaxAge != nil {
 		sessionMaxAge = sql.NullInt32{Int32: int32(*sh.SessionMaxAge), Valid: true}
 	}
-	res, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("shards: update %s: begin: %w", sh.ID, err)
+	}
+	defer tx.Rollback()
+	var oldOwner, oldTag string
+	err = tx.QueryRowContext(ctx,
+		`SELECT owner_id, scope_tag FROM shards WHERE id = $1 FOR UPDATE`, sh.ID).Scan(&oldOwner, &oldTag)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrShardNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("shards: update %s: load: %w", sh.ID, err)
+	}
+	res, err := tx.ExecContext(ctx, `
 		UPDATE shards SET
 		    name              = $2,
 		    description       = $3,
@@ -286,6 +300,51 @@ func (s *PGStore) UpdateShard(ctx context.Context, sh *Shard) error {
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return ErrShardNotFound
+	}
+	// Memory rows carry the scope tag, not the shard id, and isolation is
+	// decided at query time by matching the tag to a shard. Renaming the
+	// tag without re-tagging the rows left everything written before the
+	// rename matching no shard, so an isolated shard's private rows
+	// surfaced in the owner's top-level retrieval.
+	if oldTag != sh.ScopeTag {
+		if err := retagScope(ctx, tx, oldOwner, oldTag, sh.ScopeTag); err != nil {
+			return fmt.Errorf("shards: update %s: %w", sh.ID, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// retagScope moves an owner's memory rows and triples from one scope tag
+// to another.
+func retagScope(ctx context.Context, tx *sql.Tx, ownerID, from, to string) error {
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE memories SET scope_tag = $3 WHERE user_id = $1 AND scope_tag = $2`, ownerID, from, to); err != nil {
+		return fmt.Errorf("retag memories: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE relationships SET scope_tag = $3 WHERE user_id = $1 AND scope_tag = $2`, ownerID, from, to); err != nil {
+		return fmt.Errorf("retag relationships: %w", err)
+	}
+	return nil
+}
+
+// purgeScope deletes an owner's memory rows and triples carrying one
+// scope tag. Rows elsewhere that supersede a purged row are detached
+// first (the self-FK has no ON DELETE action).
+func purgeScope(ctx context.Context, tx *sql.Tx, ownerID, tag string) error {
+	if _, err := tx.ExecContext(ctx, `
+		WITH doomed AS (
+			SELECT id FROM memories WHERE user_id = $1 AND scope_tag = $2
+		), detach AS (
+			UPDATE memories SET supersedes = NULL
+			 WHERE supersedes IN (SELECT id FROM doomed)
+		)
+		DELETE FROM memories WHERE id IN (SELECT id FROM doomed)`, ownerID, tag); err != nil {
+		return fmt.Errorf("purge memories: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM relationships WHERE user_id = $1 AND scope_tag = $2`, ownerID, tag); err != nil {
+		return fmt.Errorf("purge relationships: %w", err)
 	}
 	return nil
 }
@@ -326,15 +385,37 @@ func (s *PGStore) EnableShard(ctx context.Context, id string) error {
 }
 
 // DeleteShard removes the shard row; tokens are cascaded by the FK.
+//
+// An ISOLATED shard's memory rows and triples are deleted with it.
+// Isolation is decided at query time by a shards row matching the tag,
+// so leaving them behind turned the shard's private memory, including
+// whatever untrusted input it processed, into the owner's top-level
+// memory the moment the shard was gone. A promoted shard's rows were
+// already part of the owner's memory and stay.
 func (s *PGStore) DeleteShard(ctx context.Context, id string) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM shards WHERE id = $1`, id)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("shards: delete %s: %w", id, err)
+		return fmt.Errorf("shards: delete %s: begin: %w", id, err)
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	defer tx.Rollback()
+	var owner, tag, visibility string
+	err = tx.QueryRowContext(ctx,
+		`SELECT owner_id, scope_tag, visibility FROM shards WHERE id = $1 FOR UPDATE`, id).Scan(&owner, &tag, &visibility)
+	if errors.Is(err, sql.ErrNoRows) {
 		return ErrShardNotFound
 	}
-	return nil
+	if err != nil {
+		return fmt.Errorf("shards: delete %s: load: %w", id, err)
+	}
+	if VisibilityMode(visibility) == VisibilityIsolated && !strings.HasPrefix(tag, ReservedBookScopePrefix) {
+		if err := purgeScope(ctx, tx, owner, tag); err != nil {
+			return fmt.Errorf("shards: delete %s: %w", id, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM shards WHERE id = $1`, id); err != nil {
+		return fmt.Errorf("shards: delete %s: %w", id, err)
+	}
+	return tx.Commit()
 }
 
 // -----------------------------------------------------------------------------

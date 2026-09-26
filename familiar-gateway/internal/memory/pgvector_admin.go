@@ -104,7 +104,23 @@ type MemoryFilter struct {
 	UserID           string // effective when UserIDFilterMode == UserIDFilterExact
 	UserIDFilterMode UserIDFilterMode
 	IncludeSupersed  bool // true = also return superseded rows (default false)
+	// ScopeTag, when set, keeps only rows carrying exactly that
+	// scope_tag: a shard's own memory. TopLevelOnly instead drops rows
+	// that belong to one of the row owner's isolated shards: the view
+	// the owner's assistant has. The chat memory tools set one or the
+	// other; the admin browser sets neither and sees everything.
+	ScopeTag     string
+	TopLevelOnly bool
 }
+
+// isolatedRowPredicate is true for a memories row (alias m) that belongs
+// to one of its owner's isolated shards. Owner-scoped: shards are only
+// unique per (owner_id, scope_tag), so matching the tag alone let one
+// user's shard hide another user's rows.
+const isolatedRowPredicate = `EXISTS (SELECT 1 FROM shards sh
+	WHERE sh.scope_tag = m.scope_tag
+	  AND sh.owner_id = m.user_id
+	  AND sh.visibility = 'isolated')`
 
 // UserIDFilterMode controls how the filter treats the user_id column.
 type UserIDFilterMode int
@@ -279,6 +295,75 @@ func (s *PgVectorStore) DeleteMemoryOwned(ctx context.Context, id, userID string
 	}
 	n, _ := res.RowsAffected()
 	return n > 0, nil
+}
+
+// SearchInScope is semantic search confined to one shard's own memory:
+// the user's live rows carrying exactly scopeTag. It is the shard-turn
+// counterpart of Search, which serves the owner's top-level view and so
+// must never answer a shard's memory tools.
+func (s *PgVectorStore) SearchInScope(ctx context.Context, vector []float32, limit int, threshold float64, userID, scopeTag string) ([]MemoryResult, error) {
+	if len(vector) == 0 || userID == "" || scopeTag == "" {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT m.id::text, m.content, m.scope, 1 - (m.embedding <=> $1::vector) AS similarity, m.created_at
+		 FROM memories m
+		 WHERE m.embedding IS NOT NULL
+		   AND 1 - (m.embedding <=> $1::vector) > $2
+		   AND m.source_type != 'conversation'
+		   AND NOT EXISTS (SELECT 1 FROM memories s WHERE s.supersedes = m.id)
+		   AND m.user_id = $4
+		   AND m.scope_tag = $5
+		 ORDER BY m.embedding <=> $1::vector
+		 LIMIT $3`,
+		vectorToString(vector), threshold, limit, userID, scopeTag)
+	if err != nil {
+		return nil, fmt.Errorf("pgvector search in scope: %w", err)
+	}
+	defer rows.Close()
+	var out []MemoryResult
+	for rows.Next() {
+		var r MemoryResult
+		var scope sql.NullString
+		if err := rows.Scan(&r.ID, &r.Content, &scope, &r.Similarity, &r.CreatedAt); err != nil {
+			return nil, fmt.Errorf("pgvector search in scope scan: %w", err)
+		}
+		r.Scope = scope.String
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// InView reports whether memory id is one the chat memory tools may act
+// on for userID: owned by the user, and inside the caller's view. An
+// empty scopeTag is the trusted view (not in any of the user's isolated
+// shards); a non-empty one is that shard's own scope. The tools accept a
+// model-supplied id, so this is what stops a shard turn from deleting or
+// rewriting the owner's facts, and the owner's assistant from editing an
+// isolated shard's private rows.
+func (s *PgVectorStore) InView(ctx context.Context, id, userID, scopeTag string) (bool, error) {
+	if id == "" || userID == "" {
+		return false, nil
+	}
+	q := `SELECT EXISTS (SELECT 1 FROM memories m
+	       WHERE m.id = $1::uuid AND m.user_id = $2 AND `
+	args := []any{id, userID}
+	if scopeTag != "" {
+		q += `m.scope_tag = $3)`
+		args = append(args, scopeTag)
+	} else {
+		q += `NOT ` + isolatedRowPredicate + `)`
+	}
+	var ok bool
+	if err := s.db.QueryRowContext(ctx, q, args...).Scan(&ok); err != nil {
+		// A malformed id is a model mistake, not an error: treat it as
+		// not in view rather than surfacing a SQL error.
+		if strings.Contains(err.Error(), "invalid input syntax for type uuid") {
+			return false, nil
+		}
+		return false, fmt.Errorf("memory: in view: %w", err)
+	}
+	return ok, nil
 }
 
 // DeleteMemoriesBySource removes every memory row that matches both
@@ -655,6 +740,12 @@ func buildMemoryWhere(f MemoryFilter) (string, []any) {
 	}
 	if !f.IncludeSupersed {
 		preds = append(preds, `NOT EXISTS (SELECT 1 FROM memories s WHERE s.supersedes = m.id)`)
+	}
+	if f.ScopeTag != "" {
+		add(`m.scope_tag = $?`, f.ScopeTag)
+	}
+	if f.TopLevelOnly {
+		preds = append(preds, `NOT `+isolatedRowPredicate)
 	}
 
 	if len(preds) == 0 {

@@ -1550,6 +1550,28 @@ CREATE INDEX IF NOT EXISTS idx_admin_sessions_credential
 CREATE INDEX IF NOT EXISTS idx_admin_sessions_principal
     ON admin_sessions (principal_type, principal_id);`,
 	},
+	{
+		// Repair: an isolated shard's extraction could supersede facts
+		// outside its own scope (the owner's top-level facts included).
+		// Retrieval hides any superseded row whatever scope the
+		// superseder has, while the isolated replacement is itself hidden
+		// from top-level, so the owner lost the fact entirely. Writes can
+		// no longer do this (NearestLiveFacts); detach the pointers that
+		// already did so the original facts come back. Idempotent.
+		name: "isolated_supersede_repair",
+		ddl: `
+UPDATE memories s
+   SET supersedes = NULL
+ WHERE s.supersedes IS NOT NULL
+   AND s.scope_tag IS NOT NULL
+   AND EXISTS (SELECT 1 FROM shards sh
+                WHERE sh.scope_tag = s.scope_tag
+                  AND sh.owner_id = s.user_id
+                  AND sh.visibility = 'isolated')
+   AND EXISTS (SELECT 1 FROM memories t
+                WHERE t.id = s.supersedes
+                  AND t.scope_tag IS DISTINCT FROM s.scope_tag);`,
+	},
 }
 
 // migrateLockKey is the pg_advisory_lock key that serializes Migrate

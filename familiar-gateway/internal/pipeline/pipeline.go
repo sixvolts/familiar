@@ -441,7 +441,7 @@ func (p *Pipeline) hydrateSession(ctx context.Context, sess *session.Session) {
 	// retain anyway.
 	turnsLoaded := 0
 	if p.conversations != nil && sess.TurnCount() == 0 {
-		err := p.conversations.LoadRecentTurns(loadCtx, sess.ID, session.MaxSessionTurns, func(role, content string, toolCalls []byte, toolCallID string) {
+		err := p.conversations.LoadRecentTurns(loadCtx, sess.ID, sess.CanonicalID(), session.MaxSessionTurns, func(role, content string, toolCalls []byte, toolCallID string) {
 			sess.AddMessage(session.Turn{
 				Role:       role,
 				Content:    content,
@@ -483,8 +483,10 @@ func (p *Pipeline) hydrateSession(ctx context.Context, sess *session.Session) {
 // speculatively on every session regardless of adapter, and not
 // every adapter's session id is a workspace conversation UUID.
 type ConversationStore interface {
-	LoadRecentTurns(ctx context.Context, conversationID string, limit int, visit func(role, content string, toolCalls []byte, toolCallID string)) error
-	AppendIntermediateMessages(ctx context.Context, conversationID string, msgs []IntermediateMessage) error
+	// ownerID is the session's canonical user; both calls act only on a
+	// conversation that user owns.
+	LoadRecentTurns(ctx context.Context, conversationID, ownerID string, limit int, visit func(role, content string, toolCalls []byte, toolCallID string)) error
+	AppendIntermediateMessages(ctx context.Context, conversationID, ownerID string, msgs []IntermediateMessage) error
 }
 
 // IntermediateMessage mirrors admin.IntermediateMessage in the
@@ -2792,7 +2794,7 @@ func (p *Pipeline) commitAndExtract(ctx context.Context, sess *session.Session, 
 			})
 		}
 		appendCtx, cancelAppend := context.WithTimeout(ctx, 5*time.Second)
-		if err := p.conversations.AppendIntermediateMessages(appendCtx, sess.ID, ims); err != nil {
+		if err := p.conversations.AppendIntermediateMessages(appendCtx, sess.ID, sess.CanonicalID(), ims); err != nil {
 			log.Printf("[pipeline] AppendIntermediateMessages error (continuing): %v", err)
 		}
 		cancelAppend()

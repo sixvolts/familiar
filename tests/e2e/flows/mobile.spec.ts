@@ -239,3 +239,36 @@ test("a stickied wiki page opens even when a different book is active", async ({
         .poll(() => page.evaluate(() => location.hash))
         .toContain(`wiki/${bookA.slug}/`);
 });
+
+// Every mobile thread must send its own conversation id with each chat
+// turn. Without it the gateway put every mobile thread in one implicit
+// per-user session, so a thread saw another thread's turns, and a
+// kiosk session (which must chat inside a shard-bound conversation)
+// couldn't chat at all.
+test("MOBILE: a chat turn carries its thread's conversation id", async ({ stack, page, context }) => {
+    const user = await createTestUser();
+    await attachSession(context, stack.workspaceURL, user);
+    let chatBody: { message?: string; conversation_id?: string } | null = null;
+    await page.route("**/api/chat", async (route) => {
+        chatBody = route.request().postDataJSON();
+        await route.fulfill({
+            status: 200,
+            contentType: "text/event-stream",
+            body:
+                'event: session\ndata: {"session_id":"s"}\n\n' +
+                'event: token\ndata: {"content":"ok"}\n\n' +
+                'event: done\ndata: {"content":"ok"}\n\n',
+        });
+    });
+
+    await page.goto(`${stack.workspaceURL}/#chat/new`);
+    await expect(page.locator("#mob-thread-input")).toBeVisible({ timeout: 15_000 });
+    await page.locator("#mob-thread-input").fill("hello from the phone");
+    await page.locator("#mob-thread-form").evaluate((f) => (f as HTMLFormElement).requestSubmit());
+
+    await expect.poll(() => chatBody, { timeout: 10_000 }).not.toBeNull();
+    const convID = chatBody!.conversation_id;
+    expect(convID, JSON.stringify(chatBody)).toMatch(/^[0-9a-f-]{36}$/);
+    // It's the conversation this thread just created, not some other one.
+    await expect(page).toHaveURL(new RegExp(`#chat/${convID}$`));
+});

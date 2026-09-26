@@ -427,9 +427,12 @@ func (a *SlackAdapter) handleMessage(ctx context.Context, ev *slackevents.Messag
 	sess.SetPlatform("slack")
 	// Pin the resolved identity so the pipeline doesn't re-resolve and
 	// so fact attribution / the conversation owner agree (resolveIdentity
-	// is a no-op once CanonicalID is set).
-	if canonicalUserID != "" {
-		sess.SetCanonicalID(canonicalUserID)
+	// is a no-op once CanonicalID is set). Claim rather than overwrite:
+	// a session another user already holds is refused, never re-homed.
+	if canonicalUserID != "" && !sess.ClaimIdentity("slack", canonicalUserID) {
+		log.Printf("[slack] session %s belongs to another user; refusing turn from %s", sessionID, ev.User)
+		a.postRaw(ev.Channel, replyTS, "Sorry, I couldn't start a conversation with you here. Try a new thread or a DM.")
+		return
 	}
 
 	log.Printf("[slack] message from %s in %s (sid=%s): %s", ev.User, ev.Channel, sessionID, truncate(text, 80))
@@ -479,13 +482,19 @@ func (a *SlackAdapter) handleMessage(ctx context.Context, ev *slackevents.Messag
 // the bot remembers the DM), so the key embeds the canonical user id,
 // which is also what the scheduled-action slack_dm deliverer keys its
 // digest by, so a reply lands in the same conversation the digest was
-// posted into. Threads map per (channel, thread_ts). The title is only
-// applied when the conversation is first created.
+// posted into. Threads map per (channel, thread_ts, user): each person
+// talking to the bot in a thread has their own conversation with it.
+// Keying a thread by (channel, thread_ts) alone made it one shared
+// session, so a second participant could ask the bot to repeat the
+// first participant's private tool results (a note it read, a memory
+// it retrieved), and their own turns were written into the first
+// participant's conversation. The title is only applied when the
+// conversation is first created.
 func slackExternalKey(canonicalUserID, channel, threadTS string, isDM bool) (key, title string) {
 	if isDM {
 		return DMExternalKey(canonicalUserID), "Slack DM"
 	}
-	return "slack:thread:" + channel + ":" + threadTS, "Slack thread"
+	return "slack:thread:" + channel + ":" + threadTS + ":" + canonicalUserID, "Slack thread"
 }
 
 // DMExternalKey is the durable conversation key for a user's Slack DM

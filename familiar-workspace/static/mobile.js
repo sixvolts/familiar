@@ -1001,7 +1001,11 @@
             var researchNote = null;
             var aborted = false; // user tapped stop
             // CHAT-REARCH §"Phase 0" — native /api/chat protocol.
-            // Just send the new user message; gateway has the history.
+            // Send the new user message and the conversation it belongs
+            // to; the gateway holds the history. Without conversation_id
+            // every mobile thread shared one implicit per-user session,
+            // so a thread saw another thread's turns and research runs
+            // attached to a conversation that didn't exist.
             try {
                 var resp = await fetch('/api/chat', {
                     method: 'POST',
@@ -1011,7 +1015,7 @@
                         'Content-Type': 'application/json',
                         'Accept': 'text/event-stream',
                     },
-                    body: JSON.stringify({ message: text }),
+                    body: JSON.stringify({ message: text, conversation_id: state.currentId }),
                 });
                 if (!resp.ok || !resp.body) {
                     var errText = await resp.text().catch(function () { return ''; });
@@ -1024,10 +1028,10 @@ var reader = resp.body.getReader();
                 var pendingData = '';
                 var handleEvent = function (kind, payload) {
                     if (kind === 'session') {
-                        // Authoritative turn key for a server-side stop — the
-                        // mobile session id is derived server-side (the chat
-                        // POST sends no conversation_id), so this event is the
-                        // only place the client learns it.
+                        // Authoritative turn key for a server-side stop. It
+                        // is the conversation id, except for an ephemeral
+                        // shard turn, which gets a per-message session id
+                        // that only this event reveals.
                         if (payload && payload.session_id) state.currentSessionId = payload.session_id;
                     } else if (kind === 'token') {
                         var c = (payload && payload.chunk) || '';

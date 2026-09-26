@@ -589,7 +589,7 @@
         sendBtn.addEventListener("click", (e) => {
             if (localState.streaming && localState.currentAbort) {
                 e.preventDefault();
-                requestServerStop(localState.conversationId);
+                requestServerStop(localState.conversationId, localState.turnSessionId);
                 localState.currentAbort.abort();
             }
         });
@@ -599,14 +599,19 @@
         // whatever partial it produced. Errors are non-fatal — a failed
         // stop just means the detached turn finishes on its own (the prior
         // behavior), so there's nothing to surface to the user.
-        function requestServerStop(convID) {
+        //
+        // sessionID is the turn key the gateway announced in the stream's
+        // "session" event. It equals the conversation id except for an
+        // ephemeral shard turn, which runs under a per-message session id;
+        // stopping by conversation id alone never reached those.
+        function requestServerStop(convID, sessionID) {
             if (!convID) return;
             try {
                 fetch("/api/chat/stop", {
                     method: "POST",
                     credentials: "include",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ conversation_id: convID }),
+                    body: JSON.stringify({ session_id: sessionID || convID, conversation_id: convID }),
                 }).catch(() => {});
             } catch (_) { /* fetch threw synchronously — ignore */ }
         }
@@ -807,7 +812,7 @@
         // still working, duplicate the user message, and re-execute tool
         // side effects (page writes). So poll the server instead and
         // reload the thread once the answer lands.
-        async function recoverInterruptedTurn(convID, notice) {
+        async function recoverInterruptedTurn(convID, notice, sessionID) {
             if (!convID) return false;
             // Server caps a turn at 600s; polling past that is pointless.
             const deadline = Date.now() + 615000;
@@ -819,7 +824,8 @@
                 let running = null;
                 try {
                     const st = await apiJSON(
-                        "/api/chat/status?conversation_id=" + encodeURIComponent(convID));
+                        "/api/chat/status?session_id=" + encodeURIComponent(sessionID || convID) +
+                        "&conversation_id=" + encodeURIComponent(convID));
                     running = !!(st && st.running);
                 } catch (e) { /* status is advisory — fall back to messages */ }
 
@@ -1563,6 +1569,7 @@
             messagesEl.scrollTop = messagesEl.scrollHeight;
 
             localState.streaming = true;
+            localState.turnSessionId = null;
             const abort = new AbortController();
             localState.currentAbort = abort;
             setComposerStreaming(true);
@@ -1631,7 +1638,10 @@
                 };
                 const handleNativeEvent = (kind, p) => {
                     if (kind === "session") {
-                        return; // reserved — gateway-side session id ack
+                        // The turn key Stop and status must use (see
+                        // requestServerStop).
+                        localState.turnSessionId = (p && p.session_id) || null;
+                        return;
                     }
                     if (kind === "status") {
                         const s = (p && p.message) || "";
@@ -1788,7 +1798,7 @@
                     setComposerStreaming(false);
                     const notice = renderError(
                         "Connection lost. Checking whether the turn finished on the server\u2026");
-                    recoverInterruptedTurn(localState.conversationId, notice).catch(() => {});
+                    recoverInterruptedTurn(localState.conversationId, notice, localState.turnSessionId).catch(() => {});
                     return;
                 }
                 aborted = true;

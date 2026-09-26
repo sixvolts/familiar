@@ -238,6 +238,28 @@ func (s *Session) SetIdentity(platform, canonicalID string) {
 	s.canonicalID = canonicalID
 }
 
+// ClaimIdentity binds the session to canonicalID the way SetIdentity
+// does, but only when the session is unbound or already bound to that
+// user; it reports false, changing nothing, when another user holds it.
+// Adapters that look sessions up by an id a client can influence must
+// use this: SetIdentity on a live session belonging to someone else
+// silently re-homed it, so the owner's in-flight fact extraction could
+// be committed under the other user's id and the other user could read
+// the owner's turns.
+func (s *Session) ClaimIdentity(platform, canonicalID string) bool {
+	if s == nil || canonicalID == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.canonicalID != "" && s.canonicalID != canonicalID {
+		return false
+	}
+	s.platform = platform
+	s.canonicalID = canonicalID
+	return true
+}
+
 // IsHydrated reports whether the persistent running_summary has already
 // been loaded into this session in the current process.
 func (s *Session) IsHydrated() bool {

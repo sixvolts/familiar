@@ -199,8 +199,19 @@ func TestSlackExternalKey_ThreadPerChannelAndTS(t *testing.T) {
 	if a == b || a == c {
 		t.Errorf("thread keys not distinct by ts/channel: a=%s b=%s c=%s", a, b, c)
 	}
-	if a != "slack:thread:C1:171.5" {
+	if a != "slack:thread:C1:171.5:u" {
 		t.Errorf("thread key shape = %q", a)
+	}
+}
+
+// Two people talking to the bot in the same thread must not share a
+// conversation: the shared key let the second participant ask the bot
+// to repeat the first participant's private tool results.
+func TestSlackExternalKey_ThreadPerUser(t *testing.T) {
+	alice, _ := slackExternalKey("alice", "C1", "171.5", false)
+	bob, _ := slackExternalKey("bob", "C1", "171.5", false)
+	if alice == bob {
+		t.Fatalf("alice and bob share thread conversation key %q", alice)
 	}
 }
 

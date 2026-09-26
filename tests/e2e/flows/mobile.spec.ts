@@ -272,3 +272,36 @@ test("MOBILE: a chat turn carries its thread's conversation id", async ({ stack,
     // It's the conversation this thread just created, not some other one.
     await expect(page).toHaveURL(new RegExp(`#chat/${convID}$`));
 });
+
+// A stream that ends in an error saves nothing. Mobile used to store the
+// partial (or an empty reply), which its own recovery then treated as the
+// finished answer.
+test("MOBILE: a failed stream doesn't save a partial reply", async ({ stack, page, context }) => {
+    const user = await createTestUser();
+    await attachSession(context, stack.workspaceURL, user);
+    const assistantPosts: string[] = [];
+    page.on("request", (req) => {
+        if (req.method() === "POST" && /\/console\/api\/conversations\/[^/]+\/messages$/.test(req.url())) {
+            const body = req.postDataJSON();
+            if (body && body.role === "assistant") assistantPosts.push(body.content);
+        }
+    });
+    await page.route("**/api/chat", (route) =>
+        route.fulfill({
+            status: 200,
+            contentType: "text/event-stream",
+            body:
+                'event: session\ndata: {"session_id":"s"}\n\n' +
+                'event: token\ndata: {"content":"half an ans"}\n\n' +
+                'event: error\ndata: {"message":"model exploded"}\n\n',
+        }),
+    );
+    await page.goto(`${stack.workspaceURL}/#chat/new`);
+    await expect(page.locator("#mob-thread-input")).toBeVisible({ timeout: 15_000 });
+    await page.locator("#mob-thread-input").fill("tell me something");
+    await page.locator("#mob-thread-form").evaluate((f) => (f as HTMLFormElement).requestSubmit());
+    await expect(page.getByText("model exploded")).toBeVisible({ timeout: 10_000 });
+    // Give any trailing persistence a moment to fire.
+    await page.waitForTimeout(500);
+    expect(assistantPosts, "a failed stream's partial was saved").toEqual([]);
+});

@@ -637,10 +637,12 @@
         // look lost. Recover by OBSERVING only: re-sending would start a
         // second concurrent turn, duplicate the user message, and re-run
         // tool side effects.
-        async function recoverInterruptedTurn(convID, bubble) {
+        async function recoverInterruptedTurn(convID, bubble, sessionID) {
             if (!convID) return;
             var started = Date.now();
-            var deadline = started + 615000; // server caps a turn at 600s
+            // Wait out the server's turn cap (turnHardCap, 30 min); the old
+            // 615s gave up on turns that were still allowed to finish.
+            var deadline = started + 1800000 + 15000;
             var delay = 1500;
             while (Date.now() < deadline) {
                 await new Promise(function (r) { setTimeout(r, delay); });
@@ -648,8 +650,9 @@
 
                 var running = null;
                 try {
-                    var st = await apiJSON('/api/chat/status?conversation_id=' +
-                        encodeURIComponent(convID));
+                    var st = await apiJSON('/api/chat/status?session_id=' +
+                        encodeURIComponent(sessionID || convID) +
+                        '&conversation_id=' + encodeURIComponent(convID));
                     running = !!(st && st.running);
                 } catch (e) { /* advisory only */ }
 
@@ -660,7 +663,8 @@
                     var last = msgs[msgs.length - 1];
                     if (last && last.role === 'assistant' &&
                         (last.content || '').trim() !== '') {
-                        await reloadThread(convID);
+                        // Only redraw if the user is still in that thread.
+                        if (state.currentId === convID) await reloadThread(convID);
                         return;
                     }
                 } catch (e) { /* transient — keep waiting */ }
@@ -947,6 +951,19 @@
                 console.warn('mobile chat: persist user msg failed', e);
             }
 
+            // This turn belongs to the thread it was sent in, whatever the
+            // user opens while it streams. The request, recovery and
+            // persistence use convId; state.messages and the thread view are
+            // only touched while the user is still in it. Using the live
+            // state.currentId saved a reply into whichever thread was open
+            // when the stream ended (or to /conversations/null).
+            var convId = state.currentId;
+            var stillHere = function () { return state.currentId === convId; };
+            // From the stream's "session" event: when true the gateway writes
+            // this turn's reply into the conversation itself, so this client
+            // must not (not on done, not on Stop, not after a drop).
+            var serverPersists = false;
+
             // Build assistant bubble and stream into it.
             // is-streaming class drives the iris blinking caret
             // tail on .bubble — same affordance as desktop.
@@ -1000,6 +1017,7 @@
             // path) — appended to the message as a tappable link below.
             var researchNote = null;
             var aborted = false; // user tapped stop
+            var streamFailed = false; // server refusal, error frame, or a dropped stream
             // CHAT-REARCH §"Phase 0" — native /api/chat protocol.
             // Send the new user message and the conversation it belongs
             // to; the gateway holds the history. Without conversation_id
@@ -1015,11 +1033,18 @@
                         'Content-Type': 'application/json',
                         'Accept': 'text/event-stream',
                     },
-                    body: JSON.stringify({ message: text, conversation_id: state.currentId }),
+                    body: JSON.stringify({ message: text, conversation_id: convId }),
                 });
                 if (!resp.ok || !resp.body) {
+                    // A refusal (429 busy, 403, 409) is the server's answer,
+                    // not a dropped connection: show it rather than polling
+                    // for a reply that will never come.
                     var errText = await resp.text().catch(function () { return ''; });
-                    throw new Error('HTTP ' + resp.status + ': ' + errText.slice(0, 200));
+                    var msg = errText;
+                    try { msg = (JSON.parse(errText) || {}).error || errText; } catch (_) { /* plain text */ }
+                    var refused = new Error(msg ? msg.slice(0, 200) : 'HTTP ' + resp.status);
+                    refused.inBand = true;
+                    throw refused;
                 }
 var reader = resp.body.getReader();
                 var decoder = new TextDecoder();
@@ -1033,6 +1058,7 @@ var reader = resp.body.getReader();
                         // shard turn, which gets a per-message session id
                         // that only this event reveals.
                         if (payload && payload.session_id) state.currentSessionId = payload.session_id;
+                        serverPersists = !!(payload && payload.persists_reply);
                     } else if (kind === 'token') {
                         var c = (payload && payload.chunk) || '';
                         if (!c) return;
@@ -1118,13 +1144,15 @@ var reader = resp.body.getReader();
                     // over and there is nothing to recover, so render the
                     // actual message rather than polling for a saved reply.
                     aBubble.textContent = '\u26a0 ' + (e.message || e);
+                    streamFailed = true;
                 }
                 else {
                     // Genuine transport drop: keep the partial text and try to
                     // pick up the completed turn rather than declaring failure.
                     aBubble.textContent = '\u26a0 Connection lost. Checking whether the ' +
                         'turn finished on the server\u2026';
-                    recoverInterruptedTurn(state.currentId, aBubble).catch(function () {});
+                    recoverInterruptedTurn(convId, aBubble, state.currentSessionId).catch(function () {});
+                    streamFailed = true;
                 }
             } finally {
                 state.streaming = false;
@@ -1134,6 +1162,11 @@ var reader = resp.body.getReader();
                 setMobStop(sendBtn, false);
                 aWrap.classList.remove('is-streaming');
             }
+
+            // A failed stream saves nothing. Desktop already did this; mobile
+            // fell through and stored the partial (or an empty reply), which
+            // its own recovery then mistook for the finished answer.
+            if (streamFailed) return;
 
             // Stopped before any output → drop the empty bubble instead of
             // persisting a blank assistant message.
@@ -1212,19 +1245,23 @@ var reader = resp.body.getReader();
                 model: resolvedModel || 'familiar',
                 reasoning_content: reasoningText || undefined,
             };
-            state.messages.push({
-                role: 'assistant',
-                content: assistantText,
-                reasoning_content: reasoningText || null,
-            });
-            try {
-                await apiJSON('/console/api/conversations/' + encodeURIComponent(state.currentId) + '/messages', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(assistantMsg),
+            if (stillHere()) {
+                state.messages.push({
+                    role: 'assistant',
+                    content: assistantText,
+                    reasoning_content: reasoningText || null,
                 });
-            } catch (e) {
-                console.warn('mobile chat: persist assistant msg failed', e);
+            }
+            if (!serverPersists) {
+                try {
+                    await apiJSON('/console/api/conversations/' + encodeURIComponent(convId) + '/messages', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(assistantMsg),
+                    });
+                } catch (e) {
+                    console.warn('mobile chat: persist assistant msg failed', e);
+                }
             }
 
             // Refresh list ordering — the just-touched conversation

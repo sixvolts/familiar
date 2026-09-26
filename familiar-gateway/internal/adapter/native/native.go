@@ -73,6 +73,9 @@ type ChatResponse struct {
 	ModelID   string `json:"model_id,omitempty"`
 	Content   string `json:"content"`
 	MemHits   int    `json:"mem_hits,omitempty"`
+	// ReplyPersisted: the gateway wrote this reply into the conversation;
+	// the caller must not write it again.
+	ReplyPersisted bool `json:"reply_persisted,omitempty"`
 }
 
 // SessionReader resolves an HTTP request's admin session cookie to the
@@ -495,12 +498,18 @@ func (a *Adapter) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The pipeline persists the turn's final reply into the conversation
+	// the session is bound to. That's every workspace conversation except
+	// an ephemeral shard turn, whose per-message session isn't the
+	// conversation. Clients are told, and skip their own write.
+	persistsReply := serverPersistsReply(req.ConversationID, convOwner != nil, shardTarget)
+
 	wantsStream := strings.Contains(r.Header.Get("Accept"), "text/event-stream")
 	ctx := r.Context()
 	if wantsStream {
-		a.handleStreaming(ctx, w, sess, req.Message, shardTarget)
+		a.handleStreaming(ctx, w, sess, req.Message, shardTarget, persistsReply)
 	} else {
-		a.handleNonStreaming(ctx, w, sess, req.Message, shardTarget)
+		a.handleNonStreaming(ctx, w, sess, req.Message, shardTarget, persistsReply)
 	}
 }
 
@@ -664,12 +673,16 @@ func (a *Adapter) turnOwnership(ctx context.Context, key, userID, shardID string
 	return true, true
 }
 
-func (a *Adapter) handleStreaming(ctx context.Context, w http.ResponseWriter, sess *session.Session, userMsg string, shardTarget *ShardChatTarget) {
+func (a *Adapter) handleStreaming(ctx context.Context, w http.ResponseWriter, sess *session.Session, userMsg string, shardTarget *ShardChatTarget, persistsReply bool) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming not supported")
 		return
 	}
+	// The server's WriteTimeout (600s) is one deadline per request, so it
+	// cut every stream at ten minutes while turns may run for 30
+	// (turnHardCap). Lift it for this stream; the turn has its own cap.
+	clearWriteDeadline(w)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -695,7 +708,9 @@ func (a *Adapter) handleStreaming(ctx context.Context, w http.ResponseWriter, se
 		writeMu.Unlock()
 	}
 
-	emit("session", map[string]string{"session_id": sess.ID})
+	// persists_reply tells the client the gateway will write this turn's
+	// final reply into the conversation, so the client must not.
+	emit("session", map[string]any{"session_id": sess.ID, "persists_reply": persistsReply})
 
 	// Keepalive heartbeat. The model can sit in a silent tool loop (skill
 	// loads, research spawn, one long decode) for tens of seconds with no
@@ -806,7 +821,7 @@ func (a *Adapter) handleStreaming(ctx context.Context, w http.ResponseWriter, se
 	}
 }
 
-func (a *Adapter) handleNonStreaming(ctx context.Context, w http.ResponseWriter, sess *session.Session, userMsg string, shardTarget *ShardChatTarget) {
+func (a *Adapter) handleNonStreaming(ctx context.Context, w http.ResponseWriter, sess *session.Session, userMsg string, shardTarget *ShardChatTarget, persistsReply bool) {
 	var response string
 	var info *pipeline.RouteInfo
 	var err error
@@ -820,8 +835,9 @@ func (a *Adapter) handleNonStreaming(ctx context.Context, w http.ResponseWriter,
 		return
 	}
 	resp := ChatResponse{
-		SessionID: sess.ID,
-		Content:   response,
+		SessionID:      sess.ID,
+		Content:        response,
+		ReplyPersisted: persistsReply,
 	}
 	if info != nil {
 		resp.ModelID = info.ModelID
@@ -886,7 +902,26 @@ func (a *Adapter) serveMemEvents(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	clearWriteDeadline(w)
 	a.memEvents.ServeSSE(w, r)
+}
+
+// serverPersistsReply reports whether the pipeline will write this turn's
+// final reply into the conversation: the turn is bound to a conversation
+// (and a store exists to write it), and isn't an ephemeral shard turn,
+// whose per-message session id isn't the conversation's.
+func serverPersistsReply(conversationID string, haveStore bool, target *ShardChatTarget) bool {
+	return strings.TrimSpace(conversationID) != "" && haveStore &&
+		(target == nil || !target.Ephemeral)
+}
+
+// clearWriteDeadline lifts the server's WriteTimeout for a long-lived
+// stream. The timeout is a single deadline set when the request is read,
+// so without this every SSE response dies at the ten-minute mark.
+func clearWriteDeadline(w http.ResponseWriter) {
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil {
+		log.Printf("[http] could not lift write deadline for a stream: %v", err)
+	}
 }
 
 func (a *Adapter) handleTitle(w http.ResponseWriter, r *http.Request) {

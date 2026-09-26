@@ -589,7 +589,7 @@
         sendBtn.addEventListener("click", (e) => {
             if (localState.streaming && localState.currentAbort) {
                 e.preventDefault();
-                requestServerStop(localState.conversationId, localState.turnSessionId);
+                requestServerStop(localState.streamingConvId || localState.conversationId, localState.turnSessionId);
                 localState.currentAbort.abort();
             }
         });
@@ -812,10 +812,15 @@
         // still working, duplicate the user message, and re-execute tool
         // side effects (page writes). So poll the server instead and
         // reload the thread once the answer lands.
+        // The gateway persists the reply itself, so once the turn finishes
+        // server-side the reply is in the conversation and this finds it.
+        const TURN_CAP_MS = 1800000; // pipeline turnHardCap
         async function recoverInterruptedTurn(convID, notice, sessionID) {
             if (!convID) return false;
-            // Server caps a turn at 600s; polling past that is pointless.
-            const deadline = Date.now() + 615000;
+            // Poll until the server's own turn cap has passed; the old 615s
+            // gave up on turns that were allowed to run for 30 minutes.
+            const started = Date.now();
+            const deadline = started + TURN_CAP_MS + 15000;
             let delay = 1500;
             while (Date.now() < deadline) {
                 await new Promise((r) => setTimeout(r, delay));
@@ -837,7 +842,12 @@
                     const last = msgs[msgs.length - 1];
                     if (last && last.role === "assistant" &&
                         (last.content || "").trim() !== "") {
-                        await loadConversation(convID);
+                        // Show it only if the user is still in that
+                        // conversation; reloading unconditionally yanked
+                        // them back from wherever they'd gone.
+                        if (localState.conversationId === convID) {
+                            await loadConversation(convID);
+                        }
                         return true;
                     }
                 } catch (e) { /* transient — keep waiting */ }
@@ -851,7 +861,7 @@
                     return false;
                 }
                 if (notice) {
-                    const secs = Math.round((Date.now() - (deadline - 615000)) / 1000);
+                    const secs = Math.round((Date.now() - started) / 1000);
                     notice.textContent =
                         "Connection lost. The turn is still running on the server — waiting for it to finish (" +
                         secs + "s).";
@@ -1481,6 +1491,21 @@
                 return;
             }
 
+            // This turn belongs to the conversation it was sent in, whatever
+            // the user opens while it streams. Everything below (the chat
+            // request, Stop, recovery, persistence, auto-title) uses convId;
+            // only UI updates look at localState.conversationId, and only
+            // while it still matches. Using the live value saved a reply
+            // into whichever conversation was open when the stream ended,
+            // and could retitle it.
+            const convId = localState.conversationId;
+            const titleAtSend = titleEl.value;
+            const stillHere = () => localState.conversationId === convId;
+            // Set from the stream's "session" event: when true the gateway
+            // writes this turn's reply into the conversation itself (it
+            // survives a dropped stream), and this client must not.
+            let serverPersists = false;
+
             // Build assistant bubble; stream tokens into it.
             // Structure (top to bottom):
             //   <div class="chat-msg chat-msg-assistant ...">
@@ -1569,6 +1594,7 @@
             messagesEl.scrollTop = messagesEl.scrollHeight;
 
             localState.streaming = true;
+            localState.streamingConvId = convId;
             localState.turnSessionId = null;
             const abort = new AbortController();
             localState.currentAbort = abort;
@@ -1610,7 +1636,7 @@
                     },
                     body: JSON.stringify({
                         message: prompt,
-                        conversation_id: localState.conversationId || undefined,
+                        conversation_id: convId || undefined,
                     }),
                 });
                 if (!resp.ok || !resp.body) {
@@ -1641,6 +1667,7 @@
                         // The turn key Stop and status must use (see
                         // requestServerStop).
                         localState.turnSessionId = (p && p.session_id) || null;
+                        serverPersists = !!(p && p.persists_reply);
                         return;
                     }
                     if (kind === "status") {
@@ -1798,7 +1825,7 @@
                     setComposerStreaming(false);
                     const notice = renderError(
                         "Connection lost. Checking whether the turn finished on the server\u2026");
-                    recoverInterruptedTurn(localState.conversationId, notice, localState.turnSessionId).catch(() => {});
+                    recoverInterruptedTurn(convId, notice, localState.turnSessionId).catch(() => {});
                     return;
                 }
                 aborted = true;
@@ -1899,22 +1926,29 @@
                 // restores it.
                 reasoning_content: reasoningText || undefined,
             };
-            localState.messages.push({
-                ...assistantMsg,
-                reasoning_content: reasoningText || null,
-            });
-
-            try {
-                await apiJSON("/console/api/conversations/" + encodeURIComponent(localState.conversationId) + "/messages", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(assistantMsg),
+            if (stillHere()) {
+                localState.messages.push({
+                    ...assistantMsg,
+                    reasoning_content: reasoningText || null,
                 });
-            } catch (e) {
-                // Persistence failed but the user already saw the
-                // response — surface a non-fatal warning rather than
-                // re-rendering / wiping the bubble.
-                console.warn("chat: couldn't persist assistant message", e);
+            }
+
+            // The gateway already wrote the reply when it said it would
+            // (serverPersists); writing it again would duplicate it, and on
+            // Stop would store a second, slightly different partial.
+            if (!serverPersists) {
+                try {
+                    await apiJSON("/console/api/conversations/" + encodeURIComponent(convId) + "/messages", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(assistantMsg),
+                    });
+                } catch (e) {
+                    // Persistence failed but the user already saw the
+                    // response — surface a non-fatal warning rather than
+                    // re-rendering / wiping the bubble.
+                    console.warn("chat: couldn't persist assistant message", e);
+                }
             }
 
             // Bump the conversation list ordering — the conversation
@@ -1933,7 +1967,7 @@
                 // Pass the title as it stands right now as the
                 // baseline — autoTitle re-checks it after generating
                 // and bails if the user renamed in the meantime.
-                autoTitle(localState.conversationId, prompt, assistantText, titleEl.value);
+                autoTitle(convId, prompt, assistantText, titleAtSend);
             }
 
             // Note refresh is now driven by the gateway's

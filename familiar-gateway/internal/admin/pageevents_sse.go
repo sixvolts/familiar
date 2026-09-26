@@ -16,6 +16,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -59,6 +60,11 @@ func (h *Handler) servePageEvents(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)
 		return
+	}
+	// This listener's WriteTimeout (600s) is a single per-request
+	// deadline, so it cut this stream every ten minutes. Lift it.
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil {
+		log.Printf("[admin] page events: could not lift write deadline: %v", err)
 	}
 
 	// One-shot membership snapshot. Admins see every book.

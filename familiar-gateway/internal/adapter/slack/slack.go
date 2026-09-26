@@ -483,17 +483,9 @@ func (a *SlackAdapter) handleMessage(ctx context.Context, ev *slackevents.Messag
 		return
 	}
 
-	// Persist the final reply after the turn (the pipeline already
-	// wrote any intermediate tool messages keyed by the same conv id).
-	if convID != "" && strings.TrimSpace(response) != "" {
-		model := ""
-		if info != nil {
-			model = info.ModelID
-		}
-		if err := a.convs.AppendMessage(ctx, convID, "assistant", response, model); err != nil {
-			log.Printf("[slack] persist assistant message (continuing): %v", err)
-		}
-	}
+	// The pipeline persists the turn (tool messages and the final reply)
+	// into the conversation keyed by the same id, so there's nothing to
+	// write here; writing the reply too stored it twice.
 
 	if a.verbose && info != nil {
 		parts := []string{"via " + info.ModelID}

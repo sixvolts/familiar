@@ -191,3 +191,107 @@ test("a note save that won't land toasts instead of failing silently", async ({
         await ctx.close();
     }
 });
+
+// A reply belongs to the conversation it was asked in. The client used
+// to persist the finished reply into whichever conversation was open
+// when the stream ended, so switching threads mid-answer filed the
+// answer under the wrong conversation.
+test("a reply lands in the conversation it was asked in, even after switching away", async ({
+    stack,
+    browser,
+    request,
+}) => {
+    const user = await createTestUser();
+    const create = async (title: string) =>
+        (
+            await request.post(`${stack.workspaceURL}/console/api/conversations`, {
+                headers: authed(user),
+                data: { title, model: "familiar" },
+            })
+        ).json();
+    const a = await create("Thread A");
+    const b = await create("Thread B");
+    const contents = async (id: string): Promise<string[]> => {
+        const r = await request.get(`${stack.workspaceURL}/console/api/conversations/${id}`, { headers: authed(user) });
+        return ((await r.json()).messages || []).map((m: { content: string }) => m.content);
+    };
+
+    const ctx = await browser.newContext();
+    await attachSession(ctx, stack.workspaceURL, user);
+    const page = await ctx.newPage();
+    try {
+        const shell = await openChat(page, stack);
+        // Hold the model's answer until the user has moved to thread B.
+        let release!: () => void;
+        const held = new Promise<void>((r) => (release = r));
+        let asked = false;
+        await page.route("**/api/chat", async (route) => {
+            asked = true;
+            await held;
+            await route.fulfill({
+                status: 200,
+                contentType: "text/event-stream",
+                body:
+                    'event: session\ndata: {"session_id":"s"}\n\n' +
+                    'event: token\ndata: {"content":"answer for A"}\n\n' +
+                    'event: done\ndata: {"content":"answer for A"}\n\n',
+            });
+        });
+        const open = (id: string) =>
+            page.evaluate((cid) => {
+                window.dispatchEvent(new CustomEvent("familiar:openDoc", { detail: { surface: "chat", id: cid } }));
+            }, id);
+
+        await open(a.id);
+        await expect(shell.locator(".chat-conv-title")).toHaveValue("Thread A", { timeout: 10_000 });
+        await shell.locator(".chat-input").fill("question for A");
+        await shell.locator(".chat-send-btn").click();
+        await expect.poll(() => asked, { timeout: 10_000 }).toBe(true);
+
+        await open(b.id);
+        await expect(shell.locator(".chat-conv-title")).toHaveValue("Thread B", { timeout: 10_000 });
+        release();
+
+        await expect.poll(() => contents(a.id), { timeout: 10_000 }).toContain("answer for A");
+        expect(await contents(b.id)).not.toContain("answer for A");
+    } finally {
+        await ctx.close();
+    }
+});
+
+// When the gateway says it saves the reply (persists_reply), the client
+// must not write it too: that duplicated it, and on Stop stored a second,
+// slightly different partial.
+test("the client leaves the reply to the gateway when the gateway saves it", async ({ stack, browser }) => {
+    const user = await createTestUser();
+    const ctx = await browser.newContext();
+    await attachSession(ctx, stack.workspaceURL, user);
+    const page = await ctx.newPage();
+    try {
+        const shell = await openChat(page, stack);
+        const assistantPosts: string[] = [];
+        page.on("request", (req) => {
+            if (req.method() === "POST" && /\/console\/api\/conversations\/[^/]+\/messages$/.test(req.url())) {
+                const body = req.postDataJSON();
+                if (body && body.role === "assistant") assistantPosts.push(body.content);
+            }
+        });
+        await page.route("**/api/chat", (route) =>
+            route.fulfill({
+                status: 200,
+                contentType: "text/event-stream",
+                body:
+                    'event: session\ndata: {"session_id":"s","persists_reply":true}\n\n' +
+                    'event: token\ndata: {"content":"saved by the gateway"}\n\n' +
+                    'event: done\ndata: {"content":"saved by the gateway"}\n\n',
+            }),
+        );
+        await shell.locator(".chat-input").fill("hello");
+        await shell.locator(".chat-send-btn").click();
+        await expect(shell.locator(".chat-msg").last()).toContainText("saved by the gateway", { timeout: 10_000 });
+        await expect(shell.locator(".chat-send-btn")).toBeEnabled();
+        expect(assistantPosts, "client wrote a reply the gateway already saved").toEqual([]);
+    } finally {
+        await ctx.close();
+    }
+});

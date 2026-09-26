@@ -305,3 +305,85 @@ test("MOBILE: a failed stream doesn't save a partial reply", async ({ stack, pag
     await page.waitForTimeout(500);
     expect(assistantPosts, "a failed stream's partial was saved").toEqual([]);
 });
+
+async function mobileNote(stack: GatewayStack, request: any, user: any, content: string) {
+    const r = await request.post(`${stack.workspaceURL}/console/api/books/personal/pages`, {
+        headers: { Cookie: user.cookieHeader, "Content-Type": "application/json" },
+        data: { title: "phone note", content },
+    });
+    return r.json();
+}
+
+async function mobileNoteContent(stack: GatewayStack, request: any, user: any, id: string): Promise<string> {
+    const r = await request.get(`${stack.workspaceURL}/console/api/books/personal/page-by-id/${id}`, {
+        headers: { Cookie: user.cookieHeader },
+    });
+    return (await r.json()).content;
+}
+
+// Edits to different paragraphs on the phone and elsewhere both survive,
+// and the phone shows the merged note (it used to keep only its own text,
+// so its next save would have overwritten the other edit).
+test("MOBILE: a disjoint concurrent edit merges into the phone's note", async ({ stack, page, context, request }) => {
+    const user = await createTestUser();
+    await attachSession(context, stack.workspaceURL, user);
+    const note = await mobileNote(stack, request, user, "line one\n\nline two\n\nline three");
+    await page.goto(`${stack.workspaceURL}/#notes/${note.id}`);
+    const editor = page.locator("#mob-note-body .toastui-editor-ww-container .ProseMirror").first();
+    await expect(editor).toContainText("line three", { timeout: 15_000 });
+    const current = await (
+        await request.get(`${stack.workspaceURL}/console/api/books/personal/page-by-id/${note.id}`, {
+            headers: { Cookie: user.cookieHeader },
+        })
+    ).json();
+
+    await editor.click();
+    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.type(" from the phone");
+    const remote = await request.patch(`${stack.workspaceURL}/console/api/books/personal/page-by-id/${note.id}`, {
+        headers: { Cookie: user.cookieHeader, "Content-Type": "application/json", "If-Match": current.updated_at },
+        data: { content: current.content.replace("line one", "line one from the desk") },
+    });
+    expect(remote.ok()).toBeTruthy();
+
+    await expect
+        .poll(() => mobileNoteContent(stack, request, user, note.id), { timeout: 10_000 })
+        .toContain("line three from the phone");
+    expect(await mobileNoteContent(stack, request, user, note.id)).toContain("line one from the desk");
+    await expect(editor).toContainText("line one from the desk", { timeout: 10_000 });
+});
+
+// An overlapping edit stops saving and offers a choice. It used to say
+// "conflict — reload to continue" with no way to reload: reopening the
+// same note short-circuited, so every later edit was silently dropped.
+test("MOBILE: an overlapping edit offers use-theirs / keep-mine", async ({ stack, page, context, request }) => {
+    const user = await createTestUser();
+    await attachSession(context, stack.workspaceURL, user);
+    const note = await mobileNote(stack, request, user, "shared line");
+    await page.goto(`${stack.workspaceURL}/#notes/${note.id}`);
+    const editor = page.locator("#mob-note-body .toastui-editor-ww-container .ProseMirror").first();
+    await expect(editor).toContainText("shared line", { timeout: 15_000 });
+    const current = await (
+        await request.get(`${stack.workspaceURL}/console/api/books/personal/page-by-id/${note.id}`, {
+            headers: { Cookie: user.cookieHeader },
+        })
+    ).json();
+
+    await editor.click();
+    await page.keyboard.press("ControlOrMeta+a");
+    await page.keyboard.type("the phone's version");
+    const remote = await request.patch(`${stack.workspaceURL}/console/api/books/personal/page-by-id/${note.id}`, {
+        headers: { Cookie: user.cookieHeader, "Content-Type": "application/json", "If-Match": current.updated_at },
+        data: { content: "the desk's version" },
+    });
+    expect(remote.ok()).toBeTruthy();
+
+    const bar = page.locator(".mob-edit-conflict");
+    await expect(bar).toBeVisible({ timeout: 10_000 });
+    await expect(editor).toContainText("the phone's version");
+    await bar.getByRole("button", { name: "Keep mine" }).click();
+    await expect
+        .poll(() => mobileNoteContent(stack, request, user, note.id), { timeout: 10_000 })
+        .toContain("the phone's version");
+    await expect(bar).toBeHidden();
+});

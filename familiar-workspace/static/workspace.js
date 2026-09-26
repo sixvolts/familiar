@@ -105,6 +105,16 @@
             const btn = document.querySelector('.ws-tab[data-tab-id="' + tabId + '"] .ws-tab-label');
             if (btn) btn.textContent = title;
         },
+        // Mark a tab as having unsaved changes (shows the dirty dot, and
+        // closeTab asks before discarding it). Surfaces that save
+        // explicitly rather than autosave call this.
+        setTabDirty(tabId, dirty) {
+            const tab = state.tabs[tabId];
+            if (!tab || !!tab.dirty === !!dirty) return;
+            tab.dirty = !!dirty;
+            saveState();
+            renderGrid();
+        },
         // Try to focus an existing tab with this document open.
         // Returns true if found and focused, false if not found.
         // Surfaces call this before loading a doc to avoid opening
@@ -243,6 +253,9 @@
     function closeTab(tabId) {
         const tab = state.tabs[tabId];
         if (!tab) return;
+        // A surface with explicit saving (the diagram editor) marks its tab
+        // dirty; closing it discarded the edits with no warning.
+        if (tab.dirty && !confirm('"' + (tab.title || "This tab") + '" has unsaved changes. Close it anyway?')) return;
         const panel = state.panels[tab.panelSlot];
         if (!panel) return;
         const idx = panel.tabIds.indexOf(tabId);

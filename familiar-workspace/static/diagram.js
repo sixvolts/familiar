@@ -67,7 +67,7 @@
         shell.renderPreview = renderPreview;
 
         source.addEventListener("input", () => {
-            shell.dirty = true;
+            setDirty(shell, true);
             saveBtn.disabled = !shell.state;
             status.textContent = "unsaved";
             if (shell.renderTimer) clearTimeout(shell.renderTimer);
@@ -76,6 +76,30 @@
 
         saveBtn.addEventListener("click", () => saveShell(shell));
         return shell;
+    }
+
+    // setDirty mirrors the shell's unsaved state onto its workspace tab,
+    // so the tab shows the dirty dot and closing it asks first.
+    function setDirty(shell, dirty) {
+        shell.dirty = dirty;
+        const ws = window.FamiliarWorkspace;
+        if (ws && ws.setTabDirty) ws.setTabDirty(shell.tab.id, dirty);
+    }
+
+    // fenceBody returns the body of the Nth ```mermaid fence, or null.
+    function fenceBody(content, index) {
+        const re = /```mermaid[^\n]*\n([\s\S]*?)```/g;
+        let m;
+        let i = -1;
+        while ((m = re.exec(content)) !== null) {
+            i++;
+            if (i === index) return m[1];
+        }
+        return null;
+    }
+
+    function sameDiagram(a, b) {
+        return (a || "").replace(/\s+$/, "") === (b || "").replace(/\s+$/, "");
     }
 
     // replaceFence swaps the body of the Nth ```mermaid fence.
@@ -105,20 +129,32 @@
             const pageURL = "/console/api/books/" + encodeURIComponent(s.book_slug) +
                 "/page-by-id/" + encodeURIComponent(s.page_id);
             const page = await api(pageURL);
-            const next = replaceFence(page.content || "", s.fence_index, shell.source.value);
-            if (next == null) {
+            // The fence this tab edits must still hold the diagram it
+            // opened. The fresh GET's If-Match alone guarded nothing: a
+            // diagram inserted above this one moved the index (so Save
+            // overwrote the wrong diagram), and edits made to this one
+            // directly in the page were reverted, both reported "saved".
+            const current = fenceBody(page.content || "", s.fence_index);
+            if (current == null) {
                 throw new Error("the page no longer has this diagram — reopen it from the page");
             }
+            if (s.base_source != null && !sameDiagram(current, s.base_source)) {
+                throw new Error("this diagram was changed on the page since you opened it — reopen it from the page to edit the current version");
+            }
+            const sent = shell.source.value;
+            const next = replaceFence(page.content || "", s.fence_index, sent);
+            // If-Match from the GET closes the window between that read and
+            // this write; the base_source check above covers the time since
+            // the tab opened.
             await api(pageURL, {
                 method: "PATCH",
-                // If-Match carries the updated_at from the fresh GET above so
-                // the server's lost-update guard passes; every other editor
-                // (notes.js, wiki.js) sends it and page-by-id 428s without it.
                 headers: { "Content-Type": "application/json", "If-Match": page.updated_at },
                 body: JSON.stringify({ content: next }),
             });
-            shell.dirty = false;
-            shell.status.textContent = "saved";
+            s.base_source = sent;
+            // Clear dirty only if nothing was typed during the save.
+            if (shell.source.value === sent) setDirty(shell, false);
+            shell.status.textContent = shell.dirty ? "unsaved" : "saved";
             // Shared pages get fresh diagram PNGs immediately — the
             // page object we just fetched carries the share state.
             if (page.share && window.familiarMermaid) {
@@ -140,12 +176,15 @@
             page_id: d.page_id,
             fence_index: d.fence_index || 0,
             page_title: d.page_title || "page",
+            // The fence body this tab was opened with; Save refuses if the
+            // page's diagram no longer matches it (see saveShell).
+            base_source: d.base_source != null ? d.base_source : (d.source || ""),
         };
         shell.tab.state = { ...(shell.tab.state || {}), ...shell.state };
         shell.crumb.textContent = (d.page_title || "page") + " · diagram " + ((d.fence_index || 0) + 1);
         shell.source.value = d.source || "";
         shell.saveBtn.disabled = false;
-        shell.dirty = false;
+        setDirty(shell, !!d.dirty);
         shell.status.textContent = "";
         shell.renderPreview();
         const ws = window.FamiliarWorkspace;
@@ -172,6 +211,7 @@
                     ...prev.state,
                     source: prev.source.value,
                     page_title: prev.state.page_title,
+                    dirty: prev.dirty,
                 });
                 shell.dirty = prev.dirty;
                 if (shell.dirty) shell.status.textContent = "unsaved";
@@ -191,6 +231,9 @@
                                     loadShell(shell, {
                                         ...tab.state,
                                         source: m[1],
+                                        // The fence just read is the baseline;
+                                        // the persisted one may predate saves.
+                                        base_source: m[1],
                                         page_title: tab.state.page_title || page.title,
                                     });
                                     return;

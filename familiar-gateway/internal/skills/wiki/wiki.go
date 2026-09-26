@@ -22,6 +22,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/familiar/gateway/internal/admin"
@@ -72,6 +73,7 @@ type WikiBackend interface {
 // the skill before the admin pool block constructs the store.
 type Skill struct {
 	resolve func() WikiBackend
+	reads   readVersions
 }
 
 // New constructs a wiki skill. resolve is a getter that returns the
@@ -79,6 +81,66 @@ type Skill struct {
 // backend" — every tool invocation returns the not-configured error.
 func New(resolve func() WikiBackend) *Skill {
 	return &Skill{resolve: resolve}
+}
+
+// readVersions remembers, per chat session, the version of each page the
+// model last read or wrote, so update_page can write against the text the
+// model actually based its new body on. update_page replaces the whole
+// body, and the model can take a minute to produce it; without a version
+// a human's edit landing in that minute (the grocery item a spouse just
+// added) was silently overwritten. With one, the server three-way merges
+// a disjoint edit or refuses, and the model re-reads. Keyed by page id so
+// a rename doesn't lose it. Bounded; entries expire after two hours.
+type readVersions struct {
+	mu sync.Mutex
+	m  map[readKey]readEntry
+}
+
+type readKey struct{ session, pageID string }
+
+type readEntry struct {
+	version time.Time
+	at      time.Time
+}
+
+const (
+	readVersionTTL = 2 * time.Hour
+	readVersionCap = 4096
+)
+
+func (r *readVersions) record(session, pageID string, version time.Time) {
+	if session == "" || pageID == "" || version.IsZero() {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.m == nil {
+		r.m = make(map[readKey]readEntry)
+	}
+	now := time.Now()
+	if len(r.m) >= readVersionCap {
+		for k, e := range r.m {
+			if now.Sub(e.at) > readVersionTTL || len(r.m) >= readVersionCap {
+				delete(r.m, k)
+			}
+		}
+	}
+	r.m[readKey{session, pageID}] = readEntry{version: version, at: now}
+}
+
+func (r *readVersions) lookup(session, pageID string) (time.Time, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.m[readKey{session, pageID}]
+	if !ok || time.Since(e.at) > readVersionTTL {
+		return time.Time{}, false
+	}
+	return e.version, true
+}
+
+func sessionOf(ctx context.Context) string {
+	sc, _ := skills.ContextFrom(ctx)
+	return sc.SessionID
 }
 
 func (s *Skill) backend() WikiBackend {
@@ -681,6 +743,7 @@ func (s *Skill) readPage(ctx context.Context, userID, bookSlug, pageSlug string)
 	if err != nil {
 		return skills.ToolResult{}, fmt.Errorf("read: %w", err)
 	}
+	s.reads.record(sessionOf(ctx), p.ID, p.UpdatedAt)
 	out := formatPageFull(bk, p)
 	return skills.ToolResult{Content: out, Tokens: len(out) / 4}, nil
 }
@@ -808,12 +871,23 @@ func (s *Skill) updatePage(ctx context.Context, userID, bookSlug, pageSlug, newT
 	// Match against the CURRENT title — that is what read_page rendered as
 	// the "# {title}" header the agent may have echoed back, regardless of a
 	// concurrent retitle in this same call.
-	curTitle := newTitle
-	if cur, cerr := s.backend().GetPage(ctx, bk.ID, pageSlug); cerr == nil {
-		curTitle = cur.Title
+	cur, err := s.backend().GetPage(ctx, bk.ID, pageSlug)
+	if errors.Is(err, admin.ErrPageNotFound) {
+		return skills.ToolResult{Error: pageNotFoundMsg(bk.Name, pageSlug)}, nil
 	}
-	content = stripReadAffixes(content, curTitle)
-	patch := admin.PagePatch{Content: &content}
+	if err != nil {
+		return skills.ToolResult{}, fmt.Errorf("update/read: %w", err)
+	}
+	content = stripReadAffixes(content, cur.Title)
+	// Write against the version the model read (see readVersions). If
+	// it never read the page this session, the version just fetched at
+	// least closes the gap between that read and this write.
+	session := sessionOf(ctx)
+	base, ok := s.reads.lookup(session, cur.ID)
+	if !ok {
+		base = cur.UpdatedAt
+	}
+	patch := admin.PagePatch{Content: &content, IfMatch: &base}
 	if strings.TrimSpace(newTitle) != "" {
 		patch.Title = &newTitle
 	}
@@ -821,10 +895,20 @@ func (s *Skill) updatePage(ctx context.Context, userID, bookSlug, pageSlug, newT
 	if errors.Is(err, admin.ErrPageNotFound) {
 		return skills.ToolResult{Error: pageNotFoundMsg(bk.Name, pageSlug)}, nil
 	}
+	if errors.Is(err, admin.ErrPageStale) {
+		return skills.ToolResult{Error: fmt.Sprintf(
+			"Page %q changed since you read it (someone else edited it), and the edits overlap. "+
+				"Nothing was written. Call read_page again and apply your change to the current text.", cur.Title)}, nil
+	}
 	if err != nil {
 		return skills.ToolResult{}, fmt.Errorf("update: %w", err)
 	}
+	s.reads.record(session, p.ID, p.UpdatedAt)
 	out := fmt.Sprintf("Updated page %q in %q (page slug: %s). New body is %d chars.", p.Title, bk.Name, p.Slug, len(content))
+	if p.Merged {
+		out = fmt.Sprintf("Updated page %q in %q (page slug: %s). Someone else edited it since you read it; "+
+			"their edit didn't overlap yours, so the page now has both.", p.Title, bk.Name, p.Slug)
+	}
 	return skills.ToolResult{Content: out, Data: pageLocationData(bk.Slug, p.Slug, p.Title), Tokens: len(out) / 4}, nil
 }
 

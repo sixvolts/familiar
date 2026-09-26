@@ -285,6 +285,64 @@ test("saving a diagram whose fence was deleted errors instead of clobbering", as
     }
 });
 
+// Save must not revert changes made to the diagram on the page after the
+// tab opened (or write into a different diagram after one was inserted
+// above it). It re-read the page and took its If-Match from that read, so
+// the lost-update guard passed and both cases reported "saved".
+test("saving a diagram that changed on the page since the tab opened refuses", async ({
+    stack,
+    browser,
+    request,
+}) => {
+    const user = await createTestUser();
+    const headers = { Cookie: user.cookieHeader, "Content-Type": "application/json" };
+    const note = await (
+        await request.post(`${stack.workspaceURL}/console/api/books/personal/pages`, {
+            headers,
+            data: { title: "Moved Diagram", content: FENCED_NOTE },
+        })
+    ).json();
+
+    const ctx = await browser.newContext();
+    await attachSession(ctx, stack.workspaceURL, user);
+    const page = await ctx.newPage();
+    try {
+        await page.goto(stack.workspaceURL);
+        await expect(page.locator("#view-dashboard")).toBeVisible({ timeout: 15_000 });
+        await page.locator(".sidebar-cat-notes .sidebar-row-chevron").click();
+        await page
+            .locator('.sidebar-children[data-category="notes"] a.sidebar-child', { hasText: "Moved Diagram" })
+            .click();
+        await page.locator(".mermaid-block.is-ww.is-rendered").click();
+        await expect(page.locator(".diagram-source")).toHaveValue(/graph TD;/, { timeout: 10_000 });
+
+        // The diagram is edited directly on the page while the tab is open.
+        const before = await (
+            await request.get(`${stack.workspaceURL}/console/api/books/personal/page-by-id/${note.id}`, { headers })
+        ).json();
+        const edited = before.content.replace("B[End]", "B[Edited on the page]");
+        const direct = await request.patch(`${stack.workspaceURL}/console/api/books/personal/page-by-id/${note.id}`, {
+            headers: { ...headers, "If-Match": before.updated_at },
+            data: { content: edited },
+        });
+        expect(direct.ok()).toBeTruthy();
+
+        await page.locator(".diagram-source").fill("graph TD;\n  X --> Y;");
+        await page.locator(".diagram-shell button", { hasText: "Save to page" }).click();
+        await expect(page.locator(".toast", { hasText: "changed on the page since you opened it" })).toBeVisible({
+            timeout: 10_000,
+        });
+        const after = await (
+            await request.get(`${stack.workspaceURL}/console/api/books/personal/page-by-id/${note.id}`, { headers })
+        ).json();
+        expect(after.content).toBe(edited);
+        // The tab is still dirty: its edit wasn't saved.
+        await expect(page.locator('.ws-tab[data-category="diagram"] .ws-tab-dirty')).toHaveCount(1);
+    } finally {
+        await ctx.close();
+    }
+});
+
 test("Toast UI's code-block language badge is suppressed by our CSS", async ({ stack, browser }) => {
     // Toast UI's WYSIWYG code block renders a floating "language ✎"
     // badge as `.toastui-editor-ww-code-block::after` plus a popup

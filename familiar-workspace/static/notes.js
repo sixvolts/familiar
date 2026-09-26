@@ -187,6 +187,17 @@
             search: "",
             saving: false,
             saveTimer: null,
+            // Sync baseline: the title and (editor-normalized) body of the
+            // version localState.note.updated_at names, i.e. the last state
+            // known to match the server. isDirty() compares the editor with
+            // it; a save sends If-Match: that version.
+            baseTitle: "",
+            baseContent: "",
+            // A save requested while another is in flight. Dropping it
+            // (the old early return) lost the keystrokes typed during the
+            // round trip; flushSave re-runs once the first save returns.
+            pendingResave: false,
+            savePromise: null,
             mode: (tab.state && tab.state.mode) || "split", // edit|preview|split
             // Per-tab back stack of note IDs visited via [[link]].
             // Pushed in notesWikiNavigate before loadNote, popped by
@@ -436,6 +447,12 @@
         linksHost.className = "notes-page-links";
         linksHost.hidden = true;
         editor.appendChild(linksHost);
+        // Conflict banner host (same styles as the wiki's): a save that
+        // collided with another writer's overlapping edit shows an explicit
+        // choice here instead of silently pausing saves.
+        const bannerHost = document.createElement("div");
+        bannerHost.className = "wiki-sync-banner-host";
+        right.appendChild(bannerHost);
         right.appendChild(editor);
 
         // Toast UI Editor instance — initialized after the
@@ -834,12 +851,19 @@
         }
 
         async function loadNote(id) {
-            // Flush any pending save before switching.
+            // Flush any pending save before switching, and wait out one
+            // already in flight: if it resolved after the switch it used
+            // to repoint localState.note at the old note, so the next
+            // keystroke overwrote that note with this one's text.
             if (localState.saveTimer) {
                 clearTimeout(localState.saveTimer);
                 localState.saveTimer = null;
                 await flushSave(true);
             }
+            if (localState.savePromise) {
+                try { await localState.savePromise; } catch (_) { /* reported by flushSave */ }
+            }
+            clearConflictBanner();
             localState.noteId = id;
             tab.state = { ...(tab.state || {}), noteId: id };
             // Reflect the (possibly just-mutated) history in the
@@ -865,6 +889,7 @@
                     tuiEditor.setMarkdown(n.content || "");
                     suppressSave = false;
                 }
+                seedBase(n);
                 renderTree();
                 // Page-links footer disabled until graph-based UI is designed.
                 // renderPageLinks(n.id);
@@ -1037,32 +1062,63 @@
         // edit's updated-at meta (and any folder move) reflects in the rail
         // without refetching it on every 500ms autosave.
         let sidebarMetaTimer = null;
-        async function flushSave(immediate) {
-            if (!localState.note) return;
-            if (localState.saving) return;
-            // A previous save hit a conflict; pause until the user
-            // reloads the note. The block clears in loadNote().
-            if (localState.saveBlocked) return;
+        function currentContent() { return tuiEditor ? tuiEditor.getMarkdown() : ""; }
+        function currentTitle() { return titleInput.value || "Untitled"; }
+
+        // seedBase records n as the version the editor is in sync with.
+        // The body is read back from the editor (when it is showing n) so
+        // Toast UI's markdown normalization doesn't read as an edit.
+        function seedBase(n) {
+            localState.baseTitle = n.title || "Untitled";
+            localState.baseContent = tuiEditor && currentContent() !== null ? currentContent() : (n.content || "");
+        }
+
+        function isDirty() {
+            if (!localState.note) return false;
+            return currentTitle() !== localState.baseTitle || currentContent() !== localState.baseContent;
+        }
+
+        function flushSave(immediate) {
+            if (!localState.note) return Promise.resolve();
+            if (localState.saving) {
+                // Re-run once the in-flight save returns (see pendingResave).
+                localState.pendingResave = true;
+                return localState.savePromise || Promise.resolve();
+            }
+            // A previous save hit a conflict; the banner offers the way
+            // out (use theirs / keep mine). Nothing saves until then.
+            if (localState.saveBlocked) return Promise.resolve();
+            localState.savePromise = doSave().finally(() => {
+                localState.savePromise = null;
+                if (localState.pendingResave) {
+                    localState.pendingResave = false;
+                    if (!localState.saveBlocked && isDirty()) flushSave();
+                }
+            });
+            return localState.savePromise;
+        }
+
+        async function doSave() {
             localState.saving = true;
             savedDot.textContent = "Saving…";
-            const patch = {
-                title: titleInput.value || "Untitled",
-                content: tuiEditor ? tuiEditor.getMarkdown() : "",
-            };
-            // If-Match carries the updated_at we last saw from the
-            // server. UpdatePage refuses with 409 when the row has
-            // moved since — that's the optimistic-concurrency guard
-            // that stops a stale local copy from clobbering an
-            // upstream edit (made by another device, by the AI via a
-            // tool call, etc.).
+            // The note this save is for. If the user switches notes while
+            // it is in flight, its response must not touch the new one.
+            const savingId = localState.note.id;
+            const patch = { content: currentContent() };
+            // Send the title only when it changed. An unchanged title in
+            // every save made the server treat each save as a rename,
+            // ruling out its three-way merge of concurrent edits.
+            if (currentTitle() !== localState.baseTitle) patch.title = currentTitle();
+            // If-Match carries the version we last synced with. The server
+            // merges a concurrent writer's disjoint edit against it, and
+            // refuses (409) only when the edits overlap.
             const headers = { "Content-Type": "application/json" };
             if (localState.note.updated_at) {
                 headers["If-Match"] = localState.note.updated_at;
             }
             try {
                 const resp = await fetch(
-                    "/console/api/books/personal/page-by-id/" +
-                        encodeURIComponent(localState.note.id),
+                    "/console/api/books/personal/page-by-id/" + encodeURIComponent(savingId),
                     {
                         method: "PATCH",
                         credentials: "include",
@@ -1073,68 +1129,61 @@
                 const text = await resp.text();
                 let respBody = null;
                 try { respBody = text ? JSON.parse(text) : null; } catch (e) { /* fall through */ }
+                const stillHere = localState.note && localState.note.id === savingId;
                 if (resp.status === 409 && respBody && respBody.error === "stale") {
-                    handleSaveConflict(patch, respBody.current);
+                    if (stillHere) handleSaveConflict(patch, respBody.current);
                     return;
                 }
                 if (!resp.ok) {
                     throw new Error((respBody && respBody.error) || ("HTTP " + resp.status));
                 }
                 const n = respBody;
+                updateListRow(n);
+                if (!stillHere) return;
+
                 // The PATCH response doesn't join share state (only
                 // GET does) — carry the known share forward so the
                 // diagram-render trigger below keeps working.
                 if (!n.share && localState.note.share) n.share = localState.note.share;
-                localState.note = n;
-                savedDot.textContent = "Saved";
+                if (n.merged) {
+                    // The server merged our save with another writer's
+                    // disjoint edit; the response is the combined document.
+                    if (currentContent() === patch.content) {
+                        localState.note = n;
+                        suppressSave = true;
+                        if (tuiEditor) tuiEditor.setMarkdown(n.content || "");
+                        suppressSave = false;
+                        seedBase(n);
+                        savedDot.textContent = "Merged — " + (n.updated_by || "another editor");
+                    } else {
+                        // The user kept typing during the save. Keep the
+                        // old base: the next save is then stale against
+                        // the merged version and merges again, keeping
+                        // both their new text and the other edit. Adopting
+                        // the merged version as the base while keeping the
+                        // editor's text would overwrite the other edit.
+                        localState.pendingResave = true;
+                        savedDot.textContent = "Merging…";
+                    }
+                } else {
+                    localState.note = n;
+                    localState.baseTitle = n.title || "Untitled";
+                    localState.baseContent = patch.content;
+                    savedDot.textContent = isDirty() ? "•" : "Saved";
+                    if (isDirty()) localState.pendingResave = true;
+                }
                 // Publicly shared pages keep their diagram PNGs in
                 // step with the content (the share page is script-
                 // free, so diagrams ship as pre-rendered bitmaps).
                 if (n.share && window.familiarMermaid) {
                     window.familiarMermaid.syncShareRenders(
-                        { bookSlug: "personal", pageId: n.id }, patch.content);
+                        { bookSlug: "personal", pageId: n.id }, n.content || patch.content);
                 }
-                // Bump in list view — but ONLY re-render when something the
-                // tree actually shows has changed.
-                //
-                // A row renders title (+ pinned styling) and snippet, and the
-                // snippet is deliberately carried over unchanged below. So a
-                // body-only edit produces byte-identical DOM, and calling
-                // renderTree() on every autosave tore down and rebuilt the whole
-                // list to draw exactly what was already there. With a 500ms
-                // save debounce that is a full rebuild every time you pause
-                // mid-sentence, which is what made the sidebar visibly glitch
-                // while typing.
-                const idx = localState.list.findIndex((x) => x.id === n.id);
-                let visibleChange = false;
-                if (idx >= 0) {
-                    const prev = localState.list[idx];
-                    visibleChange =
-                        prev.title !== n.title ||
-                        (prev.folder || "") !== (n.folder || "") ||
-                        !!prev.pinned !== !!n.pinned;
-                    localState.list[idx] = {
-                        id: n.id, title: n.title, folder: n.folder || "",
-                        pinned: n.pinned, snippet: prev.snippet,
-                        updated_at: n.updated_at,
-                    };
-                    if (visibleChange) renderTree();
-                }
-                // Same reasoning for the sidebar rail. It shows an updated-at
-                // meta, so it does want refreshing eventually, but not while
-                // the user is still typing: at 2s this fired ~2.5s after any
-                // pause (500ms save debounce + 2s), i.e. right as they resumed.
-                // Fire immediately when something visible changed, otherwise
-                // wait for a real idle gap so a body-only edit never yanks the
-                // rail mid-thought.
-                if (sidebarMetaTimer) clearTimeout(sidebarMetaTimer);
-                sidebarMetaTimer = setTimeout(() => {
-                    sidebarMetaTimer = null;
-                    window.dispatchEvent(new Event("familiar:sidebarRefresh"));
-                }, visibleChange ? 0 : 15000);
                 saveFailedNotified = false;
                 setTimeout(() => {
-                    if (savedDot.textContent === "Saved") savedDot.textContent = "";
+                    if (savedDot.textContent === "Saved" || savedDot.textContent.indexOf("Merged") === 0) {
+                        savedDot.textContent = "";
+                    }
                 }, 1500);
             } catch (e) {
                 // Network / 5xx save failure (NOT a 409 conflict, which
@@ -1155,32 +1204,60 @@
             }
         }
 
-        // handleSaveConflict reconciles a 409-stale response from the
-        // server. Two cases:
+        // updateListRow reflects a saved note in the list — but ONLY
+        // re-renders when something the tree actually shows has changed.
         //
-        //   1. Our local content already matches the server's — the
-        //      conflict was purely a stale updated_at (e.g. a pin
-        //      toggle bumped the timestamp). Adopt the server's row
-        //      and continue saving silently.
-        //   2. Real divergence — another writer landed content we
-        //      don't have. Pause autosave to avoid clobbering the
-        //      upstream edit, surface the conflict to the user, and
-        //      wait for them to reload (clicking the note in the
-        //      sidebar will trigger loadNote, which clears the
-        //      block and pulls the latest server state). Local
-        //      in-flight keystrokes since the last successful save
-        //      are preserved in the editor so the user can copy them
-        //      out if they want to merge manually.
-        function handleSaveConflict(patch, serverPage) {
-            if (!serverPage) {
-                localState.saveBlocked = true;
-                savedDot.textContent = "Conflict — reload to continue";
-                if (toast) toast("This page was updated elsewhere. Reload to continue editing.", "warn");
-                return;
+        // A row renders title (+ pinned styling) and snippet, and the
+        // snippet is deliberately carried over unchanged. So a body-only
+        // edit produces byte-identical DOM, and calling renderTree() on
+        // every autosave tore down and rebuilt the whole list to draw
+        // exactly what was already there. With a 500ms save debounce that
+        // is a full rebuild every time you pause mid-sentence, which is
+        // what made the sidebar visibly glitch while typing.
+        function updateListRow(n) {
+            const idx = localState.list.findIndex((x) => x.id === n.id);
+            let visibleChange = false;
+            if (idx >= 0) {
+                const prev = localState.list[idx];
+                visibleChange =
+                    prev.title !== n.title ||
+                    (prev.folder || "") !== (n.folder || "") ||
+                    !!prev.pinned !== !!n.pinned;
+                localState.list[idx] = {
+                    id: n.id, title: n.title, folder: n.folder || "",
+                    pinned: n.pinned, snippet: prev.snippet,
+                    updated_at: n.updated_at,
+                };
+                if (visibleChange) renderTree();
             }
-            if ((serverPage.content || "") === (patch.content || "") &&
-                (serverPage.title || "") === (patch.title || "")) {
+            // Same reasoning for the sidebar rail. It shows an updated-at
+            // meta, so it does want refreshing eventually, but not while
+            // the user is still typing. Fire immediately when something
+            // visible changed, otherwise wait for a real idle gap so a
+            // body-only edit never yanks the rail mid-thought.
+            if (sidebarMetaTimer) clearTimeout(sidebarMetaTimer);
+            sidebarMetaTimer = setTimeout(() => {
+                sidebarMetaTimer = null;
+                window.dispatchEvent(new Event("familiar:sidebarRefresh"));
+            }, visibleChange ? 0 : 15000);
+        }
+
+        // handleSaveConflict reconciles a 409-stale response: another
+        // writer's edit overlaps ours, so the server couldn't merge.
+        //
+        //   1. Our content already matches the server's: nothing to
+        //      resolve. Adopt the server's row and carry on.
+        //   2. Real divergence: pause saving and show a banner with an
+        //      explicit choice. The editor keeps the user's text until
+        //      they pick. (The old path told them to click the note in
+        //      the sidebar, which did nothing for the open note, while
+        //      every later edit was silently dropped.)
+        function handleSaveConflict(patch, serverPage) {
+            if (serverPage &&
+                (serverPage.content || "") === (patch.content || "") &&
+                (patch.title === undefined || (serverPage.title || "") === patch.title)) {
                 localState.note = serverPage;
+                seedBase(serverPage);
                 savedDot.textContent = "Saved";
                 setTimeout(() => {
                     if (savedDot.textContent === "Saved") savedDot.textContent = "";
@@ -1188,17 +1265,77 @@
                 return;
             }
             localState.saveBlocked = true;
-            savedDot.textContent = "Conflict — reload to continue";
-            if (toast) {
-                toast(
-                    "This page was updated elsewhere. Your unsaved local edits weren't saved — copy them out if you need them, then click the note in the sidebar to reload.",
-                    "warn",
-                );
-            }
+            savedDot.textContent = "Conflict";
+            showConflictBanner(serverPage);
+        }
+
+        function showConflictBanner(serverPage) {
+            clearConflictBanner();
+            const banner = document.createElement("div");
+            banner.className = "wiki-sync-banner";
+            const msg = document.createElement("div");
+            msg.className = "wiki-sync-banner-msg";
+            msg.textContent = "This note was changed by " +
+                ((serverPage && serverPage.updated_by) || "someone else") +
+                " in the same place you were editing. Nothing has been saved since.";
+            const actions = document.createElement("div");
+            actions.className = "wiki-sync-banner-actions";
+            const useTheirs = document.createElement("button");
+            useTheirs.type = "button";
+            useTheirs.className = "wiki-sync-banner-btn";
+            useTheirs.textContent = "Use theirs (discard mine)";
+            useTheirs.addEventListener("click", () => {
+                const id = localState.noteId;
+                localState.saveBlocked = false;
+                localState.pendingResave = false;
+                if (localState.saveTimer) {
+                    clearTimeout(localState.saveTimer);
+                    localState.saveTimer = null;
+                }
+                // Reload from the server; discards the local edits.
+                localState.note = null;
+                loadNote(id);
+            });
+            const keepMine = document.createElement("button");
+            keepMine.type = "button";
+            keepMine.className = "wiki-sync-banner-btn wiki-sync-banner-btn-primary";
+            keepMine.textContent = "Keep mine (overwrite)";
+            keepMine.addEventListener("click", async () => {
+                // Save the editor's text over the current version.
+                let current = serverPage;
+                if (!current) {
+                    try {
+                        current = await apiJSON("/console/api/books/personal/page-by-id/" +
+                            encodeURIComponent(localState.noteId));
+                    } catch (e) {
+                        notifyErr("Couldn't reach the server: " + (e.message || String(e)));
+                        return;
+                    }
+                }
+                localState.note.updated_at = current.updated_at;
+                localState.baseTitle = current.title || "Untitled";
+                localState.baseContent = current.content || "";
+                localState.saveBlocked = false;
+                clearConflictBanner();
+                flushSave(true);
+            });
+            actions.append(useTheirs, keepMine);
+            banner.append(msg, actions);
+            bannerHost.appendChild(banner);
+        }
+
+        function clearConflictBanner() {
+            bannerHost.innerHTML = "";
         }
 
         function scheduleSave() {
             if (!localState.note) return;
+            // While a conflict is unresolved, keep saying so; "•" read as
+            // "saving soon" while nothing was being saved.
+            if (localState.saveBlocked) {
+                savedDot.textContent = "Conflict";
+                return;
+            }
             savedDot.textContent = "•"; // dirty
             if (localState.saveTimer) clearTimeout(localState.saveTimer);
             localState.saveTimer = setTimeout(() => {
@@ -1219,14 +1356,13 @@
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ pinned: nextPinned }),
                 });
-                localState.note = n;
+                // A pin is a per-user preference, not an edit: take only the
+                // flag. Adopting the whole response moved the version stamp
+                // past edits made elsewhere, so the next save overwrote them.
+                if (localState.note && localState.note.id === n.id) localState.note.pinned = n.pinned;
                 const idx = localState.list.findIndex((x) => x.id === n.id);
                 if (idx >= 0) {
-                    localState.list[idx] = {
-                        id: n.id, title: n.title, folder: n.folder || "",
-                        pinned: n.pinned, snippet: localState.list[idx].snippet,
-                        updated_at: n.updated_at,
-                    };
+                    localState.list[idx] = { ...localState.list[idx], pinned: n.pinned };
                     renderTree();
                 }
                 window.dispatchEvent(new CustomEvent("familiar:pinsChanged"));
@@ -1325,22 +1461,27 @@
             if (!localState.note || !localState.noteId) return;
             try {
                 const n = await apiJSON("/console/api/books/personal/page-by-id/" + encodeURIComponent(localState.noteId));
+                // The user switched notes while this was in flight.
+                if (!localState.note || localState.note.id !== n.id) return;
                 // Refresh share state regardless of content changes —
                 // a remote share toggle should reflect immediately.
                 localState.note.share = n.share || null;
                 updateShareIndicator();
-                // Always adopt the server's updated_at and title so
-                // the next save's If-Match precondition isn't stale.
-                // Without this, a no-content-change refresh would
-                // leave updated_at behind and the very next save
-                // would 409.
-                localState.note.updated_at = n.updated_at;
-                localState.note.title = n.title;
-                // Only update content if it actually changed
-                // (avoids resetting the editor's cursor position).
-                const currentContent = tuiEditor ? tuiEditor.getMarkdown() : "";
-                if (n.content !== currentContent) {
-                    localState.note = n;
+                // With unsaved edits (typed, saving, or waiting on the
+                // debounce), leave the editor and the base version alone:
+                // replacing the editor threw those keystrokes away, and
+                // adopting the new version while keeping them would make
+                // the next save overwrite the change that triggered this.
+                // The next save goes out against the old version and the
+                // server merges the two edits.
+                if (localState.saving || localState.saveTimer || localState.saveBlocked || isDirty()) {
+                    refreshList();
+                    return;
+                }
+                localState.note = n;
+                // Only touch the editor if the content actually changed
+                // (avoids resetting the cursor position).
+                if (n.content !== currentContent() || (n.title || "") !== titleInput.value) {
                     titleInput.value = n.title || "";
                     suppressSave = true;
                     if (tuiEditor) {
@@ -1351,6 +1492,7 @@
                     // the footer so [[]] additions/removals reflect.
                     renderPageLinks(n.id);
                 }
+                seedBase(n);
                 // Always refresh the sidebar list (title/order may
                 // have changed even if content didn't).
                 refreshList();

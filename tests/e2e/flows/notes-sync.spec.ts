@@ -161,22 +161,22 @@ test("a dirty editor refuses the remote refresh and surfaces the conflict", asyn
         );
         expect(remote.ok(), `remote PATCH: HTTP ${remote.status()}`).toBeTruthy();
 
-        // B's pending autosave fires with a now-stale If-Match → 409 →
-        // autosave pauses and the conflict surfaces. B's local text
+        // B's pending autosave fires with a now-stale If-Match. Both edits
+        // replaced the same line, so the server can't merge them: 409,
+        // saving pauses, and a banner offers the choice. B's local text
         // must survive — this exact path is the old clobber bug.
-        await expect(b.shell.locator(".notes-saved")).toHaveText("Conflict — reload to continue", {
-            timeout: 10_000,
-        });
+        const banner = b.shell.locator(".wiki-sync-banner");
+        await expect(banner).toBeVisible({ timeout: 10_000 });
+        await expect(b.shell.locator(".notes-saved")).toHaveText("Conflict");
         await expect(b.editor).toContainText("local divergence on B");
         await expect(b.editor).not.toContainText("remote edit wins the race");
 
-        // Reloading the note (the recovery path the conflict message
-        // points at — clicking it in the sidebar re-fires openDoc)
-        // adopts the server's row and unblocks saving.
-        await pageB.evaluate((id) => {
-            window.dispatchEvent(new CustomEvent("familiar:openDoc", { detail: { surface: "notes", id } }));
-        }, note.id);
+        // "Use theirs" reloads the server's row and unblocks saving. (The
+        // old message sent the user to click the note in the sidebar,
+        // which did nothing for the note already open.)
+        await banner.getByRole("button", { name: /use theirs/i }).click();
         await expect(b.editor).toContainText("remote edit wins the race", { timeout: 10_000 });
+        await expect(banner).toBeHidden();
     } finally {
         await ctxB.close();
     }
@@ -217,4 +217,129 @@ test("a stale If-Match is refused with 409 and the current row", async ({ stack,
         })
     ).json();
     expect(after.content).toBe("v2");
+});
+
+async function serverContent(request: APIRequestContext, stack: GatewayStack, user: TestUser, id: string) {
+    const r = await request.get(`${stack.workspaceURL}/console/api/books/personal/page-by-id/${id}`, {
+        headers: { Cookie: user.cookieHeader },
+    });
+    return ((await r.json()) as NotePage).content;
+}
+
+// Two writers editing different paragraphs of the same note both keep
+// their edit. The server's three-way merge existed but never ran: every
+// client sent the title with each save, which disqualified it.
+test("disjoint concurrent edits merge instead of conflicting", async ({ stack, browser, request }) => {
+    const user = await createTestUser();
+    const note = await createNote(request, stack, user, "merge-target", "line one\n\nline two\n\nline three");
+    const ctxB = await browser.newContext();
+    await attachSession(ctxB, stack.workspaceURL, user);
+    const pageB = await ctxB.newPage();
+    try {
+        const b = await openNote(pageB, stack, note.id);
+        await expect(b.editor).toContainText("line three");
+        const current: NotePage = await (
+            await request.get(`${stack.workspaceURL}/console/api/books/personal/page-by-id/${note.id}`, {
+                headers: { Cookie: user.cookieHeader },
+            })
+        ).json();
+
+        // B appends to the last paragraph...
+        await b.editor.click();
+        await pageB.keyboard.press("ControlOrMeta+End");
+        await pageB.keyboard.type(" edited by B");
+        // ...while "device A" changes the first one, inside B's debounce.
+        const remote = await request.patch(
+            `${stack.workspaceURL}/console/api/books/personal/page-by-id/${note.id}`,
+            {
+                headers: { Cookie: user.cookieHeader, "Content-Type": "application/json", "If-Match": current.updated_at },
+                data: { title: "merge-target", content: current.content.replace("line one", "line one edited by A") },
+            },
+        );
+        expect(remote.ok(), `remote PATCH: HTTP ${remote.status()}`).toBeTruthy();
+
+        await expect
+            .poll(() => serverContent(request, stack, user, note.id), { timeout: 10_000 })
+            .toContain("line three edited by B");
+        const merged = await serverContent(request, stack, user, note.id);
+        expect(merged, "A's edit was lost in the merge").toContain("line one edited by A");
+        await expect(b.editor).toContainText("line one edited by A", { timeout: 10_000 });
+        await expect(b.shell.locator(".wiki-sync-banner")).toHaveCount(0);
+    } finally {
+        await ctxB.close();
+    }
+});
+
+// A refresh triggered elsewhere (an AI tool writing some other note fires
+// familiar:notesChanged) while the user is typing must not replace the
+// editor with the last-saved body. It used to, and the pending autosave
+// then saved the reverted text, so the loss was permanent.
+test("a refresh while typing doesn't wipe the unsaved text", async ({ stack, browser, request }) => {
+    const user = await createTestUser();
+    const note = await createNote(request, stack, user, "typing-target", "before");
+    const ctx = await browser.newContext();
+    await attachSession(ctx, stack.workspaceURL, user);
+    const page = await ctx.newPage();
+    try {
+        const n = await openNote(page, stack, note.id);
+        await expect(n.editor).toContainText("before");
+        await n.editor.click();
+        await page.keyboard.press("ControlOrMeta+End");
+        await page.keyboard.type(" and after");
+        await page.evaluate(() => window.dispatchEvent(new CustomEvent("familiar:notesChanged")));
+        await expect(n.editor).toContainText("before and after");
+        await expect
+            .poll(() => serverContent(request, stack, user, note.id), { timeout: 10_000 })
+            .toContain("before and after");
+    } finally {
+        await ctx.close();
+    }
+});
+
+// A rename by someone else must not break an open editor. Pages were
+// loaded, polled and saved by slug, and the slug follows the title, so
+// after a rename every save from the other editor 404'd.
+test("the wiki keeps saving after someone else renames the page", async ({ stack, browser, request }) => {
+    const user = await createTestUser({ role: "admin" });
+    const headers = { Cookie: user.cookieHeader, "Content-Type": "application/json" };
+    const book = await (
+        await request.post(`${stack.workspaceURL}/console/api/books`, {
+            headers,
+            data: { name: `Rename Wiki ${Date.now().toString(36)}` },
+        })
+    ).json();
+    const page = await (
+        await request.post(`${stack.workspaceURL}/console/api/books/${book.slug}/pages`, {
+            headers,
+            data: { title: "Groceries", content: "milk" },
+        })
+    ).json();
+    const byId = `${stack.workspaceURL}/console/api/books/${book.slug}/page-by-id/${page.id}`;
+
+    const ctx = await browser.newContext();
+    await attachSession(ctx, stack.workspaceURL, user);
+    const p = await ctx.newPage();
+    try {
+        await p.goto(stack.workspaceURL);
+        await expect(p.locator("#view-dashboard")).toBeVisible({ timeout: 15_000 });
+        await p.evaluate(({ slug, id }) => {
+            (window as any).FamiliarWorkspace.openDoc("wiki", slug, "Groceries", { pageId: id });
+        }, { slug: book.slug, id: page.id });
+        const editor = p.locator(".wiki-shell .toastui-editor-ww-container .ProseMirror").first();
+        await expect(editor).toContainText("milk", { timeout: 10_000 });
+
+        // Someone else renames it (new slug), then this user keeps typing.
+        const renamed = await request.patch(byId, { headers, data: { title: "Shopping" } });
+        expect(renamed.ok(), `rename: HTTP ${renamed.status()}`).toBeTruthy();
+        expect((await renamed.json()).slug).not.toBe(page.slug);
+
+        await editor.click();
+        await p.keyboard.press("ControlOrMeta+End");
+        await p.keyboard.type(" and eggs");
+        await expect
+            .poll(async () => (await (await request.get(byId, { headers })).json()).content, { timeout: 10_000 })
+            .toContain("milk and eggs");
+    } finally {
+        await ctx.close();
+    }
 });

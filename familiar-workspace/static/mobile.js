@@ -1362,6 +1362,40 @@ var reader = resp.body.getReader();
        + 500ms-debounced PATCH on every edit.
        -----------------------------------------------------------*/
 
+    // showEditConflict puts an explicit choice above an editor whose save
+    // collided with another writer's overlapping edit (the server merges
+    // disjoint edits itself, so this only appears for a real overlap).
+    // Saving is paused until the user picks; the editor keeps their text.
+    // Replaces "conflict — reload to continue", which offered no way to
+    // reload: reopening the same document short-circuited.
+    function showEditConflict(bodyEl, who, onTheirs, onMine) {
+        clearEditConflict(bodyEl);
+        if (!bodyEl || !bodyEl.parentNode) return;
+        var bar = document.createElement('div');
+        bar.className = 'mob-edit-conflict';
+        var msg = document.createElement('div');
+        msg.className = 'mob-edit-conflict-msg';
+        msg.textContent = 'Changed by ' + (who || 'someone else') +
+            ' in the same place you edited. Nothing has been saved since.';
+        var theirs = document.createElement('button');
+        theirs.type = 'button';
+        theirs.className = 'mob-pill';
+        theirs.textContent = 'Use theirs';
+        theirs.addEventListener('click', function () { clearEditConflict(bodyEl); onTheirs(); });
+        var mine = document.createElement('button');
+        mine.type = 'button';
+        mine.className = 'mob-pill mob-pill-primary';
+        mine.textContent = 'Keep mine';
+        mine.addEventListener('click', function () { clearEditConflict(bodyEl); onMine(); });
+        bar.append(msg, theirs, mine);
+        bodyEl.parentNode.insertBefore(bar, bodyEl);
+    }
+    function clearEditConflict(bodyEl) {
+        if (!bodyEl || !bodyEl.parentNode) return;
+        var old = bodyEl.parentNode.querySelector('.mob-edit-conflict');
+        if (old) old.remove();
+    }
+
     var Notes = (function () {
         var state = {
             list: [],
@@ -1369,6 +1403,15 @@ var reader = resp.body.getReader();
             note: null,        // {id, title, content, ...}
             saveTimer: null,
             saving: false,
+            // Sync baseline: title + (editor-normalized) body of the version
+            // state.note.updated_at names. See seedBase / isDirty.
+            baseContent: '',
+            baseTitle: '',
+            // A save requested mid-flight re-runs when the first returns
+            // (it used to be dropped, losing what was typed meanwhile).
+            pendingResave: false,
+            savePromise: null,
+            saveBlocked: false,
             loadedListOnce: false,
             suppressInput: false,  // gate to prevent autosave on programmatic value sets
             tuiEditor: null,       // lazy Toast UI Editor instance
@@ -1528,18 +1571,40 @@ var reader = resp.body.getReader();
             return row;
         }
 
+        function noteTitleValue() {
+            var t = document.getElementById('mob-note-title');
+            return (t && t.value) || 'Untitled';
+        }
+        // seedBase records the editor as in sync with state.note. Call
+        // after setBodyContent so Toast UI's normalization isn't an edit.
+        function seedBase() {
+            state.baseContent = getBodyContent();
+            state.baseTitle = noteTitleValue();
+        }
+        function isDirty() {
+            if (!state.note) return false;
+            return getBodyContent() !== state.baseContent || noteTitleValue() !== state.baseTitle;
+        }
+
         async function openNote(id) {
             // Same id already loaded? Don't re-fetch — preserves cursor
-            // position when the hash gets re-set after a save.
-            if (state.currentId === id && state.note && state.note.id === id) return;
+            // position when the hash gets re-set after a save. A note
+            // stuck in a conflict does reload, so reopening it is a way out.
+            if (state.currentId === id && state.note && state.note.id === id && !state.saveBlocked) return;
 
-            // Flush any pending save from the previous note before
-            // switching so we don't lose edits to it.
+            // Flush any pending save from the previous note, and wait out
+            // one in flight: resolving after the switch, it used to repoint
+            // state.note at the old note, so the next keystroke overwrote
+            // that note with this one's text.
             if (state.saveTimer) {
                 clearTimeout(state.saveTimer);
                 state.saveTimer = null;
                 await flushSave();
             }
+            if (state.savePromise) {
+                try { await state.savePromise; } catch (_) { /* reported by the save */ }
+            }
+            clearEditConflict(document.getElementById('mob-note-body'));
 
             state.currentId = id;
             state.note = null;
@@ -1555,6 +1620,7 @@ var reader = resp.body.getReader();
                 state.note = n;
                 if (titleInp) { state.suppressInput = true; titleInp.value = n.title || ''; titleInp.placeholder = 'Untitled'; state.suppressInput = false; }
                 setBodyContent(n.content || '');
+                seedBase();
             } catch (e) {
                 if (statusEl) statusEl.textContent = 'load failed';
             }
@@ -1564,6 +1630,10 @@ var reader = resp.body.getReader();
             if (state.suppressInput) return;
             if (!state.note) return;
             var statusEl = document.getElementById('mob-note-status');
+            if (state.saveBlocked) {
+                if (statusEl) statusEl.textContent = 'conflict';
+                return;
+            }
             if (statusEl) statusEl.textContent = 'saving…';
             if (state.saveTimer) clearTimeout(state.saveTimer);
             state.saveTimer = setTimeout(function () {
@@ -1572,25 +1642,38 @@ var reader = resp.body.getReader();
             }, 500);
         }
 
-        async function flushSave() {
-            if (!state.note) return;
-            if (state.saving) return;
-            if (state.saveBlocked) return; // conflict — wait for reload
+        function flushSave() {
+            if (!state.note) return Promise.resolve();
+            if (state.saving) {
+                state.pendingResave = true;
+                return state.savePromise || Promise.resolve();
+            }
+            if (state.saveBlocked) return Promise.resolve(); // conflict — banner decides
+            state.savePromise = doSave().finally(function () {
+                state.savePromise = null;
+                if (state.pendingResave) {
+                    state.pendingResave = false;
+                    if (!state.saveBlocked && isDirty()) flushSave();
+                }
+            });
+            return state.savePromise;
+        }
+
+        async function doSave() {
             state.saving = true;
-            var titleInp = document.getElementById('mob-note-title');
             var statusEl = document.getElementById('mob-note-status');
-            var patch = {
-                title: (titleInp && titleInp.value) || 'Untitled',
-                content: getBodyContent(),
-            };
-            // If-Match: refuses the write if the server's row has
-            // moved since we loaded it. Without this, two devices
-            // editing the same note silently overwrite each other.
+            var savingId = state.note.id;
+            var patch = { content: getBodyContent() };
+            // Title only when changed: an unchanged title in every save
+            // ruled out the server's three-way merge of concurrent edits.
+            if (noteTitleValue() !== state.baseTitle) patch.title = noteTitleValue();
+            // If-Match: the version we last synced with. The server merges
+            // another device's disjoint edit against it; 409 means overlap.
             var headers = { 'Content-Type': 'application/json' };
             if (state.note.updated_at) headers['If-Match'] = state.note.updated_at;
             try {
                 var resp = await fetch('/console/api/books/personal/page-by-id/' +
-                    encodeURIComponent(state.note.id), {
+                    encodeURIComponent(savingId), {
                     method: 'PATCH',
                     credentials: 'include',
                     headers: headers,
@@ -1599,27 +1682,14 @@ var reader = resp.body.getReader();
                 var text = await resp.text();
                 var body = null;
                 try { body = text ? JSON.parse(text) : null; } catch (e) { /* fall through */ }
+                var stillHere = state.note && state.note.id === savingId;
                 if (resp.status === 409 && body && body.error === 'stale') {
-                    // Server has a newer version. If our local content
-                    // already matches it, just adopt the timestamp and
-                    // continue. Otherwise pause saves so we don't
-                    // clobber the upstream edit.
-                    var server = body.current || {};
-                    if ((server.content || '') === (patch.content || '') &&
-                        (server.title || '') === (patch.title || '')) {
-                        state.note = server;
-                    } else {
-                        state.saveBlocked = true;
-                        if (statusEl) statusEl.textContent = 'conflict — reload to continue';
-                    }
+                    if (stillHere) noteConflict(patch, body.current || {});
                     return;
                 }
                 if (!resp.ok) {
                     throw new Error((body && body.error) || ('HTTP ' + resp.status));
                 }
-                state.note = body;
-                if (statusEl) statusEl.textContent = 'saved';
-                setTimeout(function () { if (statusEl && statusEl.textContent === 'saved') statusEl.textContent = ''; }, 1200);
                 // Bump in list ordering.
                 var idx = state.list.findIndex(function (x) { return x.id === body.id; });
                 if (idx >= 0) {
@@ -1627,12 +1697,60 @@ var reader = resp.body.getReader();
                         title: body.title, updated_at: body.updated_at,
                     });
                 }
+                if (!stillHere) return;
+                if (body.merged && getBodyContent() !== patch.content) {
+                    // Merged while the user kept typing: keep the old base so
+                    // the next save merges again (see the desktop notes).
+                    state.pendingResave = true;
+                    if (statusEl) statusEl.textContent = 'merging…';
+                    return;
+                }
+                state.note = body;
+                if (body.merged) setBodyContent(body.content || '');
+                if (body.merged) {
+                    seedBase();
+                } else {
+                    state.baseContent = patch.content;
+                    state.baseTitle = body.title || 'Untitled';
+                }
+                if (statusEl) {
+                    statusEl.textContent = body.merged ? 'merged — ' + (body.updated_by || 'another editor') : 'saved';
+                    setTimeout(function () {
+                        if (statusEl && (statusEl.textContent === 'saved' || statusEl.textContent.indexOf('merged') === 0)) statusEl.textContent = '';
+                    }, body.merged ? 5000 : 1200);
+                }
+                if (isDirty()) state.pendingResave = true;
             } catch (e) {
                 if (statusEl) statusEl.textContent = 'save failed';
                 console.warn('mobile notes: save failed', e);
             } finally {
                 state.saving = false;
             }
+        }
+
+        // noteConflict handles a 409: if our text already matches the
+        // server's, adopt it; otherwise pause saving and ask.
+        function noteConflict(patch, server) {
+            var statusEl = document.getElementById('mob-note-status');
+            if ((server.content || '') === (patch.content || '') &&
+                (patch.title === undefined || (server.title || '') === patch.title)) {
+                state.note = server;
+                seedBase();
+                return;
+            }
+            state.saveBlocked = true;
+            if (statusEl) statusEl.textContent = 'conflict';
+            var id = state.note.id;
+            showEditConflict(document.getElementById('mob-note-body'), server.updated_by,
+                function () { state.saveBlocked = false; state.note = null; state.currentId = null; openNote(id); },
+                function () {
+                    // Keep mine: write the editor over the current version.
+                    state.note.updated_at = server.updated_at;
+                    state.baseContent = server.content || '';
+                    state.baseTitle = server.title || 'Untitled';
+                    state.saveBlocked = false;
+                    flushSave();
+                });
         }
 
         async function startNew() {
@@ -1672,7 +1790,10 @@ var reader = resp.body.getReader();
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ pinned: nextPinned }),
                 });
-                state.note = n;
+                // A pin is a preference, not an edit: take only the flag.
+                // Adopting the whole response moved the version stamp past
+                // edits made elsewhere, so the next save overwrote them.
+                if (state.note && state.note.id === id) state.note.pinned = n.pinned;
                 var idx = state.list.findIndex(function (x) { return x.id === id; });
                 if (idx >= 0) state.list[idx] = Object.assign({}, state.list[idx], { pinned: n.pinned });
                 if (window.HomePins && window.HomePins.refresh) window.HomePins.refresh();
@@ -1728,12 +1849,21 @@ var reader = resp.body.getReader();
             if (detail.kind !== 'page-saved') return;
             var payload = detail.payload || {};
             if (payload.updated_at && state.note.updated_at === payload.updated_at) return;
-            if (state.saveTimer || state.saving) return;
+            // Unsaved edits (typed, debouncing or saving): don't reload over
+            // them, which threw them away. Save instead; the server merges
+            // the remote change with ours, or 409s into the conflict choice.
+            if (state.saveBlocked) return;
+            if (state.saveTimer || state.saving || isDirty()) {
+                if (state.saveTimer) { clearTimeout(state.saveTimer); state.saveTimer = null; }
+                flushSave();
+                return;
+            }
             try {
                 var fresh = await apiJSON('/console/api/books/personal/page-by-id/' +
                     encodeURIComponent(state.note.id));
+                // Re-check: the user may have typed during the GET.
+                if (!state.note || state.note.id !== fresh.id || isDirty() || state.saving || state.saveTimer) return;
                 state.note = fresh;
-                state.saveBlocked = false;
                 var titleInp = document.getElementById('mob-note-title');
                 if (titleInp) {
                     state.suppressInput = true;
@@ -1741,6 +1871,7 @@ var reader = resp.body.getReader();
                     state.suppressInput = false;
                 }
                 setBodyContent(fresh.content || '');
+                seedBase();
                 if (payload.updated_by) {
                     var statusEl = document.getElementById('mob-note-status');
                     if (statusEl) {
@@ -1796,7 +1927,21 @@ var reader = resp.body.getReader();
             // silently overwrote unsaved edits on the next SSE event.
             baseContent: '',
             baseTitle: '',
+            pendingResave: false,
+            savePromise: null,
+            saveBlocked: false,
         };
+
+        // pageURL addresses a page by id: slugs follow the title, so after
+        // another editor renamed the page, slug-addressed saves 404'd.
+        function pageURL(pageId) {
+            return '/console/api/books/' + encodeURIComponent(state.currentBookSlug) +
+                '/page-by-id/' + encodeURIComponent(pageId);
+        }
+        function pageTitleValue() {
+            var t = document.getElementById('mob-wiki-page-title');
+            return (t && t.value) || 'Untitled';
+        }
 
         // seedBase snapshots the editor's normalized content + title as
         // the authoritative baseline. Call AFTER setBodyContent so
@@ -2064,7 +2209,8 @@ var reader = resp.body.getReader();
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ pinned: nextPinned }),
                 });
-                state.page = p;
+                // Only the pin flag: see the Notes module's togglePin.
+                if (state.page && state.page.id === p.id) state.page.pinned = p.pinned;
                 var idx = state.pages.findIndex(function (x) { return x.id === p.id; });
                 if (idx >= 0) state.pages[idx] = Object.assign({}, state.pages[idx], { pinned: p.pinned });
                 if (window.HomePins && window.HomePins.refresh) window.HomePins.refresh();
@@ -2137,7 +2283,8 @@ var reader = resp.body.getReader();
             }
 
             // Same id already loaded? skip the re-fetch.
-            if (state.page && state.page.id === pageId) return;
+            // A page stuck in a conflict reloads, so reopening it is a way out.
+            if (state.page && state.page.id === pageId && !state.saveBlocked) return;
 
             if (wantBook && wantBook !== state.currentBookSlug) {
                 if (!state.books.length) { await refresh(); }
@@ -2147,12 +2294,18 @@ var reader = resp.body.getReader();
                 }
             }
 
-            // Flush a pending save from the previously-open page.
+            // Flush a pending save from the previously-open page, and wait
+            // out one in flight (resolving after the switch it repointed
+            // state.page at the old page; see the Notes module).
             if (state.saveTimer) {
                 clearTimeout(state.saveTimer);
                 state.saveTimer = null;
                 await flushSave();
             }
+            if (state.savePromise) {
+                try { await state.savePromise; } catch (_) { /* reported by the save */ }
+            }
+            clearEditConflict(document.getElementById('mob-wiki-page-body'));
             state.page = null;
             state.currentPageSlug = null;
             state.saveBlocked = false; // reloading clears any conflict
@@ -2181,8 +2334,7 @@ var reader = resp.body.getReader();
             if (statusEl) statusEl.textContent = '';
 
             try {
-                var p = await apiJSON('/console/api/books/' + encodeURIComponent(state.currentBookSlug) +
-                                      '/pages/' + encodeURIComponent(rec.slug));
+                var p = await apiJSON(pageURL(rec.id));
                 state.page = p;
                 if (titleInp) { state.suppressInput = true; titleInp.value = p.title || ''; titleInp.placeholder = 'Untitled'; state.suppressInput = false; }
                 setBodyContent(p.content || '');
@@ -2207,30 +2359,45 @@ var reader = resp.body.getReader();
         function scheduleSave() {
             if (state.suppressInput || !state.page) return;
             var statusEl = document.getElementById('mob-wiki-page-status');
+            if (state.saveBlocked) {
+                if (statusEl) statusEl.textContent = 'conflict';
+                return;
+            }
             if (statusEl) statusEl.textContent = 'saving…';
             if (state.saveTimer) clearTimeout(state.saveTimer);
             state.saveTimer = setTimeout(function () { state.saveTimer = null; flushSave(); }, 500);
         }
 
-        async function flushSave(keepalive) {
-            if (!state.page || state.saving) return;
-            if (state.saveBlocked) return; // conflict — wait for reload
+        function flushSave(keepalive) {
+            if (!state.page) return Promise.resolve();
+            if (state.saving) {
+                state.pendingResave = true;
+                return state.savePromise || Promise.resolve();
+            }
+            if (state.saveBlocked) return Promise.resolve(); // conflict — banner decides
+            state.savePromise = doSave(keepalive).finally(function () {
+                state.savePromise = null;
+                if (state.pendingResave) {
+                    state.pendingResave = false;
+                    if (!state.saveBlocked && isDirty()) flushSave();
+                }
+            });
+            return state.savePromise;
+        }
+
+        async function doSave(keepalive) {
             state.saving = true;
-            var titleInp = document.getElementById('mob-wiki-page-title');
             var statusEl = document.getElementById('mob-wiki-page-status');
-            var patch = {
-                title: (titleInp && titleInp.value) || 'Untitled',
-                content: getBodyContent(),
-            };
-            // If-Match: refuses the write if the server's row has
-            // moved since we loaded it. Without this, two devices
-            // editing the same page silently overwrite each other.
+            var savingId = state.page.id;
+            var patch = { content: getBodyContent() };
+            // Title only when changed: an unchanged title in every save ruled
+            // out the server's three-way merge of concurrent edits.
+            if (pageTitleValue() !== (state.baseTitle || 'Untitled')) patch.title = pageTitleValue();
+            // If-Match: the version we last synced with (see Notes).
             var headers = { 'Content-Type': 'application/json' };
             if (state.page.updated_at) headers['If-Match'] = state.page.updated_at;
             try {
-                var resp = await fetch('/console/api/books/' +
-                    encodeURIComponent(state.currentBookSlug) +
-                    '/pages/' + encodeURIComponent(state.currentPageSlug), {
+                var resp = await fetch(pageURL(savingId), {
                     method: 'PATCH',
                     credentials: 'include',
                     headers: headers,
@@ -2240,41 +2407,13 @@ var reader = resp.body.getReader();
                 var text = await resp.text();
                 var body = null;
                 try { body = text ? JSON.parse(text) : null; } catch (e) { /* fall through */ }
+                var stillHere = state.page && state.page.id === savingId;
                 if (resp.status === 409 && body && body.error === 'stale') {
-                    var server = body.current || {};
-                    if ((server.content || '') === (patch.content || '') &&
-                        (server.title || '') === (patch.title || '')) {
-                        state.page = server;
-                        state.currentPageSlug = server.slug;
-                    } else {
-                        state.saveBlocked = true;
-                        if (statusEl) statusEl.textContent = 'conflict — reload to continue';
-                    }
+                    if (stillHere) pageConflict(patch, body.current || {});
                     return;
                 }
                 if (!resp.ok) {
                     throw new Error((body && body.error) || ('HTTP ' + resp.status));
-                }
-                state.page = body;
-                state.currentPageSlug = body.slug;
-                // P2-3: the server auto-merged this save against another
-                // device's disjoint edit — the response IS the merged
-                // document. Reflect it in the editor so both changes are
-                // visible, but only if the user hasn't typed further since
-                // we sent the save (else we'd clobber in-flight keystrokes;
-                // their newer edit merges again on the next flush).
-                if (body.merged && getBodyContent() === patch.content) {
-                    setBodyContent(body.content || '');
-                }
-                seedBase(); // editor now matches the saved version
-                if (statusEl) {
-                    if (body.merged) {
-                        statusEl.textContent = 'Merged — ' + (body.updated_by || 'another editor');
-                        setTimeout(function () { if (statusEl && statusEl.textContent.indexOf('Merged') === 0) statusEl.textContent = ''; }, 5000);
-                    } else {
-                        statusEl.textContent = 'saved';
-                        setTimeout(function () { if (statusEl && statusEl.textContent === 'saved') statusEl.textContent = ''; }, 1200);
-                    }
                 }
                 // Refresh the list-cache row so back-nav lands on
                 // an updated entry without a re-fetch.
@@ -2284,12 +2423,70 @@ var reader = resp.body.getReader();
                         title: body.title, slug: body.slug, updated_at: body.updated_at,
                     });
                 }
+                if (!stillHere) return;
+                // Merged while the user kept typing: keep the old base so the
+                // next save merges again (adopting the merged version as the
+                // base while the editor lacks the other edit overwrote it).
+                if (body.merged && getBodyContent() !== patch.content) {
+                    state.pendingResave = true;
+                    if (statusEl) statusEl.textContent = 'merging…';
+                    return;
+                }
+                state.page = body;
+                state.currentPageSlug = body.slug;
+                if (body.merged) {
+                    // The response IS the merged document; show it.
+                    setBodyContent(body.content || '');
+                    seedBase();
+                } else {
+                    // Seed from what was sent (the editor's text at send time),
+                    // not the live editor: text typed during the save must
+                    // stay dirty, or it read as saved and was lost.
+                    state.baseContent = patch.content;
+                    state.baseTitle = body.title || '';
+                }
+                if (statusEl) {
+                    if (body.merged) {
+                        statusEl.textContent = 'Merged — ' + (body.updated_by || 'another editor');
+                        setTimeout(function () { if (statusEl && statusEl.textContent.indexOf('Merged') === 0) statusEl.textContent = ''; }, 5000);
+                    } else {
+                        statusEl.textContent = 'saved';
+                        setTimeout(function () { if (statusEl && statusEl.textContent === 'saved') statusEl.textContent = ''; }, 1200);
+                    }
+                }
+                if (isDirty()) state.pendingResave = true;
             } catch (e) {
                 if (statusEl) statusEl.textContent = 'save failed';
                 console.warn('mobile wiki: save failed', e);
             } finally {
                 state.saving = false;
             }
+        }
+
+        // pageConflict handles a 409: adopt the server row if our text
+        // already matches it; otherwise pause saving and ask.
+        function pageConflict(patch, server) {
+            var statusEl = document.getElementById('mob-wiki-page-status');
+            if ((server.content || '') === (patch.content || '') &&
+                (patch.title === undefined || (server.title || '') === patch.title)) {
+                state.page = server;
+                state.currentPageSlug = server.slug;
+                seedBase();
+                return;
+            }
+            state.saveBlocked = true;
+            if (statusEl) statusEl.textContent = 'conflict';
+            var id = state.page.id;
+            var book = state.currentBookSlug;
+            showEditConflict(document.getElementById('mob-wiki-page-body'), server.updated_by,
+                function () { state.saveBlocked = false; state.page = null; openPage(book + '/' + id); },
+                function () {
+                    state.page.updated_at = server.updated_at;
+                    state.baseContent = server.content || '';
+                    state.baseTitle = server.title || '';
+                    state.saveBlocked = false;
+                    flushSave();
+                });
         }
 
         async function newBook() {
@@ -2404,17 +2601,22 @@ var reader = resp.body.getReader();
             // (saveTimer || saving) was false the instant the 500ms
             // debounce fired, so a remote save would silently replace
             // the user's local edits. A real dirty check keeps them.
-            if (isDirty()) {
+            if (state.saveBlocked) return;
+            if (isDirty() || state.saveTimer || state.saving) {
+                // Save now against our base: the server merges the remote
+                // change with ours when they don't overlap, or 409s into
+                // the conflict choice.
+                if (state.saveTimer) { clearTimeout(state.saveTimer); state.saveTimer = null; }
                 showRemoteAvailable(payload.updated_by);
+                flushSave();
                 return;
             }
             try {
-                var fresh = await apiJSON('/console/api/books/' +
-                    encodeURIComponent(state.currentBookSlug) + '/pages/' +
-                    encodeURIComponent(state.currentPageSlug));
+                var fresh = await apiJSON(pageURL(state.page.id));
                 // Re-check after the await: the user may have started
                 // typing while the fetch was in flight.
-                if (isDirty()) { showRemoteAvailable(payload.updated_by); return; }
+                if (!state.page || state.page.id !== fresh.id) return;
+                if (isDirty() || state.saving || state.saveTimer) { flushSave(); return; }
                 state.page = fresh;
                 state.currentPageSlug = fresh.slug;
                 state.saveBlocked = false;

@@ -48,7 +48,30 @@ import (
 	"github.com/familiar/gateway/internal/userprofile"
 )
 
+// Startup budgets. A database that isn't up yet (a reboot where the
+// Postgres container starts after the gateway) gets dbStartupWait to
+// appear; migrations get migrationTimeout, which is sized for a
+// table-rewriting migration on a large table, not for the per-boot
+// no-op run.
+var (
+	dbStartupWait    = 90 * time.Second
+	migrationTimeout = 15 * time.Minute
+)
+
 func main() {
+	// exitCode is what the process exits with once every deferred
+	// teardown has run. Registered first so it runs last. main used to
+	// return normally on every failure, exiting 0, and the unit's
+	// Restart=on-failure never restarts a clean exit, so any adapter
+	// error or unreachable database left the gateway down until someone
+	// restarted it by hand.
+	exitCode := 0
+	defer func() {
+		if exitCode != 0 {
+			os.Exit(exitCode)
+		}
+	}()
+
 	var (
 		configPath = flag.String("config", "", "path to gateway.toml (default: auto-discover)")
 		verbose    = flag.Bool("verbose", false, "show routing metadata after each response")
@@ -334,10 +357,15 @@ func main() {
 	// queue depth on the admin memory-health card.
 	var reembedSweeper *memengine.ReembedSweeper
 	if cfg.Memory.LocalDSN != "" {
-		pool, poolErr := db.Open(cfg.Memory.LocalDSN)
+		pool, poolErr := openDBWithRetry(ctx, cfg.Memory.LocalDSN, dbStartupWait)
 		if poolErr != nil {
-			log.Printf("[memory] warning: pool unavailable: %v", poolErr)
-		} else {
+			// Running on without the database served a gateway with no
+			// login, chat auth or memory while /api/health said ok.
+			log.Printf("[memory] FATAL: database unreachable after %v: %v — exiting so the service manager restarts the gateway", dbStartupWait, poolErr)
+			exitCode = 1
+			return
+		}
+		{
 			defer pool.Close()
 			sharedPool = pool
 
@@ -350,11 +378,18 @@ func main() {
 				log.Printf("[skills] imported-skills library at %s", cfg.Skills.Dir)
 			}
 
-			migCtx, migCancel := context.WithTimeout(ctx, 5*time.Second)
-			if migErr := db.Migrate(migCtx, pool); migErr != nil {
-				log.Printf("[memory] warning: migrations failed: %v", migErr)
-			}
+			// Migrations stop at the first failure, so booting past one
+			// served a partial schema, and every later migration was
+			// skipped on every boot. The old 5s budget also cancelled
+			// any migration that rewrote a large table.
+			migCtx, migCancel := context.WithTimeout(ctx, migrationTimeout)
+			migErr := db.Migrate(migCtx, pool)
 			migCancel()
+			if migErr != nil {
+				log.Printf("[memory] FATAL: migrations failed: %v — exiting rather than serve a partial schema", migErr)
+				exitCode = 1
+				return
+			}
 
 			// Identity seeding from operator config (replaces the old
 			// hardcoded phase_c_identity_seed migration). Idempotent
@@ -851,6 +886,7 @@ func main() {
 	}
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
 		log.Printf("[gateway] adapter error: %v — shutting down", runErr)
+		exitCode = 1
 	} else {
 		log.Printf("[gateway] shutdown signal received — draining")
 	}
@@ -859,4 +895,32 @@ func main() {
 	// closing. Idempotent: the deferred eng.Close() calls Stop() again
 	// (a sync.Once no-op).
 	inProcMem.Close()
+}
+
+// openDBWithRetry opens the pool, retrying with backoff until it
+// connects or wait elapses. On a reboot the database often isn't up yet
+// when the gateway starts (the Postgres container comes up after it),
+// and a single failed ping used to leave the gateway running without a
+// database for good.
+func openDBWithRetry(ctx context.Context, dsn string, wait time.Duration) (*db.Pool, error) {
+	deadline := time.Now().Add(wait)
+	backoff := time.Second
+	for {
+		pool, err := db.Open(dsn)
+		if err == nil {
+			return pool, nil
+		}
+		if time.Now().Add(backoff).After(deadline) {
+			return nil, err
+		}
+		log.Printf("[memory] database not reachable yet (%v); retrying in %v", err, backoff)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(backoff):
+		}
+		if backoff < 10*time.Second {
+			backoff *= 2
+		}
+	}
 }

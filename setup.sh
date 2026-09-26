@@ -105,6 +105,12 @@ if ! $SKIP_DB; then
         ok "Native PostgreSQL is running"
     elif command -v docker >/dev/null 2>&1; then
         USE_DOCKER_PG=true
+        # The compose file requires a password from .env. Generate one on
+        # first setup (hex, so it needs no escaping in the DSN) and keep it.
+        if ! grep -q '^POSTGRES_PASSWORD=' "$ROOT_DIR/.env" 2>/dev/null; then
+            (umask 077; echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)" >> "$ROOT_DIR/.env")
+            ok "Generated a database password in $ROOT_DIR/.env"
+        fi
         echo "    Starting PostgreSQL via Docker..."
         docker compose -f "$ROOT_DIR/docker-compose.yml" up -d
         echo "    Waiting for Postgres to be ready..."
@@ -159,6 +165,15 @@ if [ ! -f "$GATEWAY_CONFIG" ]; then
     # Detect sidecar socket path to use.
     SIDECAR_SOCK="$SIDECAR_SOCK_DIR/sidecar.sock"
 
+    # Docker Postgres needs the generated password; a native cluster
+    # authenticates the local user and needs none.
+    LOCAL_DSN="postgresql://familiar@localhost:5432/familiar"
+    if [ "${USE_DOCKER_PG:-false}" = true ]; then
+        PGPW=$(sed -n 's/^POSTGRES_PASSWORD=//p' "$ROOT_DIR/.env" | tail -1)
+        LOCAL_DSN="postgresql://familiar:${PGPW}@localhost:5432/familiar"
+    fi
+    # gateway.toml carries credentials (the DSN, tokens): owner-only.
+    (umask 077; : > "$GATEWAY_CONFIG")
     cat > "$GATEWAY_CONFIG" <<TOML
 [node]
 name = "$(hostname -s)"
@@ -192,7 +207,7 @@ fallback_on_failure = true
 [memory]
 use_sidecar_embedder = false
 store = "local"
-local_dsn = "postgresql://familiar@localhost:5432/familiar"
+local_dsn = "$LOCAL_DSN"
 relevance_threshold = 0.72
 max_injected_memories = 10
 dedup_threshold = 0.95
@@ -288,7 +303,10 @@ else
 
     echo ""
     echo "==> Running Go gateway tests..."
-    (cd "$GATEWAY_DIR" && go test -race ./internal/... 2>&1)
+    # Hermetic only: FAMILIAR_TEST_DSN in the operator's environment would
+    # turn on the DB-backed suites, which TRUNCATE tables in whatever
+    # database it names.
+    (cd "$GATEWAY_DIR" && env -u FAMILIAR_TEST_DSN go test -race ./internal/... 2>&1)
     ok "Gateway tests passed"
 fi
 

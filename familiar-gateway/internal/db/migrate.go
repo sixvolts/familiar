@@ -326,8 +326,16 @@ CREATE INDEX IF NOT EXISTS idx_rel_user    ON relationships (user_id) WHERE user
 		name: "memories_user_id_constraints",
 		ddl: `
 ALTER TABLE memories ALTER COLUMN user_id SET NOT NULL;
-ALTER TABLE memories DROP CONSTRAINT IF EXISTS memories_user_id_nonempty;
-ALTER TABLE memories ADD CONSTRAINT memories_user_id_nonempty CHECK (user_id <> '');`,
+-- Add the CHECK only when it's missing. Dropping and re-adding it on
+-- every boot rescanned all of memories under an ACCESS EXCLUSIVE lock,
+-- eating the boot's migration time as the table grew.
+DO $mem_uid$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                    WHERE conname = 'memories_user_id_nonempty'
+                      AND conrelid = 'memories'::regclass) THEN
+        ALTER TABLE memories ADD CONSTRAINT memories_user_id_nonempty CHECK (user_id <> '');
+    END IF;
+END $mem_uid$;`,
 	},
 	{
 		name: "memory_versions",
@@ -1356,14 +1364,23 @@ CREATE INDEX IF NOT EXISTS idx_messages_conversation_seq
 		// than its target came from the inverted dedup. Clearing it
 		// un-hides the newer fact; the fixed dedup then re-collapses
 		// the pair in the correct direction on its next pass.
+		//
+		// GATED ONE-SHOT (applied_data_fixes): the dedup is fixed, so
+		// this only ever needed to run once; ungated it self-joined all
+		// of memories on every boot.
 		name: "repair_inverted_supersedes",
 		ddl: `
-UPDATE memories p
-   SET supersedes = NULL,
-       updated_at = NOW()
-  FROM memories x
- WHERE p.supersedes = x.id
-   AND p.created_at < x.created_at;`,
+DO $inv_sup$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM applied_data_fixes WHERE name = 'repair_inverted_supersedes') THEN
+        UPDATE memories p
+           SET supersedes = NULL,
+               updated_at = NOW()
+          FROM memories x
+         WHERE p.supersedes = x.id
+           AND p.created_at < x.created_at;
+        INSERT INTO applied_data_fixes (name) VALUES ('repair_inverted_supersedes');
+    END IF;
+END $inv_sup$;`,
 	},
 	{
 		// USER-SKILLS-SPEC Phase A — per-user skill ownership.
@@ -1557,20 +1574,26 @@ CREATE INDEX IF NOT EXISTS idx_admin_sessions_principal
 		// superseder has, while the isolated replacement is itself hidden
 		// from top-level, so the owner lost the fact entirely. Writes can
 		// no longer do this (NearestLiveFacts); detach the pointers that
-		// already did so the original facts come back. Idempotent.
+		// already did so the original facts come back. GATED ONE-SHOT
+		// (applied_data_fixes), so it doesn't rescan memories every boot.
 		name: "isolated_supersede_repair",
 		ddl: `
-UPDATE memories s
-   SET supersedes = NULL
- WHERE s.supersedes IS NOT NULL
-   AND s.scope_tag IS NOT NULL
-   AND EXISTS (SELECT 1 FROM shards sh
-                WHERE sh.scope_tag = s.scope_tag
-                  AND sh.owner_id = s.user_id
-                  AND sh.visibility = 'isolated')
-   AND EXISTS (SELECT 1 FROM memories t
-                WHERE t.id = s.supersedes
-                  AND t.scope_tag IS DISTINCT FROM s.scope_tag);`,
+DO $iso_sup$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM applied_data_fixes WHERE name = 'isolated_supersede_repair') THEN
+        UPDATE memories s
+           SET supersedes = NULL
+         WHERE s.supersedes IS NOT NULL
+           AND s.scope_tag IS NOT NULL
+           AND EXISTS (SELECT 1 FROM shards sh
+                        WHERE sh.scope_tag = s.scope_tag
+                          AND sh.owner_id = s.user_id
+                          AND sh.visibility = 'isolated')
+           AND EXISTS (SELECT 1 FROM memories t
+                        WHERE t.id = s.supersedes
+                          AND t.scope_tag IS DISTINCT FROM s.scope_tag);
+        INSERT INTO applied_data_fixes (name) VALUES ('isolated_supersede_repair');
+    END IF;
+END $iso_sup$;`,
 	},
 }
 

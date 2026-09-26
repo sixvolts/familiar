@@ -11,10 +11,17 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: familiar
-      POSTGRES_PASSWORD: familiar_dev
+      # Required, from a git-ignored .env next to this file:
+      #   POSTGRES_PASSWORD=<openssl rand -hex 24>
+      # setup.sh generates one. The old literal was a password published
+      # in this repo, on a port reachable from the network.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env next to docker-compose.yml (see DEPLOYMENT.md)}
       POSTGRES_DB: familiar
     ports:
-      - "5432:5432"
+      # Loopback only. A bare "5432:5432" listens on every interface,
+      # and Docker's published ports bypass ufw/INPUT firewall rules, so
+      # "firewall everything but 443" left the database open.
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./init-db.sql:/docker-entrypoint-initdb.d/01-init.sql:ro

@@ -1,6 +1,10 @@
 [Unit]
 Description=Familiar Gateway (Go)
-After=familiar-embedder.service familiar-sidecar.service
+# Start after the network and the database. The gateway also waits up to
+# 90s for the database and exits non-zero if it never appears, so
+# Restart=on-failure recovers a boot where Postgres comes up late.
+After=network-online.target docker.service postgresql.service familiar-embedder.service familiar-sidecar.service
+Wants=network-online.target
 
 [Service]
 Type=simple

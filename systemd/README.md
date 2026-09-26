@@ -19,8 +19,13 @@ credentials); nothing else backs it up. Enable the nightly dump:
 ```sh
 systemctl enable --now familiar-backup.timer
 systemctl start   familiar-backup.service   # run one now to verify
+systemctl status  familiar-backup.service   # must say "status=0/SUCCESS"
+ls -l ~/.familiar/backups/                  # and a dump must be there
 systemctl list-timers familiar-backup.timer # confirm next run
 ```
+
+A failed dump fails the unit (`systemctl --failed` shows it). Set
+`OnFailure=` in the unit to be notified; nothing else will tell you.
 
 Dumps land in `~/.familiar/backups/` (override `FAMILIAR_BACKUP_DIR`),
 pruned past 14 days (`FAMILIAR_BACKUP_RETENTION_DAYS`). The DSN comes
@@ -34,4 +39,4 @@ pg_restore -d "$DSN" --clean --if-exists --no-owner \
            familiar-YYYYMMDDTHHMMSSZ.dump              # restore into an existing DB
 ```
 
-Full details are in the header of `scripts/backup-db.sh`.
+Full details are in the header of `systemd/backup-db.sh`.

@@ -20,6 +20,7 @@ package memengine
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -156,8 +157,17 @@ func (e *MemEngine) AssembleContext(ctx context.Context, sessionID, userMsg stri
 
 // CommitFacts writes facts to pgvector synchronously. No RAM tier,
 // no dirty queue — every successful return means the row is durable.
-// Mirrors the previous engine's ON CONFLICT (agent_id, content_hash)
-// upsert behavior so a re-commit of the same content is idempotent.
+//
+// A fact whose identity (owner, scope, content; see memory.FactHash)
+// matches an existing row lands on that row instead of adding a second
+// one: the ON CONFLICT (agent_id, content_hash) upsert. On return each
+// committed fact's Id is the id of the row that holds it, which on
+// that path is the existing row's id rather than the one the caller
+// generated; callers use it for the ids they report, record versions
+// against or cite as provenance.
+//
+// Each fact commits in its own transaction, so one bad fact doesn't
+// discard the others, but every failure is reported in the error.
 func (e *MemEngine) CommitFacts(ctx context.Context, sessionID string, facts []*pb.FactProto) (*pb.CommitFactsResponse, error) {
 	out := &pb.CommitFactsResponse{}
 	if e.pool == nil {
@@ -170,80 +180,18 @@ func (e *MemEngine) CommitFacts(ctx context.Context, sessionID string, facts []*
 		if f == nil {
 			continue
 		}
-		id := f.Id
-		if id == "" {
-			id = uuid.NewString()
-		}
-		hash := factHash(f.UserId, f.Content)
-		now := time.Now().UTC()
-		createdAt := tsOr(f.CreatedAt, now)
-		lastAccessed := tsOr(f.LastAccessed, now)
-		var supersedes any
-		if f.Supersedes != "" {
-			supersedes = f.Supersedes
-		}
-		var scopeTag any
-		if f.ScopeTag != "" {
-			scopeTag = f.ScopeTag
-		}
-		var userID any
-		if f.UserId != "" {
-			userID = f.UserId
-		}
-		// RETURNING gives us the id that actually landed (on the
-		// ON CONFLICT path that's the pre-existing row, not `id`) plus
-		// whether it ended up without a vector. The DO UPDATE doesn't
-		// touch `embedding`, so needsEmbed also correctly reports a
-		// duplicate arriving against a row that was stored during an
-		// earlier embedder outage.
-		var storedID string
-		var needsEmbed bool
-		err := e.pool.QueryRowContext(ctx, `
-			INSERT INTO memories (
-				id, agent_id, scope, content, content_hash, embedding,
-				source_type, source_ref, source_description,
-				confidence, confidence_basis,
-				created_at, updated_at, last_accessed, access_count,
-				tags, supersedes, user_id, scope_tag
-			) VALUES (
-				$1, $2, $3, $4, $5, $6,
-				$7, $8, $9,
-				$10, $11,
-				$12, NOW(), $13, $14,
-				$15, $16, $17, $18
-			)
-			ON CONFLICT (agent_id, content_hash) DO UPDATE SET
-				updated_at    = NOW(),
-				last_accessed = GREATEST(memories.last_accessed, EXCLUDED.last_accessed),
-				access_count  = memories.access_count + 1,
-				scope_tag     = COALESCE(memories.scope_tag, EXCLUDED.scope_tag)
-			RETURNING id::text, (embedding IS NULL)`,
-			id, e.agentID, scopeOr(f.Scope, "session"), f.Content, hash, vectorParam(f.Embedding),
-			f.SourceType, f.SourceRef, f.SourceDescription,
-			float64(f.Confidence), f.ConfidenceBasis,
-			createdAt, lastAccessed, int(f.AccessCount),
-			tagsParam(f.Tags), supersedes, userID, scopeTag).Scan(&storedID, &needsEmbed)
+		c, err := e.commitInTx(ctx, f)
 		if err != nil {
 			// Single-row failures don't abort the batch: one bad fact should
 			// not discard the others. But they MUST reach the caller — see
 			// the return below.
+			id := f.Id
 			out.Error = fmt.Sprintf("commit %s: %v", id, err)
 			failed = append(failed, fmt.Sprintf("%s: %v", id, err))
 			log.Printf("[memengine] commit fact %s failed: %v", id, err)
 			continue
 		}
-		// A fact with no vector is invisible to semantic search, so queue
-		// it for the re-embed sweep rather than leaving it half-indexed
-		// forever. Best-effort: a failed enqueue must not fail the commit
-		// (the fact itself is safely stored and FTS-findable).
-		// Conversation facts are never retrieved by vector (every semantic
-		// path filters out source_type="conversation"), so a NULL vector is
-		// expected here, not a gap to back-fill — enqueuing them would just
-		// make the reembed sweeper embed rows nothing reads. Only queue real,
-		// retrievable facts.
-		if needsEmbed && f.SourceType != "conversation" {
-			e.enqueuePendingEmbed(ctx, storedID)
-		}
+		e.afterCommit(ctx, f, c)
 		committed++
 	}
 	out.Committed = committed
@@ -266,25 +214,263 @@ func (e *MemEngine) CommitFacts(ctx context.Context, sessionID string, facts []*
 	return out, nil
 }
 
+// ReplaceSourceFacts swaps every row a source owns (matched on
+// source_type, source_ref and scope_tag) for facts, in one
+// transaction: readers see the old set or the new one, never neither,
+// and any failure leaves the old set in place. Every fact is stamped
+// with the source's type, ref and scope. An empty facts slice just
+// clears the source. The wiki knowledge pipeline uses this to re-ingest
+// a page; it returns how many old rows were removed.
+func (e *MemEngine) ReplaceSourceFacts(ctx context.Context, sessionID, sourceType, sourceRef, scopeTag string, facts []*pb.FactProto) (int64, error) {
+	if e.pool == nil {
+		return 0, fmt.Errorf("memengine: no db pool wired")
+	}
+	if sourceType == "" || sourceRef == "" {
+		return 0, fmt.Errorf("memengine: replace needs a source type and ref")
+	}
+	tx, err := e.pool.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx, `
+		WITH victims AS (
+			SELECT id FROM memories
+			 WHERE source_type = $1 AND source_ref = $2
+			   AND scope_tag IS NOT DISTINCT FROM $3::text
+		),
+		detach AS (
+			UPDATE memories SET supersedes = NULL
+			 WHERE supersedes IN (SELECT id FROM victims)
+			   AND id NOT IN (SELECT id FROM victims)
+		)
+		DELETE FROM memories WHERE id IN (SELECT id FROM victims)`,
+		sourceType, sourceRef, nullIfEmpty(scopeTag))
+	if err != nil {
+		return 0, fmt.Errorf("clear %s %s: %w", sourceType, sourceRef, err)
+	}
+	removed, _ := res.RowsAffected()
+
+	results := make([]commitResult, 0, len(facts))
+	var kept []*pb.FactProto
+	for _, f := range facts {
+		if f == nil {
+			continue
+		}
+		f.SourceType, f.SourceRef, f.ScopeTag = sourceType, sourceRef, scopeTag
+		c, err := e.commitOne(ctx, tx, f)
+		if err != nil {
+			return 0, fmt.Errorf("commit %s: %w", f.Id, err)
+		}
+		results = append(results, c)
+		kept = append(kept, f)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	for i, f := range kept {
+		e.afterCommit(ctx, f, results[i])
+	}
+	return removed, nil
+}
+
+// commitResult is what one fact's upsert did.
+type commitResult struct {
+	id         string // the row that holds the fact
+	needsEmbed bool   // that row has no vector
+	existed    bool   // the fact landed on a row that was already there
+}
+
+// commitInTx commits one fact in its own transaction: the upsert and,
+// when it lands on an existing row, the chain repair in reassert must
+// apply together.
+func (e *MemEngine) commitInTx(ctx context.Context, f *pb.FactProto) (commitResult, error) {
+	tx, err := e.pool.BeginTx(ctx, nil)
+	if err != nil {
+		return commitResult{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	c, err := e.commitOne(ctx, tx, f)
+	if err != nil {
+		return commitResult{}, err
+	}
+	return c, tx.Commit()
+}
+
+// afterCommit does the post-commit bookkeeping: report the stored id
+// back through f.Id, and queue a vectorless row for the re-embed sweep.
+func (e *MemEngine) afterCommit(ctx context.Context, f *pb.FactProto, c commitResult) {
+	f.Id = c.id
+	// A fact with no vector is invisible to semantic search, so queue
+	// it for the re-embed sweep rather than leaving it half-indexed
+	// forever. Best-effort: a failed enqueue must not fail the commit
+	// (the fact itself is safely stored and FTS-findable).
+	// Conversation facts are never retrieved by vector (every semantic
+	// path filters out source_type="conversation"), so a NULL vector is
+	// expected here, not a gap to back-fill — enqueuing them would just
+	// make the reembed sweeper embed rows nothing reads. Only queue real,
+	// retrievable facts.
+	if c.needsEmbed && f.SourceType != "conversation" {
+		e.enqueuePendingEmbed(ctx, c.id)
+	}
+}
+
+// commitOne upserts one fact inside tx.
+func (e *MemEngine) commitOne(ctx context.Context, tx *sql.Tx, f *pb.FactProto) (commitResult, error) {
+	id := f.Id
+	if id == "" {
+		id = uuid.NewString()
+	}
+	hash := factHash(f.UserId, f.ScopeTag, f.SourceType, f.SourceRef, f.Content)
+	now := time.Now().UTC()
+	createdAt := tsOr(f.CreatedAt, now)
+	lastAccessed := tsOr(f.LastAccessed, now)
+	// RETURNING gives us the id that actually landed (on the ON
+	// CONFLICT path that's the pre-existing row, not `id`), whether it
+	// ended up without a vector, and whether the row is new (xmax = 0
+	// only on a fresh insert). The DO UPDATE doesn't touch `embedding`,
+	// so needsEmbed also correctly reports a duplicate arriving against
+	// a row that was stored during an earlier embedder outage.
+	//
+	// The DO UPDATE no longer touches scope_tag: it used to COALESCE
+	// the incoming tag onto the existing row, so an isolated shard
+	// saving the owner's exact words retagged the owner's top-level fact
+	// into the shard's scope. The scope is in the hash now, so a
+	// conflict means the same scope; the WHERE refuses (no row comes
+	// back) a legacy row whose hash predates that and whose owner or
+	// scope differs.
+	var c commitResult
+	var inserted bool
+	err := tx.QueryRowContext(ctx, `
+		INSERT INTO memories (
+			id, agent_id, scope, content, content_hash, embedding,
+			source_type, source_ref, source_description,
+			confidence, confidence_basis,
+			created_at, updated_at, last_accessed, access_count,
+			tags, supersedes, user_id, scope_tag
+		) VALUES (
+			$1, $2, $3, $4, $5, $6,
+			$7, $8, $9,
+			$10, $11,
+			$12, NOW(), $13, $14,
+			$15, $16, $17, $18
+		)
+		ON CONFLICT (agent_id, content_hash) DO UPDATE SET
+			updated_at    = NOW(),
+			last_accessed = GREATEST(memories.last_accessed, EXCLUDED.last_accessed),
+			access_count  = memories.access_count + 1
+		WHERE memories.user_id IS NOT DISTINCT FROM EXCLUDED.user_id
+		  AND memories.scope_tag IS NOT DISTINCT FROM EXCLUDED.scope_tag
+		RETURNING id::text, (embedding IS NULL), (xmax = 0)`,
+		id, e.agentID, scopeOr(f.Scope, "session"), f.Content, hash, vectorParam(f.Embedding),
+		f.SourceType, f.SourceRef, f.SourceDescription,
+		float64(f.Confidence), f.ConfidenceBasis,
+		createdAt, lastAccessed, int(f.AccessCount),
+		tagsParam(f.Tags), nullIfEmpty(f.Supersedes), nullIfEmpty(f.UserId), nullIfEmpty(f.ScopeTag),
+	).Scan(&c.id, &c.needsEmbed, &inserted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return commitResult{}, fmt.Errorf("content matches an existing memory with a different owner or scope")
+	}
+	if err != nil {
+		return commitResult{}, err
+	}
+	c.existed = !inserted
+	if c.existed {
+		if err := reassert(ctx, tx, c.id, f.Supersedes); err != nil {
+			return commitResult{}, fmt.Errorf("reassert %s: %w", c.id, err)
+		}
+	}
+	return c, nil
+}
+
+// reassert handles a fact that was stated again and landed on its
+// existing row x. Before this, the upsert only bumped x's counters:
+//
+//   - x stayed hidden if a newer row had superseded it. "I live in
+//     Portland", then "I moved to Seattle", then "I moved back to
+//     Portland" left Seattle live and Portland hidden for good.
+//   - the new statement's own supersedes pointer was dropped, so the
+//     fact it was meant to replace stayed live next to it.
+//
+// So a re-statement moves x back to the head of its chain: the rows
+// that superseded x now supersede x's predecessor instead (so the older
+// history stays hidden), and x takes the incoming supersedes target.
+func reassert(ctx context.Context, tx *sql.Tx, x, target string) error {
+	var prev sql.NullString
+	if err := tx.QueryRowContext(ctx,
+		`SELECT supersedes::text FROM memories WHERE id = $1::uuid FOR UPDATE`, x,
+	).Scan(&prev); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE memories SET supersedes = $2::uuid, updated_at = NOW() WHERE supersedes = $1::uuid`,
+		x, prev)
+	if err != nil {
+		return err
+	}
+	hadChildren, _ := res.RowsAffected()
+
+	if target == "" || target == x {
+		return nil
+	}
+	// A target that is already older than x in its own chain is hidden
+	// by it already; pointing x at it would unhide the rows in between.
+	var older bool
+	if err := tx.QueryRowContext(ctx, `
+		WITH RECURSIVE older AS (
+			SELECT supersedes FROM memories WHERE id = $1::uuid
+			UNION
+			SELECT m.supersedes FROM memories m JOIN older o ON m.id = o.supersedes
+		)
+		SELECT EXISTS (SELECT 1 FROM older WHERE supersedes = $2::uuid)`, x, target,
+	).Scan(&older); err != nil {
+		return err
+	}
+	if older {
+		return nil
+	}
+	// x can hold one pointer. If it alone was hiding prev, hand prev to
+	// the target first (x -> target -> prev); if the target already has
+	// history of its own, leave x's chain alone rather than unhide prev.
+	if prev.Valid && hadChildren == 0 {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE memories SET supersedes = $2::uuid WHERE id = $1::uuid AND supersedes IS NULL`,
+			target, prev.String)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return nil
+		}
+	}
+	_, err = tx.ExecContext(ctx,
+		`UPDATE memories SET supersedes = $2::uuid WHERE id = $1::uuid`, x, target)
+	return err
+}
+
 // enqueuePendingEmbed records a memory as awaiting an embedding. Called
 // when a commit lands with a NULL vector (no embedder reachable). The PK
 // on memory_id makes this idempotent, so re-committing the same content
-// during a long outage doesn't pile up rows.
+// during a long outage doesn't pile up rows. A row that is already
+// queued gets its rejection count reset: it was just written again (an
+// edit, or a restatement), so a row the sweep had parked gets another
+// round of tries.
 func (e *MemEngine) enqueuePendingEmbed(ctx context.Context, memoryID string) {
 	if e.pool == nil || memoryID == "" {
 		return
 	}
 	if _, err := e.pool.ExecContext(ctx, `
 		INSERT INTO pending_embeds (memory_id) VALUES ($1::uuid)
-		ON CONFLICT (memory_id) DO NOTHING`, memoryID); err != nil {
+		ON CONFLICT (memory_id) DO UPDATE SET attempts = 0`, memoryID); err != nil {
 		log.Printf("[memengine] warning: could not queue memory %s for re-embed: %v", memoryID, err)
 	}
 }
 
-// DeleteFact removes a memory row by id. Mirrors the previous implementation's
-// soft-vs-hard semantics: if the row has dependents (children
-// pointing at it via supersedes), we just clear the dependents and
-// then delete. The gateway uses this from memory-skill paths only.
+// DeleteFact removes a memory row by id, along with the older versions
+// it replaced; rows that pointed at any of them are detached. Same
+// statement as memory.DeleteMemory — see memory.DeleteVersionsSQL for
+// why the older versions have to go too.
 func (e *MemEngine) DeleteFact(ctx context.Context, sessionID, factID string, vis *pb.VisibilityContext) (*pb.DeleteFactResponse, error) {
 	out := &pb.DeleteFactResponse{}
 	if e.pool == nil {
@@ -295,13 +481,7 @@ func (e *MemEngine) DeleteFact(ctx context.Context, sessionID, factID string, vi
 		out.Error = "fact_id required"
 		return out, nil
 	}
-	// Detach children, then delete. Done in one round-trip via CTE
-	// so a concurrent insert can't slot in between.
-	res, err := e.pool.ExecContext(ctx, `
-		WITH detach AS (
-			UPDATE memories SET supersedes = NULL WHERE supersedes = $1
-		)
-		DELETE FROM memories WHERE id = $1`, factID)
+	res, err := e.pool.ExecContext(ctx, memory.DeleteVersionsSQL, factID, nil)
 	if err != nil {
 		out.Error = err.Error()
 		return out, nil
@@ -311,10 +491,12 @@ func (e *MemEngine) DeleteFact(ctx context.Context, sessionID, factID string, vi
 	return out, nil
 }
 
-// UpdateFact replaces a memory's content + embedding in place. The
-// memory-skill update path is the only caller; the row's history
-// stays in wiki_revisions if applicable but in this table the
-// previous content is overwritten.
+// UpdateFact replaces a memory's content + embedding in place, and
+// records the change in memory_versions (seeding the original text as
+// version 1 when the row has no history yet), all in one transaction.
+// It used to overwrite the row with no version at all, so a
+// correct_fact that picked the wrong row destroyed that row's text
+// with no way back.
 func (e *MemEngine) UpdateFact(ctx context.Context, sessionID, factID, newContent string, newEmbedding []float32, vis *pb.VisibilityContext) (*pb.UpdateFactResponse, error) {
 	out := &pb.UpdateFactResponse{}
 	if e.pool == nil {
@@ -325,23 +507,12 @@ func (e *MemEngine) UpdateFact(ctx context.Context, sessionID, factID, newConten
 		out.Error = "fact_id required"
 		return out, nil
 	}
-	// Keep the owner in the hash consistent with CommitFacts so a later
-	// commit of the same content by the same user still dedups onto
-	// this row. vis carries the acting user (nil-safe).
-	hash := factHash(vis.GetUserId(), newContent)
-	res, err := e.pool.ExecContext(ctx, `
-		UPDATE memories
-		   SET content       = $2,
-		       content_hash  = $3,
-		       embedding     = $4,
-		       updated_at    = NOW()
-		 WHERE id = $1`, factID, newContent, hash, vectorParam(newEmbedding))
+	updated, err := e.updateFact(ctx, factID, newContent, newEmbedding, "user:"+vis.GetUserId())
 	if err != nil {
 		out.Error = err.Error()
 		return out, nil
 	}
-	n, _ := res.RowsAffected()
-	out.Updated = n > 0
+	out.Updated = updated
 	// An edit whose re-embed failed (embedder down) just cleared this
 	// row's vector, so queue it for the sweep — otherwise the edited text
 	// stays out of semantic search until someone edits it again.
@@ -349,6 +520,63 @@ func (e *MemEngine) UpdateFact(ctx context.Context, sessionID, factID, newConten
 		e.enqueuePendingEmbed(ctx, factID)
 	}
 	return out, nil
+}
+
+func (e *MemEngine) updateFact(ctx context.Context, factID, newContent string, newEmbedding []float32, changedBy string) (bool, error) {
+	tx, err := e.pool.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var content, scope, sourceType, sourceRef, userID, scopeTag string
+	err = tx.QueryRowContext(ctx, `
+		SELECT content, scope, COALESCE(source_type, ''), COALESCE(source_ref, ''),
+		       COALESCE(user_id, ''), COALESCE(scope_tag, '')
+		  FROM memories WHERE id = $1::uuid FOR UPDATE`, factID,
+	).Scan(&content, &scope, &sourceType, &sourceRef, &userID, &scopeTag)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	record := func(text, by, change string) error {
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO memory_versions (memory_id, content, scope, source_type, version, changed_by, change_type)
+			SELECT $1::uuid, $2, $3, $4,
+			       COALESCE((SELECT MAX(version) FROM memory_versions WHERE memory_id = $1::uuid), 0) + 1,
+			       $5, $6`,
+			factID, text, scope, sourceType, by, change)
+		return err
+	}
+	var versions int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM memory_versions WHERE memory_id = $1::uuid`, factID,
+	).Scan(&versions); err != nil {
+		return false, err
+	}
+	if versions == 0 {
+		if err := record(content, "", "created"); err != nil {
+			return false, err
+		}
+	}
+	// Hash from the row's own owner and scope, so a later commit of the
+	// same content by the same owner in the same scope dedups onto it.
+	hash := factHash(userID, scopeTag, sourceType, sourceRef, newContent)
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE memories
+		   SET content       = $2,
+		       content_hash  = $3,
+		       embedding     = $4,
+		       updated_at    = NOW()
+		 WHERE id = $1::uuid`, factID, newContent, hash, vectorParam(newEmbedding)); err != nil {
+		return false, err
+	}
+	if err := record(newContent, changedBy, "updated"); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
 }
 
 // QueryMemory is the legacy admin / CLI / memory-skill retrieval
@@ -513,17 +741,18 @@ func sha256Hex(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// factHash is the content_hash used for the (agent_id, content_hash)
-// write-time dedup. It folds the owner into the hash so byte-identical
-// content from two DIFFERENT users produces different hashes and can't
-// collide onto one row — the cross-tenant dedup bug where user B's
-// fact silently became an access-count bump on user A's row. Global
-// rows (userID == "") share the empty prefix, so they still dedup
-// among themselves exactly as before. The NUL separator keeps
-// (user="ab", content="c") from hashing the same as (user="a",
-// content="bc").
-func factHash(userID, content string) string {
-	return sha256Hex(userID + "\x00" + content)
+// factHash is the content_hash behind the (agent_id, content_hash)
+// write-time dedup; see memory.FactHash for what it covers and why.
+func factHash(userID, scopeTag, sourceType, sourceRef, content string) string {
+	return memory.FactHash(userID, scopeTag, sourceType, sourceRef, content)
+}
+
+// nullIfEmpty maps "" to SQL NULL for optional text and uuid columns.
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 func tsOr(t *timestamppb.Timestamp, fallback time.Time) time.Time {

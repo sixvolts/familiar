@@ -302,6 +302,10 @@ func (h *Handler) patchMemory(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusNotFound, "memory not found")
 		return
 	}
+	if errors.Is(err, memory.ErrDuplicateContent) {
+		writeJSONError(w, http.StatusConflict, "another memory already says exactly that; delete one of them instead")
+		return
+	}
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return

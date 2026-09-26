@@ -225,7 +225,7 @@ func TestRecordVersions(t *testing.T) {
 		{Id: "fact-upd", Content: "updated fact", Supersedes: "old-id"}, // UPDATE
 	}
 	v := &fakeVersioner{}
-	recordVersions(context.Background(), v, facts)
+	recordVersions(context.Background(), v, facts, nil)
 
 	want := []verCall{
 		{"fact-add", "created"},  // ADD → created on the new fact
@@ -242,6 +242,30 @@ func TestRecordVersions(t *testing.T) {
 	}
 }
 
+// A fact the commit landed on an existing row (its id changed) is a
+// restatement of that row, not a new one.
+func TestRecordVersions_Restatement(t *testing.T) {
+	facts := []*pb.FactProto{
+		{Id: "existing-row", Content: "User lives in Portland", Supersedes: "seattle"},
+		{Id: "fresh", Content: "new fact"},
+	}
+	v := &fakeVersioner{}
+	recordVersions(context.Background(), v, facts, []string{"generated-uuid", "fresh"})
+	want := []verCall{
+		{"seattle", "superseded"},
+		{"existing-row", "reasserted"},
+		{"fresh", "created"},
+	}
+	if len(v.calls) != len(want) {
+		t.Fatalf("recorded %+v, want %+v", v.calls, want)
+	}
+	for i, w := range want {
+		if v.calls[i] != w {
+			t.Errorf("call %d = %+v, want %+v", i, v.calls[i], w)
+		}
+	}
+}
+
 // A versioner error must not panic or abort the batch — every fact still
 // gets its calls attempted (best-effort, logged).
 func TestRecordVersions_ErrorIsBestEffort(t *testing.T) {
@@ -250,7 +274,7 @@ func TestRecordVersions_ErrorIsBestEffort(t *testing.T) {
 		{Id: "a", Content: "x"},
 		{Id: "b", Content: "y", Supersedes: "old"},
 	}
-	recordVersions(context.Background(), v, facts) // must not panic
+	recordVersions(context.Background(), v, facts, nil) // must not panic
 	// ADD = 1 call, UPDATE = 2 calls → 3 total attempted despite errors.
 	if len(v.calls) != 3 {
 		t.Errorf("attempted %d calls, want 3 (errors must not short-circuit)", len(v.calls))

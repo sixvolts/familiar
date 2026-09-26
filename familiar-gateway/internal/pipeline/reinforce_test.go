@@ -3,15 +3,19 @@ package pipeline
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/familiar/gateway/internal/config"
+	"github.com/familiar/gateway/internal/engine"
+	"github.com/familiar/gateway/internal/memevents"
 	"github.com/familiar/gateway/internal/memory"
 	"github.com/familiar/gateway/internal/router"
 	"github.com/familiar/gateway/internal/session"
 	"github.com/familiar/gateway/internal/sidecar"
+	pb "github.com/familiar/gateway/proto/engine"
 )
 
 // extractOnlyRoutes routes the extract task (and nothing else) to one
@@ -88,4 +92,82 @@ func TestPostTurnExtract_ReinforcesCheapGateDuplicate(t *testing.T) {
 	if len(store.reinforced) != 1 || store.reinforced[0] != "dup-target-id" {
 		t.Fatalf("cheap-gate duplicate must reinforce its survivor: got reinforced=%v, want [dup-target-id]", store.reinforced)
 	}
+}
+
+// restatingEngine reports every committed fact as landing on an
+// existing row, the way CommitFacts does for a restated fact.
+type restatingEngine struct{ mockEngine }
+
+func (e *restatingEngine) CommitFacts(ctx context.Context, sessionID string, facts []*pb.FactProto) (*pb.CommitFactsResponse, error) {
+	resp, err := e.mockEngine.CommitFacts(ctx, sessionID, facts)
+	if err == nil {
+		for _, f := range facts {
+			f.Id = "stored-row"
+		}
+	}
+	return resp, err
+}
+
+// The extraction events name the row a fact was stored in, and only go
+// out once it was stored: they used to carry the generated id (which a
+// restatement never creates) and fire before the commit, even one that
+// then failed.
+func TestPostTurnExtract_EventsNameStoredRow(t *testing.T) {
+	extractSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]string{"role": "assistant",
+					"content": `{"facts":[{"content":"User lives in Portland","category":"personal"}],"relationships":[]}`}},
+			},
+		})
+	}))
+	defer extractSrv.Close()
+
+	run := func(t *testing.T, eng engine.Service) []memevents.Event {
+		t.Helper()
+		bus := memevents.NewBus(64, nil)
+		pl := New(Deps{
+			Engine:      eng,
+			Router:      router.NewRouter(config.RouterConfig{Enabled: true}, router.NewRegistry(nil)),
+			Sessions:    session.NewManager(),
+			AgentID:     "test-agent",
+			MemoryStore: &recordingStore{},
+			Embedder:    func(context.Context, string) ([]float32, error) { return []float32{0.1, 0.2, 0.3}, nil },
+			Events:      bus,
+		})
+		routes := extractOnlyRoutes{endpoint: extractSrv.URL}
+		pl.sidecarClient = sidecar.NewClient(config.SidecarConfig{Enabled: true}, config.RouterConfig{}, routes, routes)
+		sess := pl.sessions.GetOrCreate("cli", "user1")
+		pl.runPostTurnExtract(sess, "I moved back to Portland", "welcome back", nil, nil)
+		var extracted []memevents.Event
+		for _, ev := range bus.Replay(sess.ID, 0) {
+			if ev.Kind == memevents.KindFactExtracted {
+				extracted = append(extracted, ev)
+			}
+		}
+		return extracted
+	}
+
+	t.Run("stored id", func(t *testing.T) {
+		evs := run(t, &restatingEngine{})
+		if len(evs) != 1 {
+			t.Fatalf("want 1 fact_extracted event, got %d", len(evs))
+		}
+		var p memevents.FactExtractedPayload
+		if err := json.Unmarshal(evs[0].Payload, &p); err != nil {
+			t.Fatal(err)
+		}
+		if p.FactID != "stored-row" {
+			t.Errorf("event names fact %q, want the row it was stored in", p.FactID)
+		}
+	})
+	t.Run("failed commit", func(t *testing.T) {
+		if evs := run(t, &mockEngine{commitErr: errors.New("db down")}); len(evs) != 0 {
+			t.Errorf("announced %d extracted fact(s) that were never stored", len(evs))
+		}
+	})
 }

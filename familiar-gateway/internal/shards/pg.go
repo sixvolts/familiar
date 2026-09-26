@@ -315,11 +315,17 @@ func (s *PGStore) UpdateShard(ctx context.Context, sh *Shard) error {
 }
 
 // retagScope moves an owner's memory rows and triples from one scope tag
-// to another.
+// to another. The scope is part of a fact's dedup hash, so the moved
+// rows are rehashed too; otherwise a restatement in the new scope would
+// be stored a second time instead of landing on its row.
 func retagScope(ctx context.Context, tx *sql.Tx, ownerID, from, to string) error {
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE memories SET scope_tag = $3 WHERE user_id = $1 AND scope_tag = $2`, ownerID, from, to); err != nil {
 		return fmt.Errorf("retag memories: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		db.RehashFactsSQL(`m.user_id = $1 AND m.scope_tag = $2`), ownerID, to); err != nil {
+		return fmt.Errorf("rehash retagged memories: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE relationships SET scope_tag = $3 WHERE user_id = $1 AND scope_tag = $2`, ownerID, from, to); err != nil {

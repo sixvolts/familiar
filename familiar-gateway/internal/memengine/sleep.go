@@ -290,6 +290,11 @@ func (s *SleepCycle) resolveConflicts(ctx context.Context, threshold float64) (u
 // previous implementation exactly — session facts are ephemeral and hard delete
 // is the correct retention answer.
 //
+// A row that itself supersedes another is kept: pruning it would bring
+// back the older fact it hid (see memory.DeleteVersionsSQL). Session
+// rows are conversation chunks, which nothing supersedes with today,
+// so this only guards against that changing.
+//
 // archiveDays defaults to 90 if cfg.SessionArchiveDays is 0.
 func (s *SleepCycle) pruneOldSession(ctx context.Context, archiveDays int) (uint32, error) {
 	if archiveDays <= 0 {
@@ -300,6 +305,7 @@ func (s *SleepCycle) pruneOldSession(ctx context.Context, archiveDays int) (uint
 		 WHERE agent_id = $1
 		   AND scope = 'session'
 		   AND last_accessed < NOW() - make_interval(days => $2)
+		   AND supersedes IS NULL
 		   AND NOT EXISTS (
 		       SELECT 1 FROM memories s WHERE s.supersedes = memories.id
 		   )`, s.agentID, archiveDays)

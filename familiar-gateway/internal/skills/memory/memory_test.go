@@ -54,6 +54,10 @@ func (f *fakeEngine) CommitFacts(_ context.Context, _ string, facts []*pb.FactPr
 	return &pb.CommitFactsResponse{}, nil
 }
 
+func (f *fakeEngine) ReplaceSourceFacts(context.Context, string, string, string, string, []*pb.FactProto) (int64, error) {
+	return 0, nil
+}
+
 type fakeStore struct {
 	mu         sync.Mutex
 	results    []mem.MemoryResult

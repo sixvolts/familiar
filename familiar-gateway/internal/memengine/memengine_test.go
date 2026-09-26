@@ -2,6 +2,8 @@ package memengine
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"testing"
 
 	"github.com/familiar/gateway/internal/config"
@@ -211,18 +213,48 @@ func TestMemEngine_CloseStopsSleepCycle(t *testing.T) {
 // rows (empty user) share a bucket.
 func TestFactHash_SeparatesUsersNotContent(t *testing.T) {
 	content := "the sky is blue"
+	h := func(user, content string) string { return factHash(user, "", "", "", content) }
 
-	if factHash("alice", content) == factHash("bob", content) {
+	if h("alice", content) == h("bob", content) {
 		t.Error("different users with identical content produced the same hash — cross-tenant dedup collision")
 	}
-	if factHash("alice", content) != factHash("alice", content) {
+	if h("alice", content) != h("alice", content) {
 		t.Error("same user + same content must hash identically for dedup to work")
 	}
-	if factHash("", content) != factHash("", content) {
+	if h("", content) != h("", content) {
 		t.Error("global rows must hash consistently among themselves")
 	}
 	// The NUL separator prevents boundary ambiguity.
-	if factHash("ab", "c") == factHash("a", "bc") {
+	if h("ab", "c") == h("a", "bc") {
 		t.Error("user/content boundary is ambiguous — missing separator")
+	}
+}
+
+// The scope and, for wiki rows, the owning page are part of a fact's
+// identity: otherwise a shard's or a page's fact merges onto the
+// owner's top-level row, and a page save deletes knowledge another
+// page or an explicit `remember` also holds. Unscoped rows keep the
+// original formula so every existing top-level hash still matches.
+func TestFactHash_SeparatesScopesAndPages(t *testing.T) {
+	const user, content = "alice", "Deploys go to staging first."
+	top := factHash(user, "", "conversation_extraction", "sess-1", content)
+	sum := sha256.Sum256([]byte(user + "\x00" + content))
+	if top != hex.EncodeToString(sum[:]) {
+		t.Error("an unscoped fact's hash changed; every existing top-level row would stop deduping")
+	}
+	if top != factHash(user, "", "remember", "other-session", content) {
+		t.Error("source must not split top-level facts: a restatement from another session is the same fact")
+	}
+	shard := factHash(user, "shard:recipes", "conversation_extraction", "sess-1", content)
+	if shard == top {
+		t.Error("a shard's fact hashes like the owner's top-level fact; the upsert would merge them")
+	}
+	pageA := factHash(user, "book:b1", "wiki_page", "page:a", content)
+	pageB := factHash(user, "book:b1", "wiki_page", "page:b", content)
+	if pageA == pageB {
+		t.Error("two pages' identical facts share a row; saving one page would delete the other's")
+	}
+	if pageA == factHash(user, "book:b1", "remember", "page:a", content) {
+		t.Error("a non-wiki fact in the book scope hashes like the page's own fact")
 	}
 }

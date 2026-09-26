@@ -36,12 +36,12 @@ var allTasks = []string{
 	TaskRelationship, TaskEntityGroup,
 }
 
-// largeExtractTimeout is the HTTP request ceiling for the extract_large
+// LargeExtractTimeout is the HTTP request ceiling for the extract_large
 // route. A big model (qwen3.5-122b) reading a 5–12K-char research
 // write-up in one pass runs minutes, not the 10s the small tasks use.
 // It's a detached, best-effort post-delivery pass, so a generous
 // ceiling costs nothing on the user's path.
-const largeExtractTimeout = 5 * time.Minute
+const LargeExtractTimeout = 5 * time.Minute
 
 // Critical-path tasks (classify, condense, expand_queries) block
 // time-to-first-token — they run before the model can start
@@ -187,7 +187,7 @@ func (c *Client) routerForEndpoint(endpoint string, large bool) *HTTPRouter {
 	}
 	var r *HTTPRouter
 	if large {
-		r = NewHTTPRouterWithTimeout(endpoint, largeExtractTimeout)
+		r = NewHTTPRouterWithTimeout(endpoint, LargeExtractTimeout)
 	} else {
 		r = NewHTTPRouter(endpoint)
 	}

@@ -1595,6 +1595,57 @@ DO $iso_sup$ BEGIN
     END IF;
 END $iso_sup$;`,
 	},
+	{
+		// Wiki facts are owned by the page they came from: a page save
+		// replaces them and a page delete removes them. They used to be
+		// keyed by "{book_slug}/{page_slug}", and slugs change on every
+		// title edit, so a renamed page's earlier facts were never
+		// replaced or removed (they outlived the page's deletion), and the
+		// next new "untitled" page's first save deleted the facts of
+		// whichever page had been "untitled" before. They are keyed by
+		// "page:{id}" now.
+		//
+		// This one-shot (applied_data_fixes) moves existing rows over:
+		//   1. rows whose ref still names a live page take that page's id;
+		//   2. the rest belong to renamed or deleted pages and are dropped
+		//      (derived data: the page's next save re-extracts it);
+		//   3. rows with a scope tag, and wiki rows, get the content_hash
+		//      memory.FactHash gives them now, which adds the scope and the
+		//      owning page to the owner and content. Rows that would collide
+		//      keep their old hash. Unscoped rows' hashes don't change.
+		//
+		// The hash is FactHashSQL, which must match memory.FactHash
+		// exactly (TestMigrate_WikiFactsKeyedByPageID).
+		name: "wiki_page_fact_identity",
+		ddl: `
+DO $wiki_id$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM applied_data_fixes WHERE name = 'wiki_page_fact_identity') THEN
+        UPDATE memories m
+           SET source_ref = 'page:' || p.id::text
+          FROM wiki_pages p
+         WHERE m.source_type = 'wiki_page'
+           AND m.source_ref NOT LIKE 'page:%'
+           AND p.deleted_at IS NULL
+           AND m.scope_tag = 'book:' || p.book_id::text
+           AND right(m.source_ref, length(p.slug) + 1) = '/' || p.slug;
+
+        UPDATE memories
+           SET supersedes = NULL
+         WHERE supersedes IN (SELECT id FROM memories
+                               WHERE source_type = 'wiki_page'
+                                 AND (source_ref IS NULL OR source_ref NOT LIKE 'page:%'))
+           AND NOT (source_type = 'wiki_page'
+                    AND (source_ref IS NULL OR source_ref NOT LIKE 'page:%'));
+        DELETE FROM memories
+         WHERE source_type = 'wiki_page'
+           AND (source_ref IS NULL OR source_ref NOT LIKE 'page:%');
+
+        ` + RehashFactsSQL(`COALESCE(m.scope_tag, '') <> '' OR m.source_type = 'wiki_page'`) + `;
+
+        INSERT INTO applied_data_fixes (name) VALUES ('wiki_page_fact_identity');
+    END IF;
+END $wiki_id$;`,
+	},
 }
 
 // migrateLockKey is the pg_advisory_lock key that serializes Migrate

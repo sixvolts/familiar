@@ -20,7 +20,15 @@ type Service interface {
 	Close() error
 	Ping(ctx context.Context) (*pb.PingResponse, error)
 	AssembleContext(ctx context.Context, sessionID, userMsg string, vis *pb.VisibilityContext, queryVec []float32) (*pb.AssembleContextResponse, error)
+	// CommitFacts stores facts. On return each committed fact's Id is
+	// the id of the row that holds it: a fact identical to an existing
+	// one (same owner, scope and content) lands on that row, so its Id
+	// changes to the existing row's.
 	CommitFacts(ctx context.Context, sessionID string, facts []*pb.FactProto) (*pb.CommitFactsResponse, error)
+	// ReplaceSourceFacts atomically swaps every fact a source owns
+	// (source_type + source_ref + scope_tag) for facts, returning how
+	// many old rows went. Used to re-ingest a wiki page.
+	ReplaceSourceFacts(ctx context.Context, sessionID, sourceType, sourceRef, scopeTag string, facts []*pb.FactProto) (int64, error)
 	QueryMemory(ctx context.Context, req *pb.MemoryQueryRequest) (*pb.MemoryQueryResponse, error)
 	DeleteFact(ctx context.Context, sessionID, factID string, vis *pb.VisibilityContext) (*pb.DeleteFactResponse, error)
 	UpdateFact(ctx context.Context, sessionID, factID, newContent string, newEmbedding []float32, vis *pb.VisibilityContext) (*pb.UpdateFactResponse, error)

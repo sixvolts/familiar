@@ -228,6 +228,30 @@ func TestSleep_PruneOldSession(t *testing.T) {
 	}
 }
 
+// A session row that supersedes another is kept: pruning it would bring
+// back the older fact it hid.
+func TestSleep_PruneKeepsChainHeads(t *testing.T) {
+	pool := sleepPoolForTest(t)
+	agent := fmt.Sprintf("sleep-prune-head-%d", time.Now().UnixNano())
+	older, head := testUUID(13), testUUID(14)
+	seedMemory(t, pool, agent, older, "u1", "conversation_extraction", "", "[1,0,0]", 200*24*time.Hour)
+	seedMemory(t, pool, agent, head, "u1", "conversation", "", "[0,1,0]", 100*24*time.Hour)
+	if _, err := pool.ExecContext(context.Background(),
+		`UPDATE memories SET scope = 'session', supersedes = $2::uuid WHERE id = $1::uuid`, head, older); err != nil {
+		t.Fatal(err)
+	}
+	s := NewSleepCycle(pool, agent, config.DefaultSleepConfig())
+	if _, err := s.pruneOldSession(context.Background(), 90); err != nil {
+		t.Fatalf("pruneOldSession: %v", err)
+	}
+	if _, _, exists := memoryState(t, pool, head); !exists {
+		t.Error("pruned a session row that was hiding an older fact")
+	}
+	if _, hidden, _ := memoryState(t, pool, older); !hidden {
+		t.Error("the older fact came back")
+	}
+}
+
 // The repair migration clears INVERTED pointers (pointer older than
 // its target — only the buggy dedup ever wrote those) and leaves
 // legitimate newer→older pointers alone.

@@ -21,6 +21,7 @@ import (
 	"log"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/familiar/gateway/internal/db"
 	"github.com/familiar/gateway/internal/safego"
@@ -45,6 +46,41 @@ const (
 	defaultReembedInterval = 2 * time.Minute
 	defaultReembedBatch    = 64
 )
+
+// A row the embedder has rejected this many times is parked: left in
+// the queue (it still counts as pending, and last_error says why) but
+// no longer retried. Only rejections of the row's own content count
+// (see inputRejected, and probe); an outage never parks anything.
+const maxReembedAttempts = 10
+
+// minShrinkChars bounds shrinkForEmbed: below this, a rejection isn't
+// about length.
+const minShrinkChars = 256
+
+// inputRejected reports an embedder error that is about this input
+// rather than the embedder being unreachable or busy: the server
+// answered and refused it (llm.EmbedAPIError). The pass moves on to the
+// next row instead of stopping, and the row's attempts go up.
+func inputRejected(err error) bool {
+	var r interface{ InputRejected() bool }
+	return errors.As(err, &r) && r.InputRejected()
+}
+
+// shrinkForEmbed halves text at a rune boundary, for retrying an input
+// the embedder rejected. Rows land in this queue precisely because
+// embedding them at commit time failed, and the usual content-specific
+// cause is a text longer than the embedder's context: a vector of the
+// leading part beats no vector at all.
+func shrinkForEmbed(text string) (string, bool) {
+	if len(text) < 2*minShrinkChars {
+		return text, false
+	}
+	cut := len(text) / 2
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut], true
+}
 
 // ReembedSweeper owns the goroutine that drains pending_embeds.
 type ReembedSweeper struct {
@@ -140,13 +176,17 @@ func (s *ReembedSweeper) RunOnce(ctx context.Context) int {
 		id      string
 		content string
 	}
+	// Fewest rejections first, so a row the embedder keeps refusing
+	// sinks behind every newer one instead of heading each pass; parked
+	// rows are skipped.
 	rows, err := s.pool.QueryContext(ctx, `
 		SELECT p.memory_id::text, m.content
 		  FROM pending_embeds p
 		  JOIN memories m ON m.id = p.memory_id
 		 WHERE m.embedding IS NULL
-		 ORDER BY p.enqueued_at
-		 LIMIT $1`, s.batch)
+		   AND p.attempts < $2
+		 ORDER BY p.attempts, p.enqueued_at
+		 LIMIT $1`, s.batch, maxReembedAttempts)
 	if err != nil {
 		log.Printf("[reembed] warning: could not read pending queue: %v", err)
 		return 0
@@ -171,27 +211,48 @@ func (s *ReembedSweeper) RunOnce(ctx context.Context) int {
 	}
 
 	fixed, failed := 0, 0
+	working := false // the embedder has embedded something this pass
 	for _, p := range batch {
-		embedCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		vec, err := s.embed(embedCtx, p.content)
-		cancel()
+		vec, err := s.embedRow(ctx, p.content)
 		if err != nil {
-			// The embedder chain is down (or this row is poison). Record
-			// the attempt and stop the pass: hammering a dead endpoint
-			// with the rest of the batch buys nothing, and the next tick
-			// retries.
-			s.recordFailure(ctx, p.id, err)
 			failed++
+			if inputRejected(err) {
+				// A server that refuses everything (misconfigured, or
+				// failing every request with a 500) is an outage, not a
+				// queue of bad rows: check before blaming the row.
+				if !working {
+					working = s.probe(ctx)
+				}
+				if !working {
+					s.recordFailure(ctx, p.id, err, false)
+					log.Printf("[reembed] embedder refuses even a trivial input (stopping pass): %v", err)
+					break
+				}
+				// The embedder works and refused this row. Count it
+				// against the row and carry on with the rest: one row
+				// the embedder can't take used to stop every pass at the
+				// head of the queue, so nothing behind it ever got a
+				// vector.
+				s.recordFailure(ctx, p.id, err, true)
+				log.Printf("[reembed] embedder rejected memory %s: %v", p.id, err)
+				continue
+			}
+			// The embedder chain is down or busy. Note the error without
+			// counting it against the row, and stop the pass: hammering a
+			// dead endpoint with the rest of the batch buys nothing, and
+			// the next tick retries.
+			s.recordFailure(ctx, p.id, err, false)
 			log.Printf("[reembed] embed failed for memory %s (stopping pass): %v", p.id, err)
 			break
 		}
 		if len(vec) == 0 {
-			s.recordFailure(ctx, p.id, errEmptyVector)
+			s.recordFailure(ctx, p.id, errEmptyVector, true)
 			failed++
 			continue
 		}
+		working = true
 		if err := s.applyVector(ctx, p.id, vec); err != nil {
-			s.recordFailure(ctx, p.id, err)
+			s.recordFailure(ctx, p.id, err, true)
 			failed++
 			continue
 		}
@@ -206,6 +267,36 @@ func (s *ReembedSweeper) RunOnce(ctx context.Context) int {
 		log.Printf("[reembed] back-filled %d embedding(s); %d failure(s)", fixed, failed)
 	}
 	return fixed
+}
+
+// probe reports whether the embedder embeds a trivial input.
+func (s *ReembedSweeper) probe(ctx context.Context) bool {
+	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	vec, err := s.embed(probeCtx, "ok")
+	return err == nil && len(vec) > 0
+}
+
+// embedRow embeds one row's content, retrying on a shorter prefix while
+// the embedder rejects the input and there is text left to cut.
+func (s *ReembedSweeper) embedRow(ctx context.Context, content string) ([]float32, error) {
+	text := content
+	for {
+		embedCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		vec, err := s.embed(embedCtx, text)
+		cancel()
+		if err == nil || !inputRejected(err) {
+			if err == nil && len(text) < len(content) {
+				log.Printf("[reembed] embedded the first %d of %d bytes of an over-long memory", len(text), len(content))
+			}
+			return vec, err
+		}
+		shorter, ok := shrinkForEmbed(text)
+		if !ok {
+			return nil, err
+		}
+		text = shorter
+	}
 }
 
 // applyVector writes the vector and clears the queue row in one tx, so a
@@ -242,12 +333,25 @@ func (s *ReembedSweeper) dropSatisfied(ctx context.Context) {
 	}
 }
 
-func (s *ReembedSweeper) recordFailure(ctx context.Context, memoryID string, cause error) {
-	if _, err := s.pool.ExecContext(ctx, `
+// recordFailure notes why a row failed. counts marks a failure of the
+// row itself (the embedder rejected it), which moves it toward being
+// parked; an outage doesn't.
+func (s *ReembedSweeper) recordFailure(ctx context.Context, memoryID string, cause error, counts bool) {
+	inc := 0
+	if counts {
+		inc = 1
+	}
+	var attempts int
+	if err := s.pool.QueryRowContext(ctx, `
 		UPDATE pending_embeds
-		   SET attempts = attempts + 1, last_error = $2
-		 WHERE memory_id = $1::uuid`, memoryID, cause.Error()); err != nil {
+		   SET attempts = attempts + $3, last_error = $2
+		 WHERE memory_id = $1::uuid
+		RETURNING attempts`, memoryID, cause.Error(), inc).Scan(&attempts); err != nil {
 		log.Printf("[reembed] warning: could not record failure for %s: %v", memoryID, err)
+		return
+	}
+	if counts && attempts == maxReembedAttempts {
+		log.Printf("[reembed] memory %s parked after %d rejected attempts (last: %v); it stays unembedded until it is written again", memoryID, attempts, cause)
 	}
 }
 

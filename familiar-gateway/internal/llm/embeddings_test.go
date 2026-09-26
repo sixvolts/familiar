@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -138,5 +139,46 @@ func TestEmbeddingsProviderDefaultModel(t *testing.T) {
 	p := NewEmbeddingsProvider("embeddings/test", "http://x", "", "", 0, 0)
 	if p.Model() != "nomic-embed-text" {
 		t.Fatalf("blank model should default to nomic-embed-text, got %q", p.Model())
+	}
+}
+
+// An error the server answered with is an *EmbedAPIError, and it says
+// whether the input was refused (skip this input) or the server is
+// busy or unreachable upstream (wait it out). A non-JSON error body
+// used to surface as a JSON parse failure, indistinguishable from a
+// broken server.
+func TestEmbeddingsProviderClassifiesErrors(t *testing.T) {
+	cases := []struct {
+		name     string
+		status   int
+		body     string
+		rejected bool
+		msg      string
+	}{
+		{"llama.cpp too large", 500, `{"error":{"message":"input is too large to process"}}`, true, "input is too large"},
+		{"bad request, plain body", 400, "context length exceeded", true, "context length exceeded"},
+		{"model loading", 503, "Loading model", false, "Loading model"},
+		{"rate limited", 429, `{"error":{"message":"slow down"}}`, false, "slow down"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			p := NewEmbeddingsProvider("e", srv.URL, "", "m", 3, 0)
+			_, err := p.Embed(context.Background(), "x")
+			var apiErr *EmbedAPIError
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("err = %v, want an *EmbedAPIError", err)
+			}
+			if apiErr.Status != tc.status || !strings.Contains(apiErr.Message, tc.msg) {
+				t.Errorf("got status %d message %q", apiErr.Status, apiErr.Message)
+			}
+			if apiErr.InputRejected() != tc.rejected {
+				t.Errorf("InputRejected() = %v, want %v", apiErr.InputRejected(), tc.rejected)
+			}
+		})
 	}
 }

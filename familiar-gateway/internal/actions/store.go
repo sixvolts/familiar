@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/robfig/cron/v3"
 
@@ -138,6 +139,9 @@ const (
 	RunStatusSkippedQuiet = "skipped_quiet"
 	// skipped_budget: the action hit max_runs_per_day; nothing ran.
 	RunStatusSkippedBudget = "skipped_budget"
+	// skipped_disabled: a scheduled fire of an action disabled since
+	// it was scheduled; nothing ran.
+	RunStatusSkippedDisabled = "skipped_disabled"
 )
 
 // maxStoredOutput caps the ledger's copy of a run's output. The
@@ -191,8 +195,9 @@ func Validate(a *Action) error {
 	// Envelope: derive for legacy callers, then enforce coherence —
 	// shard_id travels with (and only with) envelope=shard. A shard
 	// deleted out from under an action leaves envelope=shard with no
-	// shard_id; re-enabling that row fails here until the owner picks
-	// a new envelope (the existing shard_deleted contract).
+	// shard_id; re-enabling that row is refused (the enable handler
+	// validates first) until the owner picks a new envelope (the
+	// shard_deleted contract).
 	//
 	// Webhook triggers default to `ephemeral`, not `user`. A webhook body
 	// is third-party text (a GitHub hook carries issue titles written by
@@ -268,9 +273,9 @@ func Validate(a *Action) error {
 	default:
 		return fmt.Errorf("actions: unknown trigger_kind %q", a.TriggerKind)
 	}
-	if a.MinIntervalSeconds == 0 {
-		a.MinIntervalSeconds = 60
-	}
+	// 0 means no throttle (every event fires); new actions default to
+	// 60 where they're created. It was coerced to 60 here, so an
+	// explicit 0 could never be stored.
 	if a.MinIntervalSeconds < 0 || a.MinIntervalSeconds > 86400 {
 		return fmt.Errorf("actions: min_interval_seconds out of range [0, 86400]")
 	}
@@ -614,6 +619,17 @@ type RunResult struct {
 	Deliveries []DeliveryResult
 }
 
+// TruncateUTF8 cuts s to at most n bytes without splitting a character.
+func TruncateUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
 // DeliveryResult records one target's outcome inside the run row.
 type DeliveryResult struct {
 	Kind  string `json:"kind"`
@@ -627,7 +643,10 @@ type DeliveryResult struct {
 func (s *Store) FinishRun(ctx context.Context, runID, actionID string, r RunResult) (int, error) {
 	output := r.Output
 	if len(output) > maxStoredOutput {
-		output = output[:maxStoredOutput] + "\n…[truncated]"
+		// On a rune boundary: a byte cut could split a character, and
+		// Postgres refuses invalid UTF-8, which left the run "running"
+		// with its outcome lost.
+		output = TruncateUTF8(output, maxStoredOutput) + "\n…[truncated]"
 	}
 	deliveries, _ := json.Marshal(r.Deliveries)
 	if _, err := s.pool.ExecContext(ctx, `

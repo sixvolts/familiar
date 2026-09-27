@@ -853,6 +853,16 @@ func runHTTPAdapter(ctx context.Context, d httpAdapterDeps, adminHOut **admin.Ha
 						},
 						Deliverers: deliverers,
 						PageEvents: actionsPageBus,
+						// page_saved actions stop when their owner leaves the
+						// watched book.
+						BookMember: func(ctx context.Context, bookID, userID string) (bool, error) {
+							ws := adminH.WikiStore()
+							if ws == nil {
+								return true, nil
+							}
+							role, err := ws.MemberRole(ctx, bookID, userID)
+							return role != "", err
+						},
 					})
 					if rErr != nil {
 						log.Printf("[actions] warning: runner: %v", rErr)

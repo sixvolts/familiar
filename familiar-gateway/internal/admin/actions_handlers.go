@@ -107,6 +107,9 @@ type actionBody struct {
 	TimeoutSeconds         *int             `json:"timeout_seconds"`
 	MaxConsecutiveFailures *int             `json:"max_consecutive_failures"`
 	MaxRunsPerDay          *int             `json:"max_runs_per_day"`
+	// ConfirmEnvelope acknowledges a PATCH that widens the envelope to
+	// "user" (full trust) from a shard or ephemeral one.
+	ConfirmEnvelope bool `json:"confirm_envelope"`
 }
 
 func (b *actionBody) applyTo(a *actions.Action) error {
@@ -324,7 +327,8 @@ func (h *Handler) createAction(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid body: "+err.Error())
 		return
 	}
-	a := &actions.Action{OwnerID: userID, Enabled: true}
+	// min_interval defaults here, so an explicit 0 (no throttle) holds.
+	a := &actions.Action{OwnerID: userID, Enabled: true, MinIntervalSeconds: 60}
 	if err := body.applyTo(a); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
@@ -395,6 +399,7 @@ func (h *Handler) patchAction(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid body: "+err.Error())
 		return
 	}
+	prevEnvelope := a.Envelope
 	if err := body.applyTo(a); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
@@ -409,6 +414,15 @@ func (h *Handler) patchAction(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := actions.Validate(a); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Widening to "run as you" is never a side effect of another edit:
+	// the panel fell back to "user" when it couldn't list the stored
+	// shard, and a save re-enveloped the action with the owner's whole
+	// toolbox (and a shard_deleted row, meant to stay inert, likewise).
+	// Checked after Validate, which derives an empty envelope.
+	if a.Envelope == actions.EnvelopeUser && prevEnvelope != "" && prevEnvelope != actions.EnvelopeUser && !body.ConfirmEnvelope {
+		writeJSONError(w, http.StatusBadRequest, "this would change the action from its "+prevEnvelope+" envelope to run as you, with your full toolbox and memory; confirm the change (confirm_envelope)")
 		return
 	}
 	if code, msg := h.validateActionRefs(r, a); code != 0 {
@@ -451,6 +465,28 @@ func (h *Handler) setActionEnabled(enabled bool) http.HandlerFunc {
 		userID, isAdmin, ok := h.actionScope(w, r)
 		if !ok {
 			return
+		}
+		// Enabling checks the row as a save would: a shard_deleted
+		// action (envelope shard, no shard) re-enabled fine and failed
+		// every fire until the breaker tripped again.
+		if enabled {
+			cur, err := h.actions.Get(r.Context(), r.PathValue("id"), userID, isAdmin)
+			if errors.Is(err, actions.ErrActionNotFound) {
+				writeJSONError(w, http.StatusNotFound, "action not found")
+				return
+			}
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if err := actions.Validate(cur); err != nil {
+				writeJSONError(w, http.StatusBadRequest, err.Error()+" — edit the action before enabling it")
+				return
+			}
+			if code, msg := h.validateActionRefs(r, cur); code != 0 {
+				writeJSONError(w, code, msg)
+				return
+			}
 		}
 		err := h.actions.SetEnabled(r.Context(), r.PathValue("id"), userID, isAdmin, enabled)
 		if errors.Is(err, actions.ErrActionNotFound) {

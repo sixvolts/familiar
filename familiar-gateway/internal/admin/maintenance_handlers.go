@@ -78,21 +78,28 @@ func (h *Handler) setMaintenance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.maintenance.SetState(body.Enabled, body.ModelID)
-
-	// Persist so the switch survives a gateway restart.
+	// Persist first, both keys together, so the switch survives a
+	// restart: the errors were dropped after the in-memory state had
+	// already changed, and a restart could silently revert it (or keep
+	// half of it).
 	if h.instanceSettings != nil {
 		by := "admin"
 		if u, ok := AuthUserFrom(r.Context()); ok && u.UserID != "" {
 			by = u.UserID
 		}
-		_ = h.instanceSettings.Set(r.Context(), maintenanceModelKey, body.ModelID, by)
 		enabledStr := "false"
 		if body.Enabled {
 			enabledStr = "true"
 		}
-		_ = h.instanceSettings.Set(r.Context(), maintenanceEnabledKey, enabledStr, by)
+		if err := h.instanceSettings.SetAll(r.Context(), map[string]string{
+			maintenanceModelKey:   body.ModelID,
+			maintenanceEnabledKey: enabledStr,
+		}, by); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "couldn't save maintenance mode; nothing changed: "+err.Error())
+			return
+		}
 	}
+	h.maintenance.SetState(body.Enabled, body.ModelID)
 
 	resp := maintenanceResponse(h.maintenance.State())
 	resp["available"] = true

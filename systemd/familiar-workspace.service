@@ -6,8 +6,8 @@ Wants=familiar-gateway.service
 [Service]
 Type=simple
 User=youruser
-WorkingDirectory=/home/youruser/repos/familiar/familiar-workspace
-ExecStart=/home/youruser/repos/familiar/familiar-workspace/familiar-workspace --config /home/youruser/repos/familiar/familiar-workspace/workspace.toml
+WorkingDirectory=/home/youruser/repos/familiar-engine/familiar-workspace
+ExecStart=/home/youruser/repos/familiar-engine/familiar-workspace/familiar-workspace --config /home/youruser/repos/familiar-engine/familiar-workspace/workspace.toml
 Restart=on-failure
 RestartSec=5
 

@@ -463,8 +463,9 @@ familiar-gateway` → health check:
 cd ~/repos/familiar-engine && ./familiar-deploy.sh
 ```
 
-(It assumes the repo is at `~/repos/familiar-engine` and a `familiar-gateway`
-systemd unit exists.)
+(It deploys the checkout it is run from — set `FAMILIAR_REPO` to deploy another
+— and assumes a `familiar-gateway` systemd unit whose paths point at that same
+checkout; the unit templates in `systemd/` use `~/repos/familiar-engine`.)
 
 Workspace **binary** change (Go code under `familiar-workspace/`, not static):
 `cd familiar-workspace && make build && sudo systemctl restart familiar-workspace`.

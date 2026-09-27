@@ -191,6 +191,23 @@ func TestBuildSummary60_40Split(t *testing.T) {
 	}
 }
 
+// A short summary reserves only its size: the rest of the 40% goes to
+// turns. A flat 40% held back for a ~300-token summary evicted recent
+// history on small windows.
+func TestBuildShortSummaryReservesOnlyItsSize(t *testing.T) {
+	var turns []session.Turn
+	for i := 0; i < 20; i++ {
+		turns = append(turns, turn("user", 200)) // 50 tokens each
+	}
+	out := New(Config{WindowSize: 1000}).Build(Input{Summary: repeat(400), Turns: turns}) // 100 tokens
+	if len(out.RecentTurns) != 18 {
+		t.Errorf("kept %d turns, want 18 (900 tokens beside a 100-token summary)", len(out.RecentTurns))
+	}
+	if out.ConversationSummary != repeat(400) {
+		t.Error("summary truncated")
+	}
+}
+
 func TestBuildNoSummaryUsesFullConversationZone(t *testing.T) {
 	cfg := Config{WindowSize: 1000, OutputReservation: 0}
 	b := New(cfg)

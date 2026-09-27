@@ -13,10 +13,12 @@ package pipeline
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/familiar/gateway/internal/classifier"
+	"github.com/familiar/gateway/internal/ctxbuild"
 	"github.com/familiar/gateway/internal/shards"
 	"github.com/familiar/gateway/internal/skills"
 	"github.com/familiar/gateway/internal/testutil"
@@ -719,5 +721,48 @@ func TestTrivialToolSpecs(t *testing.T) {
 	}
 	if len((&Pipeline{skillRegistry: reg2}).trivialToolSpecs(false)) == 0 {
 		t.Error("trivial subset must fall back to non-empty when no curated tool is registered")
+	}
+}
+
+// A persistent shard sees its rolling summary and as much history as its
+// model's window holds, opening on a user turn. It saw a fixed last 20
+// messages with no summary, so a couple of tool-heavy exchanges pushed
+// out the user's instructions while their summary went unread.
+func TestShard_PersistentSeesSummaryAndBudgetedHistory(t *testing.T) {
+	mock := testutil.NewMockLLM(t)
+	mock.Enqueue(testutil.ScriptedResponse{Content: "ok"})
+	pl := makePipelineWithMockLLM(&mockEngine{}, mock, nil)
+	pl.ctxCfg = ctxbuild.Config{WindowSize: 16384, OutputReservation: 2048, SystemPromptRatio: 0.1,
+		MemoryRatio: 0.1, ToolResultRatio: 0.1, MaxToolResultTokens: 2000}
+	sess := pl.sessions.GetOrCreate("shards", "persistent-summary")
+	sess.SetSummary("The user wants every answer in French.", 30)
+	for i := 0; i < 60; i++ {
+		sess.AddTurn([]string{"user", "assistant"}[i%2], fmt.Sprintf("short turn %d", i))
+	}
+	overrides := &ShardOverrides{ShardID: "pers", SystemPrompt: "You are a helper.", ModelOverride: "mock-model", ScopeTag: "shard:pers"}
+	if _, _, err := pl.HandleShard(context.Background(), sess, "next", overrides); err != nil {
+		t.Fatal(err)
+	}
+	msgs := mock.Calls()[0].Messages
+	sys := recordedSystemMsg(msgs)
+	if !strings.HasPrefix(sys, "You are a helper.") || !strings.Contains(sys, "<conversation_summary>\nThe user wants every answer in French.") {
+		t.Errorf("system message lacks the shard prompt or the summary:\n%s", sys)
+	}
+	if history := len(msgs) - 2; history != 60 {
+		t.Errorf("history messages = %d, want all 60 (they fit the window)", history)
+	}
+
+	// A history that doesn't fit is cut to the budget, not to 20.
+	mock.Enqueue(testutil.ScriptedResponse{Content: "ok"})
+	big := pl.sessions.GetOrCreate("shards", "persistent-big")
+	for i := 0; i < 60; i++ {
+		big.AddTurn([]string{"user", "assistant"}[i%2], strings.Repeat("w", 600)) // 150 tokens
+	}
+	if _, _, err := pl.HandleShard(context.Background(), big, "next", overrides); err != nil {
+		t.Fatal(err)
+	}
+	msgs = mock.Calls()[1].Messages
+	if history := len(msgs) - 2; history >= 60 || history <= 20 || msgs[1].Role != "user" {
+		t.Errorf("history = %d messages opening on %s, want a budgeted cut (20 < n < 60) opening on a user turn", history, msgs[1].Role)
 	}
 }

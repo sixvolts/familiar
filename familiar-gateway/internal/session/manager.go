@@ -30,6 +30,11 @@ type Turn struct {
 	Timestamp  time.Time
 	ToolCalls  json.RawMessage // assistant turns that called tools
 	ToolCallID string          // tool turns, answering a prior call
+	// Seq identifies the turn within this session's buffer (assigned by
+	// AddMessage, increasing; not persisted). Compaction drops turns by
+	// Seq, so turns added while a summary was being written are not
+	// dropped in place of the ones it summarized.
+	Seq uint64
 }
 
 // Session holds the in-memory state of one conversation.
@@ -59,7 +64,12 @@ type Session struct {
 	RollingSummary  string // lossy narrative of turns that have been summarized away
 	SummarizedCount int    // number of turns that have been folded into RollingSummary
 	summarizing     bool   // guard: prevents concurrent summarization goroutines for this session
-	hydrated        bool   // set once the running_summary has been loaded from the sessions store
+	hydrated        bool   // set once the persisted summary and turns have been loaded
+	// summaryUnknown is set while the persisted summary could not be
+	// loaded: summarizing then would start from nothing and overwrite
+	// it. Cleared by SetSummary.
+	summaryUnknown bool
+	nextSeq        uint64 // Seq of the next turn added
 	// explicitID is true when this session was created via
 	// GetOrCreateWithID — i.e. its ID is a stable, externally-
 	// meaningful identifier (a workspace conversation UUID, a Slack
@@ -277,8 +287,8 @@ func (s *Session) IsHydrated() bool {
 	return s.hydrated
 }
 
-// MarkHydrated records that the persistent running_summary has been
-// merged in, preventing repeat DB round-trips on subsequent turns.
+// MarkHydrated records that the persisted summary and turns have been
+// loaded, preventing repeat DB round-trips on subsequent turns.
 func (s *Session) MarkHydrated() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -301,6 +311,41 @@ func (s *Session) SetSummary(summary string, count int) {
 	defer s.mu.Unlock()
 	s.RollingSummary = summary
 	s.SummarizedCount = count
+	s.summaryUnknown = false
+}
+
+// SetSummaryUnknown records that the persisted summary could not be
+// loaded (see summaryUnknown).
+func (s *Session) SetSummaryUnknown() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.summaryUnknown = true
+}
+
+// SummaryUnknown reports whether the persisted summary is still
+// unloaded after a failed attempt; the session must not be summarized
+// until it is.
+func (s *Session) SummaryUnknown() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.summaryUnknown
+}
+
+// ReplaceTurnsIf replaces the turn buffer with turns if it still holds
+// expectLen turns, and reports whether it did. Hydration uses it to swap
+// in the persisted history without losing a turn another request added
+// while the load ran.
+func (s *Session) ReplaceTurnsIf(turns []Turn, expectLen int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.Turns) != expectLen {
+		return false
+	}
+	s.Turns = make([]Turn, 0, len(turns))
+	for _, t := range turns {
+		s.appendLocked(t)
+	}
+	return true
 }
 
 // MaxSessionTurns caps the in-memory turn buffer. The cap is a
@@ -320,9 +365,15 @@ const MaxSessionTurns = 100
 func (s *Session) AddMessage(t Turn) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.appendLocked(t)
+}
+
+func (s *Session) appendLocked(t Turn) {
 	if t.Timestamp.IsZero() {
 		t.Timestamp = time.Now()
 	}
+	s.nextSeq++
+	t.Seq = s.nextSeq
 	s.LastActive = t.Timestamp
 	s.Turns = append(s.Turns, t)
 	if len(s.Turns) > MaxSessionTurns {
@@ -380,21 +431,24 @@ func (s *Session) EndSummarize() {
 	s.summarizing = false
 }
 
-// CompactSummary updates the rolling summary and trims the oldest `dropCount`
-// turns from the session (those have been folded into the summary).
-// Returns the turns that were dropped so the caller can use them for
-// fact extraction.
-func (s *Session) CompactSummary(newSummary string, dropCount int) []Turn {
+// CompactSummary sets the rolling summary and drops the turns it folded
+// in: every buffered turn up to and including Seq throughSeq (the last
+// turn SnapshotForSummarize returned). It used to drop the oldest N
+// turns by count, which were different turns if the buffer's cap had
+// evicted some while the summary was being written. Returns the turns
+// dropped.
+func (s *Session) CompactSummary(newSummary string, throughSeq uint64) []Turn {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if dropCount <= 0 || dropCount > len(s.Turns) {
-		return nil
+	n := 0
+	for n < len(s.Turns) && s.Turns[n].Seq <= throughSeq {
+		n++
 	}
-	dropped := make([]Turn, dropCount)
-	copy(dropped, s.Turns[:dropCount])
-	s.Turns = append([]Turn{}, s.Turns[dropCount:]...)
+	dropped := make([]Turn, n)
+	copy(dropped, s.Turns[:n])
+	s.Turns = append([]Turn{}, s.Turns[n:]...)
 	s.RollingSummary = newSummary
-	s.SummarizedCount += dropCount
+	s.SummarizedCount += n
 	s.LastActive = time.Now()
 	return dropped
 }

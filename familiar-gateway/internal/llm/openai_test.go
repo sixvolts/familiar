@@ -625,3 +625,34 @@ func TestOpenAIProvider_HealthCheckStatusCodes(t *testing.T) {
 		}
 	}
 }
+
+// A tool message is sent only when the assistant message before it made
+// that call. A result whose call fell outside the history window, or
+// one after the final reply, had an id and so was sent, an HTTP 400 on
+// servers that check the pairing.
+func TestSanitizeToolHistory_DropsResultsWithoutTheirCall(t *testing.T) {
+	call := openAIToolCall{ID: "c2", Type: "function"}
+	in := []openAIMessage{
+		{Role: "tool", ToolCallID: "c1", Content: "orphan: its call was cut off"},
+		{Role: "assistant", Content: "It's sunny."},
+		{Role: "user", Content: "and tomorrow?"},
+		{Role: "assistant", ToolCalls: []openAIToolCall{call}},
+		{Role: "tool", ToolCallID: "c2", Content: "rain"},
+		{Role: "assistant", Content: "Rain tomorrow."},
+		{Role: "tool", ToolCallID: "c2", Content: "stray: after the reply"},
+		{Role: "user", Content: "thanks"},
+	}
+	out := sanitizeToolHistory(in)
+	var tools []string
+	for _, m := range out {
+		if m.Role == "tool" {
+			tools = append(tools, m.Content)
+		}
+	}
+	if len(tools) != 1 || tools[0] != "rain" {
+		t.Fatalf("tool messages kept = %q, want only the answered call's result", tools)
+	}
+	if len(out) != len(in)-2 {
+		t.Errorf("kept %d of %d messages, want all but the two orphans", len(out), len(in))
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"log"
 	"strings"
 
+	"github.com/familiar/gateway/internal/ctxbuild"
 	"github.com/familiar/gateway/internal/llm"
 	"github.com/familiar/gateway/internal/session"
 )
@@ -169,42 +170,53 @@ func diffNames(requested, kept []string) []string {
 // relationship graph, no tool results block. The shard is the whole
 // context envelope.
 //
-// This intentionally does NOT go through ctxbuild. ctxbuild exists to
-// pack the trusted-surface's many context zones under a token budget;
-// shards have no zones to pack. If a future shard use-case turns out
-// to need budgeted packing (e.g., very long system prompts that need
-// to crowd out session turns), we can fold ctxbuild back in at that
-// point — there's no value in it yet.
-func (p *Pipeline) buildShardMessages(sess *session.Session, userMsg string, overrides *ShardOverrides, info *RouteInfo) []llm.Message {
-	var messages []llm.Message
-	if overrides.SystemPrompt != "" {
-		messages = append(messages, llm.Message{
-			Role:    "system",
-			Content: overrides.SystemPrompt,
-		})
-	}
+// Persistent shards (SkipSessionHydration unset) see prior turns the
+// way the trusted path does: the rolling summary, and as much history as
+// the model's window holds, packed by ctxbuild and opening on a user
+// turn. They used to get a fixed last 20 messages with no summary and no
+// token budget: two tool-heavy exchanges pushed the user's instructions
+// out, the summary kept for them went unread, and 20 large tool results
+// could overflow a small model.
+func (p *Pipeline) buildShardMessages(sess *session.Session, userMsg, modelID string, overrides *ShardOverrides, info *RouteInfo) []llm.Message {
+	sys := overrides.SystemPrompt
+	var turns []session.Turn
 	if !overrides.SkipSessionHydration && sess != nil {
-		// Persistent shards see prior turns the same way the trusted
-		// path does — the session.Session struct carries them in memory
-		// after hydration. The tool shape must survive the replay: an
-		// assistant turn that only carried tool_calls has empty content,
-		// and OpenAI-shaped servers reject an assistant message with
-		// neither content nor tool_calls.
-		turns := sess.RecentTurns(20)
-		// If the window opens mid tool-exchange (a tool result whose
-		// assistant tool-call parent was cut off), the transcript is
-		// invalid; trim to the first user turn.
-		for len(turns) > 0 && turns[0].Role != "user" {
-			turns = turns[1:]
+		summary, _ := sess.Snapshot()
+		reserved := ctxbuild.EstimateTokens(userMsg)
+		if p.modelSupportsTools(modelID) {
+			reserved += p.toolSchemaTokens()
 		}
-		for _, t := range turns {
-			messages = append(messages, llm.Message{
-				Role:       t.Role,
-				Content:    t.Content,
-				ToolCalls:  unmarshalToolCalls(t.ToolCalls),
-				ToolCallID: t.ToolCallID,
-			})
+		packed := ctxbuild.New(p.windowConfig(modelID)).Build(ctxbuild.Input{
+			SystemPrompt:   overrides.SystemPrompt,
+			Summary:        summary,
+			Turns:          sess.RecentTurns(0),
+			ReservedTokens: reserved,
+		})
+		turns = packed.RecentTurns
+		if packed.ConversationSummary != "" {
+			block := contextDataNotice + "\n\n<conversation_summary>\n" + packed.ConversationSummary + "\n</conversation_summary>"
+			if sys != "" {
+				sys += "\n\n"
+			}
+			sys += block
 		}
+	}
+
+	var messages []llm.Message
+	if sys != "" {
+		messages = append(messages, llm.Message{Role: "system", Content: sys})
+	}
+	// The tool shape must survive the replay: an assistant turn that
+	// only carried tool_calls has empty content, and OpenAI-shaped
+	// servers reject an assistant message with neither content nor
+	// tool_calls.
+	for _, t := range turns {
+		messages = append(messages, llm.Message{
+			Role:       t.Role,
+			Content:    t.Content,
+			ToolCalls:  unmarshalToolCalls(t.ToolCalls),
+			ToolCallID: t.ToolCallID,
+		})
 	}
 	messages = append(messages, llm.Message{Role: "user", Content: userMsg})
 

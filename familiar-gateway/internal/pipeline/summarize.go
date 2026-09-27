@@ -49,10 +49,12 @@ const (
 	// supersede this constant entirely.
 	VerbatimWindow = 24
 
-	// SummarizeBatch is how many turns get summarized away per pass, once the
-	// threshold fires. Leaving a few turns above the verbatim window buffers
-	// against the next trigger.
-	SummarizeBatch = 8
+	// SummarizeBatch is the most turns folded into the summary in one
+	// pass; a pass folds everything above the verbatim window, up to this
+	// many. It was a fixed 8, but one tool-heavy exchange adds 2 plus two
+	// per tool call, so research turns outran it and the excess reached
+	// the buffer's cap and fell off unsummarized.
+	SummarizeBatch = 32
 
 	// The identical-enough cutoff (above which an extracted fact is
 	// skipped without asking the medium slot) and the supersede floor now
@@ -72,6 +74,11 @@ const (
 // downstream both carry the shard's scope_tag.
 func (p *Pipeline) maybeSummarize(sess *session.Session, overrides *ShardOverrides) {
 	if p.sidecarClient == nil {
+		return
+	}
+	// The persisted summary failed to load (hydration retries it): a
+	// summary written now would start from nothing and replace it.
+	if sess.SummaryUnknown() {
 		return
 	}
 	_, turnCount := sess.Snapshot()
@@ -108,10 +115,10 @@ func (p *Pipeline) runSummarize(sess *session.Session, overrides *ShardOverrides
 	// Snapshot the turns we intend to summarize without mutating yet — if the
 	// sidecar call fails, leave the session untouched.
 	prevSummary, localTurns := sess.SnapshotForSummarize(dropCount)
-	toSummarize := make([]sidecar.Turn, len(localTurns))
-	for i, t := range localTurns {
-		toSummarize[i] = sidecar.Turn{Role: t.Role, Content: t.Content}
+	if len(localTurns) == 0 {
+		return
 	}
+	toSummarize := summarizerTurns(localTurns)
 	dropCount = len(localTurns)
 
 	p.events.Emit(sess.ID, memevents.KindCompactionStarted, memevents.CompactionStartedPayload{
@@ -130,7 +137,7 @@ func (p *Pipeline) runSummarize(sess *session.Session, overrides *ShardOverrides
 		return
 	}
 
-	dropped := sess.CompactSummary(newSummary, dropCount)
+	dropped := sess.CompactSummary(newSummary, localTurns[len(localTurns)-1].Seq)
 	log.Printf("[pipeline] summarized %d turns for session %s (summary: %d chars)",
 		len(dropped), sess.ID, len(newSummary))
 	p.events.Emit(sess.ID, memevents.KindSummaryGenerated, memevents.SummaryGeneratedPayload{
@@ -162,6 +169,42 @@ func (p *Pipeline) runSummarize(sess *session.Session, overrides *ShardOverrides
 	p.events.Emit(sess.ID, memevents.KindCompactionCompleted, memevents.CompactionCompletedPayload{
 		DurationMs: int(time.Since(start) / time.Millisecond),
 	})
+}
+
+// summarizerTurns renders buffered turns for the summarizer. A tool
+// result becomes a line naming the tool, and a tool-calling turn its
+// prose and the list of calls. Results are whatever a web page or a
+// shared page said, and the summary is replayed in the system message
+// of every later turn (and persisted), where an instruction planted in
+// a page reads as the user's own. The results themselves stay in the
+// verbatim history the model sees as tool messages.
+func summarizerTurns(turns []session.Turn) []sidecar.Turn {
+	out := make([]sidecar.Turn, 0, len(turns))
+	names := map[string]string{} // tool call id -> tool name
+	for _, t := range turns {
+		switch {
+		case t.Role == "tool":
+			name := names[t.ToolCallID]
+			if name == "" {
+				name = "a tool"
+			}
+			out = append(out, sidecar.Turn{Role: "tool", Content: "[" + name + " result omitted]"})
+		case len(t.ToolCalls) > 0:
+			var called []string
+			for _, c := range unmarshalToolCalls(t.ToolCalls) {
+				names[c.ID] = c.Name
+				called = append(called, c.Name)
+			}
+			line := "[called " + strings.Join(called, ", ") + "]"
+			if prose := strings.TrimSpace(t.Content); prose != "" {
+				line = prose + "\n" + line
+			}
+			out = append(out, sidecar.Turn{Role: t.Role, Content: line})
+		default:
+			out = append(out, sidecar.Turn{Role: t.Role, Content: t.Content})
+		}
+	}
+	return out
 }
 
 // approxTokenCount is a rough char/4 proxy used only for the

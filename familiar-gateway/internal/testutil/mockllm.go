@@ -33,9 +33,9 @@ type MockLLM struct {
 	calls     []RecordedCall
 }
 
-// ScriptedResponse declares one reply the mock will return. Exactly one
-// of Content or ToolCalls should be non-empty per response, matching the
-// two modes a real LLM uses (plain text answer vs tool call request).
+// ScriptedResponse declares one reply the mock will return: text
+// (Content), tool calls (ToolCalls), or both, as a model that writes
+// prose alongside a tool call does.
 type ScriptedResponse struct {
 	// Content is the assistant text reply. Leave empty when returning
 	// tool calls instead.
@@ -55,6 +55,15 @@ type ScriptedResponse struct {
 	// numbers don't have to set them.
 	PromptTokens     int
 	CompletionTokens int
+
+	// Status, when non-zero, answers with that HTTP status and no body
+	// (a provider failure) instead of a completion.
+	Status int
+
+	// Before runs when the request arrives, before any reply. If the
+	// request's context is done once it returns (the client went away,
+	// e.g. a Stop cut the turn), nothing is written.
+	Before func(r *http.Request)
 }
 
 // ScriptedToolCall models one function-call entry in a tool_calls
@@ -190,6 +199,16 @@ func (m *MockLLM) handle(w http.ResponseWriter, r *http.Request) {
 	m.responses = m.responses[1:]
 	m.mu.Unlock()
 
+	if next.Before != nil {
+		next.Before(r)
+		if r.Context().Err() != nil {
+			return
+		}
+	}
+	if next.Status != 0 {
+		http.Error(w, "scripted failure", next.Status)
+		return
+	}
 	if req.Stream {
 		m.writeStreamResponse(w, next)
 		return
@@ -272,6 +291,13 @@ func (m *MockLLM) writeStreamResponse(w http.ResponseWriter, s ScriptedResponse)
 		}
 	}
 
+	// Content first, then tool calls: a model may write prose and call
+	// a tool in the same response.
+	if s.Content != "" {
+		// Escape by reusing JSON marshalling for the content value.
+		cb, _ := json.Marshal(s.Content)
+		write(fmt.Sprintf(`{"choices":[{"index":0,"delta":{"role":"assistant","content":%s}}]}`, cb))
+	}
 	if len(s.ToolCalls) > 0 {
 		for i, tc := range s.ToolCalls {
 			argBytes, _ := json.Marshal(tc.Arguments)
@@ -281,10 +307,6 @@ func (m *MockLLM) writeStreamResponse(w http.ResponseWriter, s ScriptedResponse)
 			)
 			write(frag)
 		}
-	} else if s.Content != "" {
-		// Escape by reusing JSON marshalling for the content value.
-		cb, _ := json.Marshal(s.Content)
-		write(fmt.Sprintf(`{"choices":[{"index":0,"delta":{"role":"assistant","content":%s}}]}`, cb))
 	}
 
 	finish := s.FinishReason

@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/familiar/gateway/internal/config"
+	"github.com/familiar/gateway/internal/ctxbuild"
 	"github.com/familiar/gateway/internal/router"
 	"github.com/familiar/gateway/internal/session"
 	"github.com/familiar/gateway/internal/skills"
@@ -198,5 +199,30 @@ func TestUserSkills_NoGrantKeepsShardOnlyBan(t *testing.T) {
 	}
 	if !refused {
 		t.Error("hallucinated use_skill was not refused with the synthetic tool error")
+	}
+}
+
+// The user-skills block is appended to the system message after packing;
+// its size is now reserved while packing, so history makes room for it.
+func TestUserSkills_BlockIsReservedWhenPacking(t *testing.T) {
+	sentHistory := func(block string) int {
+		mock := testutil.NewMockLLM(t)
+		mock.Enqueue(testutil.ScriptedResponse{Content: "ok"})
+		pl := makeUserSkillsPipeline(&mockEngine{}, mock, skills.NewRegistry(), func(context.Context, string) string { return block })
+		pl.ctxCfg = ctxbuild.Config{WindowSize: 16384, OutputReservation: 2048, SystemPromptRatio: 0.1,
+			MemoryRatio: 0.1, ToolResultRatio: 0.1, MaxToolResultTokens: 2000}
+		sess := pl.sessions.GetOrCreate("cli", "user1")
+		for i := 0; i < 100; i++ {
+			sess.AddTurn([]string{"user", "assistant"}[i%2], strings.Repeat("h", 400)) // 100 tokens each
+		}
+		if _, _, err := pl.Handle(context.Background(), sess, "next", nil); err != nil {
+			t.Fatal(err)
+		}
+		return len(mock.Calls()[0].Messages)
+	}
+	without := sentHistory("")
+	with := sentHistory("## Your skills\n" + strings.Repeat("s", 8000)) // ~2000 tokens
+	if with > without-15 {
+		t.Errorf("history sent: %d messages with a 2000-token skills block, %d without; the block wasn't reserved", with, without)
 	}
 }

@@ -1,32 +1,24 @@
-// Notes surface (FAMILIAR-WORKSPACE-SPEC Phase 2b).
-//
-// Two-pane shell rendered into a workspace tab:
+// Notes surface (FAMILIAR-WORKSPACE-SPEC Phase 2b): the personal
+// book's pages, in a workspace tab.
 //
 //   ┌────────────────────────┬───────────────────────────────────┐
-//   │ Search box             │ Title (editable)                   │
-//   │ + New note             │ Folder · Updated 3m ago            │
+//   │ Search box    + New    │ ‹ Title (editable)    • 🌐 ⋯       │
 //   ├────────────────────────┼───────────────────────────────────┤
-//   │ ▾ Inbox                │                                    │
-//   │   • Cannonball notes   │ ┌───────────┬─────────────────────┐│
-//   │   • Phase planning     │ │  Editor   │   Live preview      ││
-//   │ ▾ Reference            │ │  (text-   │   (markdown render) ││
-//   │   • API endpoints      │ │  area)    │                     ││
-//   │ ▾ Unfiled              │ │           │                     ││
-//   │   • scratch             │ └───────────┴─────────────────────┘│
+//   │ Cannonball notes       │                                    │
+//   │ Phase planning         │  Toast UI editor (Rich Text or     │
+//   │ API endpoints          │  Markdown): [[links]], images,     │
+//   │ …                      │  mermaid diagrams                  │
 //   └────────────────────────┴───────────────────────────────────┘
 //
-// Editor decision: the spec called for inline rendering (Typora/
-// Obsidian model). Doing that without a build step requires
-// ProseMirror/Milkdown via importmaps or rolling cursor-aware live
-// rendering by hand — both several days. v1 ships textarea on the
-// left + live markdown preview on the right, sharing the chat
-// surface's marked + DOMPurify + highlight.js pipeline. Toggle
-// button collapses to editor-only or preview-only. A true inline
-// editor is a polish-pass.
+// The editor is Toast UI (wikilink.js builds its options); it renders
+// and sanitizes content itself, with the shared sanitizer
+// (familiarSanitize.editor). With no note open the tab shows a splash
+// (new note, pinned, recent).
 //
-// Auto-save: 500ms debounce on title or content changes. Visible
-// "saved" indicator confirms; the workspace tab also shows a dirty
-// dot while a write is pending.
+// Saving: 500ms after an edit, against the version last synced
+// (If-Match); the server merges a concurrent writer's disjoint edit,
+// and an overlapping one opens a conflict banner. A pending edit is
+// also sent when the page is hidden or unloaded (keepalive).
 
 (function () {
     "use strict";
@@ -45,69 +37,6 @@
         else window.alert(msg);
     }
     const { apiJSON, toast } = helpers;
-
-    // ── CDN deps ──────────────────────────────────────────────
-    //
-    // Reuses the chat surface's markdown pipeline. If chat.js
-    // already loaded the deps, ensureMarkdownDeps is a no-op
-    // promise; otherwise notes.js bootstraps them itself. Code
-    // is duplicated rather than shared via a sibling module to
-    // keep each surface self-contained — surface modules don't
-    // depend on each other, only on the workspace runtime.
-
-    const CDN = {
-        marked:    "/vendor/marked/marked.min.js",
-        dompurify: "/vendor/dompurify/purify.min.js",
-        hljsCSS:   "/vendor/highlight/atom-one-dark.min.css",
-    };
-
-    let depsPromise = null;
-    function ensureMarkdownDeps() {
-        if (depsPromise) return depsPromise;
-        // If chat.js already loaded marked, reuse it.
-        if (window.marked && window.DOMPurify) {
-            depsPromise = Promise.resolve(renderMarkdownReal);
-            return depsPromise;
-        }
-        depsPromise = (async () => {
-            try {
-                if (!document.querySelector('link[href="' + CDN.hljsCSS + '"]')) {
-                    const css = document.createElement("link");
-                    css.rel = "stylesheet";
-                    css.href = CDN.hljsCSS;
-                    document.head.appendChild(css);
-                }
-                if (!window.marked) await loadScript(CDN.marked);
-                if (!window.DOMPurify) await loadScript(CDN.dompurify);
-                return renderMarkdownReal;
-            } catch (e) {
-                console.warn("notes: markdown deps failed, falling back", e);
-                return renderMarkdownFallback;
-            }
-        })();
-        return depsPromise;
-    }
-
-    function loadScript(src) {
-        return new Promise((resolve, reject) => {
-            const s = document.createElement("script");
-            s.src = src;
-            s.async = true;
-            s.onload = () => resolve();
-            s.onerror = () => reject(new Error("script load failed: " + src));
-            document.head.appendChild(s);
-        });
-    }
-
-    function renderMarkdownReal(md) {
-        if (!window.marked || !window.DOMPurify) return renderMarkdownFallback(md);
-        const html = window.marked.parse(md || "");
-        return window.familiarSanitize.markdown(html);
-    }
-
-    function renderMarkdownFallback(md) {
-        return '<pre class="chat-md-fallback">' + escapeHTML(md || "") + '</pre>';
-    }
 
     function escapeHTML(s) {
         return String(s)
@@ -165,8 +94,7 @@
         const localState = {
             noteId: persisted,
             note: null,           // currently-loaded full note
-            list: [],             // NoteSummary list
-            folders: [],          // distinct folders
+            list: [],             // page summaries, the list pane
             search: "",
             saving: false,
             saveTimer: null,
@@ -181,12 +109,21 @@
             // round trip; flushSave re-runs once the first save returns.
             pendingResave: false,
             savePromise: null,
-            mode: (tab.state && tab.state.mode) || "split", // edit|preview|split
+            // Set while a share toggle is in flight: a double click sent
+            // two enables.
+            shareBusy: false,
             // Per-tab back stack of note IDs visited via [[link]].
             // Pushed in notesWikiNavigate before loadNote, popped by
             // the back chevron, cleared by direct list jumps.
             history: [],
         };
+
+        // Every window/document listener this shell adds is tied to
+        // this signal; dispose() (tab closed) aborts it. They outlived
+        // the tab: each closed notes tab kept refetching on every note
+        // event, and kept its editor alive.
+        const shellAbort = new AbortController();
+        const signal = shellAbort.signal;
 
         // ── Shell DOM ─────────────────────────────────────────
         const root = document.createElement("div");
@@ -203,6 +140,7 @@
         searchInput.type = "search";
         searchInput.className = "notes-search";
         searchInput.placeholder = "Search notes…";
+        searchInput.setAttribute("aria-label", "Search notes");
         searchWrap.appendChild(searchInput);
         const newBtn = document.createElement("button");
         newBtn.type = "button";
@@ -244,11 +182,13 @@
         const titleInput = document.createElement("input");
         titleInput.className = "notes-title";
         titleInput.placeholder = "Untitled";
+        titleInput.setAttribute("aria-label", "Note title");
         titleInput.spellcheck = true;
         const meta = document.createElement("div");
         meta.className = "notes-meta";
         const savedDot = document.createElement("span");
         savedDot.className = "notes-saved";
+        savedDot.setAttribute("aria-live", "polite");
         savedDot.textContent = "";
         meta.appendChild(savedDot);
 
@@ -260,12 +200,43 @@
         overflowBtn.className = "notes-overflow-btn";
         overflowBtn.textContent = "⋯";
         overflowBtn.title = "More actions";
-        overflowBtn.addEventListener("click", (e) => {
-            e.stopPropagation();
-            overflow.classList.toggle("is-open");
-        });
+        overflowBtn.setAttribute("aria-label", "Note actions");
+        overflowBtn.setAttribute("aria-haspopup", "menu");
+        overflowBtn.setAttribute("aria-expanded", "false");
         const overflowMenu = document.createElement("div");
         overflowMenu.className = "notes-overflow-menu";
+        overflowMenu.setAttribute("role", "menu");
+        function setMenuOpen(open) {
+            overflow.classList.toggle("is-open", open);
+            overflowBtn.setAttribute("aria-expanded", open ? "true" : "false");
+        }
+        overflowBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const open = !overflow.classList.contains("is-open");
+            setMenuOpen(open);
+            if (open) {
+                const first = overflowMenu.querySelector(".notes-overflow-item:not([hidden])");
+                if (first) first.focus();
+            }
+        });
+        // Escape closes the menu and returns focus to its button; the
+        // arrow keys move between its items.
+        overflow.addEventListener("keydown", (e) => {
+            if (!overflow.classList.contains("is-open")) return;
+            if (e.key === "Escape") {
+                e.preventDefault();
+                setMenuOpen(false);
+                overflowBtn.focus();
+                return;
+            }
+            if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+            const items = [...overflowMenu.querySelectorAll(".notes-overflow-item:not([hidden])")];
+            if (!items.length) return;
+            e.preventDefault();
+            const at = items.indexOf(document.activeElement);
+            const next = e.key === "ArrowDown" ? (at + 1) % items.length : (at - 1 + items.length) % items.length;
+            items[next].focus();
+        });
         // Content insertion (MEDIA-DIAGRAMS): discoverable entry
         // points for the paste-an-image and mermaid-fence features.
         const imagePicker = document.createElement("input");
@@ -276,9 +247,17 @@
             const file = imagePicker.files && imagePicker.files[0];
             imagePicker.value = "";
             if (!file || !localState.noteId || !tuiEditor) return;
+            // The image belongs to the note it was added to. Inserted into
+            // whichever note was open when the upload finished, it landed
+            // in another note, where a share can't show it.
+            const forNote = localState.noteId;
             window.familiarWikiLink.uploadImage(
-                { bookSlug: "personal", pageId: localState.noteId }, file,
+                { bookSlug: "personal", pageId: forNote }, file,
             ).then((d) => {
+                if (localState.noteId !== forNote || !tuiEditor) {
+                    toast("The image wasn't inserted: the note you added it to is no longer open.", "error");
+                    return;
+                }
                 tuiEditor.exec("addImage", { imageUrl: d.url, altText: d.alt_text || file.name });
             }).catch((e) => {
                 if (window.familiarAppHelpers && window.familiarAppHelpers.toast) {
@@ -288,27 +267,33 @@
         });
         const addImageItem = document.createElement("button");
         addImageItem.type = "button";
+        addImageItem.setAttribute("role", "menuitem");
         addImageItem.className = "notes-overflow-item";
         addImageItem.textContent = "Add image…";
         addImageItem.addEventListener("click", (e) => {
             e.stopPropagation();
-            overflow.classList.remove("is-open");
+            setMenuOpen(false);
             imagePicker.click();
         });
         overflowMenu.appendChild(addImageItem);
         overflowMenu.appendChild(imagePicker);
         const addDiagramItem = document.createElement("button");
         addDiagramItem.type = "button";
+        addDiagramItem.setAttribute("role", "menuitem");
         addDiagramItem.className = "notes-overflow-item";
         addDiagramItem.textContent = "Add diagram";
         addDiagramItem.addEventListener("click", (e) => {
             e.stopPropagation();
-            overflow.classList.remove("is-open");
+            setMenuOpen(false);
             if (!tuiEditor || !localState.noteId) return;
             // Append a starter fence (renders inline immediately) and
             // open its diagram tab for editing.
             const md = tuiEditor.getMarkdown();
-            const fenceIndex = (md.match(/```mermaid/g) || []).length;
+            // Counted as the diagram tab counts them (mermaid-blocks.js):
+            // a regex also counted examples inside other code blocks.
+            const fenceIndex = window.familiarMermaid && window.familiarMermaid.fences
+                ? window.familiarMermaid.fences(md).length
+                : (md.match(/```mermaid/g) || []).length;
             const starter = "graph TD;\n  A[Start] --> B[Next];";
             tuiEditor.setMarkdown(
                 md.replace(/\n*$/, "") + "\n\n```mermaid\n" + starter + "\n```\n",
@@ -328,11 +313,12 @@
         overflowMenu.appendChild(addDiagramItem);
         const pinItem = document.createElement("button");
         pinItem.type = "button";
+        pinItem.setAttribute("role", "menuitem");
         pinItem.className = "notes-overflow-item";
         pinItem.textContent = "Pin note";
         pinItem.addEventListener("click", (e) => {
             e.stopPropagation();
-            overflow.classList.remove("is-open");
+            setMenuOpen(false);
             togglePinNote();
         });
         overflowMenu.appendChild(pinItem);
@@ -340,32 +326,35 @@
         // makes sense when a share exists, so it's hidden until then.
         const shareItem = document.createElement("button");
         shareItem.type = "button";
+        shareItem.setAttribute("role", "menuitem");
         shareItem.className = "notes-overflow-item";
         shareItem.textContent = "Share publicly";
         shareItem.addEventListener("click", (e) => {
             e.stopPropagation();
-            overflow.classList.remove("is-open");
+            setMenuOpen(false);
             toggleShareNote();
         });
         overflowMenu.appendChild(shareItem);
         const copyLinkItem = document.createElement("button");
         copyLinkItem.type = "button";
+        copyLinkItem.setAttribute("role", "menuitem");
         copyLinkItem.className = "notes-overflow-item";
         copyLinkItem.textContent = "Copy public link";
         copyLinkItem.hidden = true;
         copyLinkItem.addEventListener("click", (e) => {
             e.stopPropagation();
-            overflow.classList.remove("is-open");
+            setMenuOpen(false);
             copyShareLink();
         });
         overflowMenu.appendChild(copyLinkItem);
         const deleteItem = document.createElement("button");
         deleteItem.type = "button";
+        deleteItem.setAttribute("role", "menuitem");
         deleteItem.className = "notes-overflow-item danger";
         deleteItem.textContent = "Delete note";
         deleteItem.addEventListener("click", (e) => {
             e.stopPropagation();
-            overflow.classList.remove("is-open");
+            setMenuOpen(false);
             deleteNote();
         });
         overflowMenu.appendChild(deleteItem);
@@ -386,6 +375,7 @@
         shareIndicator.className = "notes-share-indicator";
         shareIndicator.title = "Page shared publicly";
         shareIndicator.setAttribute("aria-label", "Page shared publicly");
+        shareIndicator.setAttribute("role", "img");
         shareIndicator.hidden = true;
         shareIndicator.innerHTML =
             '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"' +
@@ -405,8 +395,8 @@
 
         // Close overflow menu when clicking elsewhere.
         document.addEventListener("click", () => {
-            overflow.classList.remove("is-open");
-        });
+            setMenuOpen(false);
+        }, { signal });
 
         header.append(backBtn, titleInput, meta);
         right.appendChild(header);
@@ -416,20 +406,11 @@
         // Toast UI Editor renders into a div (not a textarea) and
         // builds its own chrome inside. Lazy-init so the container
         // has real dimensions when ProseMirror measures. The
-        // notes-editor-host class is what CSS sizes; the
-        // notes-page-links footer below sits as a sibling and
-        // doesn't get the same flex-fill rule.
+        // notes-editor-host class is what CSS sizes.
         const editorContainer = document.createElement("div");
         editorContainer.id = "tui-editor-" + tab.id;
         editorContainer.className = "notes-editor-host";
         editor.appendChild(editorContainer);
-        // Page-links footer for the personal book. Notes are
-        // pages; the same backlinks UI from the wiki surface
-        // applies here.
-        const linksHost = document.createElement("div");
-        linksHost.className = "notes-page-links";
-        linksHost.hidden = true;
-        editor.appendChild(linksHost);
         // Conflict banner host (same styles as the wiki's): a save that
         // collided with another writer's overlapping edit shows an explicit
         // choice here instead of silently pausing saves.
@@ -483,18 +464,7 @@
 
         root.appendChild(right);
 
-        function layoutSymbol(mode) {
-            return mode === "edit" ? "✎" : mode === "preview" ? "○" : "◐";
-        }
-
         // ── Behavior ──────────────────────────────────────────
-
-        function setMode(mode) {
-            localState.mode = mode;
-            tab.state = { ...(tab.state || {}), mode };
-            editor.className = "notes-editor notes-editor-" + mode;
-            modeBtn.textContent = layoutSymbol(mode);
-        }
 
         async function refreshList() {
             const url = localState.search
@@ -503,9 +473,6 @@
             try {
                 const resp = await apiJSON(url);
                 localState.list = (resp && resp.items) || [];
-                if (resp && resp.folders) {
-                    localState.folders = resp.folders;
-                }
                 renderTree();
             } catch (e) {
                 tree.innerHTML = '<div class="chat-conv-error">' + escapeHTML(e.message || String(e)) + '</div>';
@@ -523,31 +490,9 @@
                 tree.appendChild(stub);
                 return;
             }
-            // Group by folder. Empty/null folder rows go under "Unfiled".
-            const groups = new Map();
-            for (const n of localState.list) {
-                const key = n.folder || "Unfiled";
-                if (!groups.has(key)) groups.set(key, []);
-                groups.get(key).push(n);
-            }
-            // Stable folder order: alpha, with Unfiled last.
-            const folderNames = [...groups.keys()].sort((a, b) => {
-                if (a === "Unfiled") return 1;
-                if (b === "Unfiled") return -1;
-                return a.localeCompare(b);
-            });
-            for (const folderName of folderNames) {
-                const folderEl = document.createElement("div");
-                folderEl.className = "notes-folder-group";
-                const head = document.createElement("div");
-                head.className = "notes-folder-name";
-                head.textContent = folderName;
-                folderEl.appendChild(head);
-                for (const n of groups.get(folderName)) {
-                    folderEl.appendChild(renderRow(n));
-                }
-                tree.appendChild(folderEl);
-            }
+            // Pages have no folders (grouping by one put every note
+            // under a lone "Unfiled" heading).
+            for (const n of localState.list) tree.appendChild(renderRow(n));
         }
 
         function renderRow(n) {
@@ -876,8 +821,6 @@
                 }
                 seedBase(n);
                 renderTree();
-                // Page-links footer disabled until graph-based UI is designed.
-                // renderPageLinks(n.id);
                 savedDot.textContent = "";
                 // Update the workspace tab label to show the note title.
                 if (window.FamiliarWorkspace && window.FamiliarWorkspace.updateTabTitle) {
@@ -898,125 +841,6 @@
             }
         }
 
-        // renderPageLinks paints the outbound + backlinks footer
-        // for the personal-book page. Same shape as the wiki
-        // surface; the only difference is navigation: same-book
-        // (personal book) targets stay in the notes panel via
-        // loadNote; cross-book targets dispatch openDoc so the
-        // wiki tab takes over.
-        async function renderPageLinks(pageID) {
-            linksHost.innerHTML = "";
-            linksHost.hidden = true;
-            if (!pageID) return;
-            const base = "/console/api/books/personal/page-by-id/" +
-                encodeURIComponent(pageID);
-            let outbound = [], inbound = [];
-            try {
-                const [linksResp, backResp] = await Promise.all([
-                    apiJSON(base + "/links"),
-                    apiJSON(base + "/backlinks"),
-                ]);
-                outbound = (linksResp && linksResp.items) || [];
-                inbound = (backResp && backResp.items) || [];
-            } catch (e) {
-                console.warn("notes: renderPageLinks failed", e);
-                return;
-            }
-            if (outbound.length === 0 && inbound.length === 0) return;
-            if (outbound.length > 0) {
-                linksHost.appendChild(buildLinksSection(
-                    "Links from this note", outbound, makeOutboundClick));
-            }
-            if (inbound.length > 0) {
-                linksHost.appendChild(buildLinksSection(
-                    "Linked from", inbound, makeInboundClick));
-            }
-            linksHost.hidden = false;
-        }
-
-        function buildLinksSection(label, items, makeClick) {
-            const section = document.createElement("div");
-            section.className = "notes-page-links-section";
-            const eyebrow = document.createElement("div");
-            eyebrow.className = "notes-page-links-eyebrow";
-            eyebrow.textContent = label + " (" + items.length + ")";
-            section.appendChild(eyebrow);
-            for (const it of items) {
-                section.appendChild(buildLinkRow(it, makeClick));
-            }
-            return section;
-        }
-
-        function buildLinkRow(it, makeClick) {
-            const row = document.createElement("div");
-            row.className = "notes-page-link-row";
-            const isOutbound = it.target_page_slug !== undefined;
-            const isBroken = isOutbound && !it.target_page_id;
-            if (isBroken) row.classList.add("is-broken");
-            const title = document.createElement("span");
-            title.className = "notes-page-link-title";
-            if (isOutbound) {
-                title.textContent = it.display_text || it.target_page_title ||
-                    it.target_page_slug;
-            } else {
-                title.textContent = it.source_page_title || it.source_page_slug;
-            }
-            row.appendChild(title);
-            // Cross-book: stamp the book slug so the source is
-            // legible. Notes-side anything not "personal:..." is
-            // a wiki book.
-            const bookSlug = isOutbound ? it.target_book_slug : it.source_book_slug;
-            const isCrossBook = bookSlug && !bookSlug.startsWith("personal:");
-            if (isCrossBook) {
-                const book = document.createElement("span");
-                book.className = "notes-page-link-book";
-                book.textContent = bookSlug;
-                row.appendChild(book);
-            }
-            if (!isBroken) {
-                row.addEventListener("click", makeClick(it));
-            }
-            return row;
-        }
-
-        function makeOutboundClick(it) {
-            return () => {
-                const bookSlug = it.target_book_slug || "";
-                if (!bookSlug || bookSlug.startsWith("personal:")) {
-                    // Personal-book target — stay in the notes panel.
-                    if (it.target_page_id) loadNote(it.target_page_id);
-                    return;
-                }
-                // Cross-book target — hand off to the wiki tab.
-                navigateToWikiPage(bookSlug, it.target_page_slug, it.target_page_id);
-            };
-        }
-        function makeInboundClick(it) {
-            return () => {
-                const bookSlug = it.source_book_slug || "";
-                if (!bookSlug || bookSlug.startsWith("personal:")) {
-                    if (it.source_page_id) loadNote(it.source_page_id);
-                    return;
-                }
-                navigateToWikiPage(bookSlug, it.source_page_slug, it.source_page_id);
-            };
-        }
-        function navigateToWikiPage(bookSlug, pageSlug, _pageID) {
-            // Open a wiki tab focused on the target page through the
-            // workspace's doc-open contract ("bookSlug/pageSlug" is
-            // the wiki deep-link id form).
-            const ws = window.FamiliarWorkspace;
-            if (ws && ws.openDoc) {
-                ws.openDoc("wiki", bookSlug + "/" + pageSlug, null);
-                return;
-            }
-            if (window.appSwitchPanel) window.appSwitchPanel("workspace");
-            if (ws && ws.focusSurface) ws.focusSurface("wiki");
-            window.dispatchEvent(new CustomEvent("familiar:openDoc", {
-                detail: { surface: "wiki", id: bookSlug + "/" + pageSlug },
-            }));
-        }
-
         async function newNote() {
             try {
                 const n = await apiJSON("/console/api/books/personal/pages", {
@@ -1025,7 +849,7 @@
                     body: JSON.stringify({ title: "Untitled", content: "" }),
                 });
                 localState.list.unshift({
-                    id: n.id, title: n.title, folder: n.folder || "",
+                    id: n.id, title: n.title,
                     pinned: false, snippet: "", updated_at: n.updated_at,
                 });
                 renderTree();
@@ -1044,7 +868,7 @@
         // every debounced retry. Reset on the next successful save.
         let saveFailedNotified = false;
         // Coalesces the sidebar-row refresh after content saves so a body
-        // edit's updated-at meta (and any folder move) reflects in the rail
+        // edit's updated-at meta reflects in the rail
         // without refetching it on every 500ms autosave.
         let sidebarMetaTimer = null;
         function currentContent() { return tuiEditor ? tuiEditor.getMarkdown() : ""; }
@@ -1059,11 +883,15 @@
         }
 
         function isDirty() {
-            if (!localState.note) return false;
+            // No editor, nothing typed: a destroyed editor reads as empty,
+            // and treating that as an edit would save an empty note.
+            if (!localState.note || !tuiEditor) return false;
             return currentTitle() !== localState.baseTitle || currentContent() !== localState.baseContent;
         }
 
-        function flushSave(immediate) {
+        // keepalive: the page is being hidden or unloaded; the browser
+        // cancels ordinary requests then, and this one must land.
+        function flushSave(immediate, keepalive) {
             if (!localState.note) return Promise.resolve();
             if (localState.saving) {
                 // Re-run once the in-flight save returns (see pendingResave).
@@ -1073,7 +901,7 @@
             // A previous save hit a conflict; the banner offers the way
             // out (use theirs / keep mine). Nothing saves until then.
             if (localState.saveBlocked) return Promise.resolve();
-            localState.savePromise = doSave().finally(() => {
+            localState.savePromise = doSave(keepalive).finally(() => {
                 localState.savePromise = null;
                 if (localState.pendingResave) {
                     localState.pendingResave = false;
@@ -1083,7 +911,7 @@
             return localState.savePromise;
         }
 
-        async function doSave() {
+        async function doSave(keepalive) {
             localState.saving = true;
             savedDot.textContent = "Saving…";
             // The note this save is for. If the user switches notes while
@@ -1109,12 +937,17 @@
                         credentials: "include",
                         headers,
                         body: JSON.stringify(patch),
+                        keepalive: !!keepalive,
                     },
                 );
                 const text = await resp.text();
                 let respBody = null;
                 try { respBody = text ? JSON.parse(text) : null; } catch (e) { /* fall through */ }
                 const stillHere = localState.note && localState.note.id === savingId;
+                if (resp.status === 404 && stillHere) {
+                    notePageGone();
+                    return;
+                }
                 if (resp.status === 409 && respBody && respBody.error === "stale") {
                     if (stillHere) handleSaveConflict(patch, respBody.current);
                     return;
@@ -1126,15 +959,13 @@
                 updateListRow(n);
                 if (!stillHere) return;
 
-                // The PATCH response doesn't join share state (only
-                // GET does) — carry the known share forward so the
-                // diagram-render trigger below keeps working.
-                if (!n.share && localState.note.share) n.share = localState.note.share;
+                keepShareURL(n);
                 if (n.merged) {
                     // The server merged our save with another writer's
                     // disjoint edit; the response is the combined document.
                     if (currentContent() === patch.content) {
                         localState.note = n;
+                        updateShareIndicator();
                         suppressSave = true;
                         if (tuiEditor) tuiEditor.setMarkdown(n.content || "");
                         suppressSave = false;
@@ -1152,6 +983,7 @@
                     }
                 } else {
                     localState.note = n;
+                    updateShareIndicator();
                     localState.baseTitle = n.title || "Untitled";
                     localState.baseContent = patch.content;
                     savedDot.textContent = isDirty() ? "•" : "Saved";
@@ -1206,10 +1038,9 @@
                 const prev = localState.list[idx];
                 visibleChange =
                     prev.title !== n.title ||
-                    (prev.folder || "") !== (n.folder || "") ||
                     !!prev.pinned !== !!n.pinned;
                 localState.list[idx] = {
-                    id: n.id, title: n.title, folder: n.folder || "",
+                    id: n.id, title: n.title,
                     pinned: n.pinned, snippet: prev.snippet,
                     updated_at: n.updated_at,
                 };
@@ -1241,6 +1072,11 @@
             if (serverPage &&
                 (serverPage.content || "") === (patch.content || "") &&
                 (patch.title === undefined || (serverPage.title || "") === patch.title)) {
+                // The conflict payload is the bare page: keep this user's
+                // pin and the share, which replacing the note dropped (the
+                // globe vanished from a note still public).
+                serverPage.pinned = localState.note.pinned;
+                serverPage.share = localState.note.share;
                 localState.note = serverPage;
                 seedBase(serverPage);
                 savedDot.textContent = "Saved";
@@ -1258,6 +1094,7 @@
             clearConflictBanner();
             const banner = document.createElement("div");
             banner.className = "wiki-sync-banner";
+            banner.setAttribute("role", "alert");
             const msg = document.createElement("div");
             msg.className = "wiki-sync-banner-msg";
             msg.textContent = "This note was changed by " +
@@ -1313,6 +1150,73 @@
             bannerHost.innerHTML = "";
         }
 
+        // keepShareURL fills in a save response's share link from the one
+        // already known, if the response left it out. The response is the
+        // truth about whether the note is shared: carrying the old share
+        // forward whenever the response had none hid a share turned off
+        // elsewhere.
+        function keepShareURL(n) {
+            const known = localState.note && localState.note.share;
+            if (n.share && !n.share.public_url && known && known.share_key === n.share.share_key) {
+                n.share.public_url = known.public_url;
+            }
+        }
+
+        // notePageGone: the open note was deleted elsewhere (a save 404'd,
+        // or a page-deleted event arrived). Saving stops, and the banner
+        // offers the text, which nothing else can bring back.
+        function notePageGone() {
+            if (!localState.note) return;
+            localState.saveBlocked = true;
+            if (localState.saveTimer) { clearTimeout(localState.saveTimer); localState.saveTimer = null; }
+            savedDot.textContent = "Deleted";
+            clearConflictBanner();
+            const banner = document.createElement("div");
+            banner.className = "wiki-sync-banner";
+            banner.setAttribute("role", "alert");
+            const msg = document.createElement("div");
+            msg.className = "wiki-sync-banner-msg";
+            msg.textContent = "This note was deleted elsewhere. Nothing you type here will be saved.";
+            const actions = document.createElement("div");
+            actions.className = "wiki-sync-banner-actions";
+            const copy = document.createElement("button");
+            copy.type = "button";
+            copy.className = "wiki-sync-banner-btn";
+            copy.textContent = "Copy the text";
+            copy.addEventListener("click", async () => {
+                try {
+                    await navigator.clipboard.writeText(currentContent());
+                    toast("Note text copied", "success");
+                } catch (e) {
+                    notifyErr("Couldn't copy: " + (e.message || String(e)));
+                }
+            });
+            const recreate = document.createElement("button");
+            recreate.type = "button";
+            recreate.className = "wiki-sync-banner-btn wiki-sync-banner-btn-primary";
+            recreate.textContent = "Save as a new note";
+            recreate.addEventListener("click", async () => {
+                try {
+                    const n = await apiJSON("/console/api/books/personal/pages", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ title: currentTitle(), content: currentContent() }),
+                    });
+                    localState.saveBlocked = false;
+                    localState.note = null;
+                    localState.history.length = 0;
+                    await loadNote(n.id);
+                    refreshList();
+                    window.dispatchEvent(new CustomEvent("familiar:notesChanged"));
+                } catch (e) {
+                    notifyErr("Couldn't save: " + (e.message || String(e)));
+                }
+            });
+            actions.append(copy, recreate);
+            banner.append(msg, actions);
+            bannerHost.appendChild(banner);
+        }
+
         function scheduleSave() {
             if (!localState.note) return;
             // While a conflict is unresolved, keep saying so; "•" read as
@@ -1363,8 +1267,10 @@
         // globe indicator. The endpoint is idempotent server-side so
         // re-enabling returns the same share key.
         async function toggleShareNote() {
-            if (!localState.note) return;
+            if (!localState.note || localState.shareBusy) return;
             const nextEnabled = !localState.note.share;
+            localState.shareBusy = true;
+            shareItem.disabled = true;
             try {
                 const resp = await apiJSON(
                     "/console/api/books/personal/page-by-id/" +
@@ -1396,6 +1302,9 @@
                 updateShareIndicator();
             } catch (e) {
                 notifyErr("Couldn't update share: " + (e.message || String(e)));
+            } finally {
+                localState.shareBusy = false;
+                shareItem.disabled = false;
             }
         }
 
@@ -1404,7 +1313,10 @@
         // that state, but guard anyway).
         async function copyShareLink() {
             const s = localState.note && localState.note.share;
-            if (!s || !s.public_url) return;
+            if (!s || !s.public_url) {
+                notifyErr("Couldn't copy: this note's public link isn't known. Reopen the note and try again.");
+                return;
+            }
             try {
                 await navigator.clipboard.writeText(s.public_url);
                 toast("Public link copied", "success");
@@ -1473,9 +1385,6 @@
                         tuiEditor.setMarkdown(n.content || "");
                     }
                     suppressSave = false;
-                    // Content changed → links may have too. Re-render
-                    // the footer so [[]] additions/removals reflect.
-                    renderPageLinks(n.id);
                 }
                 seedBase(n);
                 // Always refresh the sidebar list (title/order may
@@ -1540,10 +1449,21 @@
                 if (localState.noteId) loadNote(localState.noteId);
             });
 
-            // Flush on page hide.
-            window.addEventListener("beforeunload", () => {
-                if (localState.saveTimer) flushSave(true);
-            });
+            // Send a pending edit when the page goes away or into the
+            // background. The unload save was a plain fetch the browser
+            // cancelled, sent only while the debounce was pending, and
+            // nothing saved when the app was merely backgrounded (a
+            // phone may then discard it).
+            const flushOnHide = () => {
+                if (!localState.note || localState.saveBlocked || !isDirty()) return;
+                if (localState.saveTimer) { clearTimeout(localState.saveTimer); localState.saveTimer = null; }
+                flushSave(true, /*keepalive=*/true);
+            };
+            window.addEventListener("beforeunload", flushOnHide, { signal });
+            window.addEventListener("pagehide", flushOnHide, { signal });
+            document.addEventListener("visibilitychange", () => {
+                if (document.visibilityState === "hidden") flushOnHide();
+            }, { signal });
 
             // Live-refresh when the chat surface modifies a note
             // via tool calls (append_to_note, update_note, etc.).
@@ -1556,7 +1476,7 @@
                     return;
                 }
                 refreshCurrentNote();
-            });
+            }, { signal });
 
             // A pin toggled elsewhere (another notes panel, the Home grid, or
             // the AI) only broadcast familiar:pinsChanged, which notes.js did
@@ -1568,7 +1488,7 @@
                     return;
                 }
                 refreshList();
-            });
+            }, { signal });
 
             // Server-pushed page-saved / page-deleted events. Lets a
             // device idle on a note pick up an edit made on another
@@ -1588,10 +1508,10 @@
                 }
                 if (!localState.note || d.page_id !== localState.note.id) return;
                 if (d.kind === "page-deleted") {
-                    // Page was removed elsewhere. Refreshing the
-                    // list drops the row; closing the editor would
-                    // be more aggressive — leave that to the user.
+                    // Deleted elsewhere: the list drops the row, and the
+                    // editor stops saving and offers the text back.
                     refreshList();
+                    notePageGone();
                     return;
                 }
                 if (d.kind !== "page-saved") return;
@@ -1614,6 +1534,26 @@
                         }, 4000);
                     }
                 });
+            }, { signal });
+        }
+
+        // dispose releases the shell when its tab closes: its window and
+        // document listeners, a pending save timer, and the editor.
+        // What was typed goes first: an edit still in the debounce is
+        // sent now, and the editor is released only once the save chain
+        // (including a re-run for text typed during an in-flight save)
+        // has read it.
+        function dispose() {
+            if (localState.saveTimer) { clearTimeout(localState.saveTimer); localState.saveTimer = null; }
+            if (localState.note && !localState.saveBlocked && isDirty()) flushSave(true);
+            shellAbort.abort();
+            if (sidebarMetaTimer) { clearTimeout(sidebarMetaTimer); sidebarMetaTimer = null; }
+            (localState.savePromise || Promise.resolve()).finally(() => {
+                localState.note = null;
+                if (tuiEditor) {
+                    try { tuiEditor.destroy(); } catch (_) { /* already gone */ }
+                    tuiEditor = null;
+                }
             });
         }
 
@@ -1632,7 +1572,7 @@
             localState.history.length = 0;
             return loadNote(id);
         }
-        return { root, init, refreshList, loadNote: externalLoadNote, newNote, refreshEditor, enterSplash };
+        return { root, init, refreshList, loadNote: externalLoadNote, newNote, refreshEditor, enterSplash, dispose };
     }
 
     // ── Register ──────────────────────────────────────────────
@@ -1674,12 +1614,14 @@
         }
     });
 
-    // Tab closed (or its splash morphed to another surface) — drop
-    // the shell entry so the map doesn't accumulate dead roots.
+    // Tab closed (or its splash morphed to another surface) — release
+    // the shell and drop its entry.
     // Mirrors the wiki surface's listener.
     window.addEventListener("familiar:tabClosed", (ev) => {
         const d = ev.detail || {};
         if (d.surface !== "notes") return;
+        const entry = shells.get(d.tabId);
+        if (entry && entry.model.dispose) entry.model.dispose();
         shells.delete(d.tabId);
     });
 

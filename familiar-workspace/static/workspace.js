@@ -1465,18 +1465,30 @@
         });
     }
 
+    // bucketByParent maps "" to the top-level rows and each id to its
+    // direct children, in list order. A row whose parent isn't in the
+    // list is top-level: pages deleted before deletes moved their
+    // children up left those pointing at them, and walking from the
+    // top never reached them (search could find them; the tree
+    // couldn't). Their row menu offers "Move to top level".
+    function bucketByParent(items) {
+        const ids = new Set(items.map((it) => it.id));
+        const childrenOf = new Map();
+        for (const it of items) {
+            const key = it.parent_id && ids.has(it.parent_id) ? it.parent_id : "";
+            if (!childrenOf.has(key)) childrenOf.set(key, []);
+            childrenOf.get(key).push(it);
+        }
+        return childrenOf;
+    }
+
     // appendWikiPagesTree walks one book's pages and appends rows
     // to host starting at startDepth. Mirrors renderTreeChildren's
     // parent_id-bucketing algorithm; the only difference is each
     // row is tagged with bookSlug so buildChildRow's click handler
     // routes to the page (not a top-level book open).
     function appendWikiPagesTree(host, bookSlug, pages, startDepth) {
-        const childrenOf = new Map();
-        for (const p of pages) {
-            const key = p.parent_id || "";
-            if (!childrenOf.has(key)) childrenOf.set(key, []);
-            childrenOf.get(key).push(p);
-        }
+        const childrenOf = bucketByParent(pages);
         const expanded = getSetFor(sidebarTreeExpanded, "wiki");
         const walk = (parentKey, depth) => {
             const kids = parentsFirst(childrenOf.get(parentKey) || [], childrenOf);
@@ -1730,12 +1742,7 @@
         // Bucket by parent_id (null = top-level) preserving the
         // server's sort_order. childrenOf maps "" → roots, "id" →
         // direct children of that id.
-        const childrenOf = new Map();
-        for (const it of items) {
-            const key = it.parent_id || "";
-            if (!childrenOf.has(key)) childrenOf.set(key, []);
-            childrenOf.get(key).push(it);
-        }
+        const childrenOf = bucketByParent(items);
         const expanded = getSetFor(sidebarTreeExpanded, category);
         const walk = (parentKey, depth) => {
             const kids = parentsFirst(childrenOf.get(parentKey) || [], childrenOf);

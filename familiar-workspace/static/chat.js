@@ -1111,8 +1111,10 @@
         async function openResearchNoteInPane(note) {
             const ws = window.FamiliarWorkspace;
             if (!ws || !note || !note.book_slug || !note.page_slug) return;
-            // The notes surface renders personal notes only.
-            if (note.book_slug.indexOf("personal") !== 0) return;
+            // The notes surface renders personal notes only: "personal"
+            // or "personal:{user}", not any book whose slug starts so
+            // (books can be named "Personal …" now).
+            if (note.book_slug !== "personal" && note.book_slug.indexOf("personal:") !== 0) return;
             let notePage;
             try {
                 notePage = await apiJSON(

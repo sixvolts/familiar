@@ -12,11 +12,9 @@ import (
 	"github.com/familiar/gateway/internal/testutil"
 )
 
-// These tests opt in via FAMILIAR_TEST_DSN and exercise the dedup
-// signal that gateway's summarize.go relies on to skip re-committing
-// facts that already exist as live memories. The queries under test
-// are NearestSimilarity's scope-filtered and scope-less branches plus
-// the Search method's superseded-row exclusion.
+// These tests opt in via FAMILIAR_TEST_DSN and exercise the memory
+// store's search and conflict lookups: superseded-row exclusion, user
+// and scope isolation, and the nearest-fact queries.
 //
 // We insert pre-computed 1024-dim unit vectors on specific axes so
 // cosine similarity is analytic: same axis → 1.0, orthogonal → 0.0.
@@ -130,34 +128,6 @@ func approxEqual(a, b, tol float64) bool {
 	return math.Abs(a-b) < tol
 }
 
-// --- NearestSimilarity empty-input branches --------------------------------
-
-func TestNearestSimilarity_EmptyStore(t *testing.T) {
-	s := setupMemoryStore(t)
-	sim, ok, err := s.NearestSimilarity(context.Background(), axisVec(0), "", "")
-	if err != nil {
-		t.Fatalf("NearestSimilarity: %v", err)
-	}
-	if ok {
-		t.Errorf("empty store returned ok=true, sim=%v", sim)
-	}
-	if sim != 0 {
-		t.Errorf("empty store sim = %v, want 0", sim)
-	}
-}
-
-func TestNearestSimilarity_EmptyVector(t *testing.T) {
-	s := setupMemoryStore(t)
-	insertMemory(t, s, "anything", "session", axisVec(0))
-	sim, ok, err := s.NearestSimilarity(context.Background(), nil, "", "")
-	if err != nil {
-		t.Fatalf("NearestSimilarity(nil): %v", err)
-	}
-	if ok || sim != 0 {
-		t.Errorf("nil vector should short-circuit: got ok=%v sim=%v", ok, sim)
-	}
-}
-
 // A knowledge row whose embedding is NULL (embedder was down at write
 // time) must not break HybridSearch: it should still surface via the
 // FTS arm with a 0 similarity, not fail the whole query when the fused
@@ -227,144 +197,11 @@ func TestNearestLiveFact_ExcludesWikiAndChunks(t *testing.T) {
 		t.Errorf("conflict target = %q, want the knowledge row (wiki/chunk must be excluded)", nf.Content)
 	}
 
-	// NearestSimilarity (NOOP-skip dedup) must not report a ~1.0 match
-	// against the excluded wiki/chunk rows — the nearest eligible row is
-	// the slightly-off knowledge fact.
-	sim, ok, err := s.NearestSimilarity(ctx, q, "", "u1")
-	if err != nil || !ok {
-		t.Fatalf("NearestSimilarity: ok=%v err=%v", ok, err)
-	}
-	if sim > 0.999 {
-		t.Errorf("NearestSimilarity = %v — matched an excluded wiki/chunk row", sim)
-	}
-}
-
-func TestNearestSimilarity_IdenticalVectorIsOne(t *testing.T) {
-	s := setupMemoryStore(t)
-	vec := axisVec(3)
-	insertMemory(t, s, "favorite color is blue", "session", vec)
-
-	sim, ok, err := s.NearestSimilarity(context.Background(), vec, "", "")
-	if err != nil {
-		t.Fatalf("NearestSimilarity: %v", err)
-	}
-	if !ok {
-		t.Fatal("expected ok=true for populated store")
-	}
-	if !approxEqual(sim, 1.0, 1e-5) {
-		t.Errorf("identical vec sim = %v, want ~1.0", sim)
-	}
-}
-
-func TestNearestSimilarity_OrthogonalIsZero(t *testing.T) {
-	s := setupMemoryStore(t)
-	insertMemory(t, s, "stored", "session", axisVec(0))
-
-	sim, ok, err := s.NearestSimilarity(context.Background(), axisVec(1), "", "")
-	if err != nil {
-		t.Fatalf("NearestSimilarity: %v", err)
-	}
-	if !ok {
-		t.Fatal("ok should be true when at least one row exists")
-	}
-	if !approxEqual(sim, 0.0, 1e-5) {
-		t.Errorf("orthogonal sim = %v, want ~0.0", sim)
-	}
-}
-
-func TestNearestSimilarity_PicksClosestOfMany(t *testing.T) {
-	s := setupMemoryStore(t)
-	// Three memories on distinct axes.
-	insertMemory(t, s, "a", "session", axisVec(0))
-	insertMemory(t, s, "b", "session", axisVec(1))
-	insertMemory(t, s, "c", "session", axisVec(2))
-
-	// Query a vector that leans heavily toward axis 1. Nearest should
-	// be memory b with sim ~= the axis-1 component.
-	q := mixVec(1, 2, 0.99, 0.14)
-	sim, ok, err := s.NearestSimilarity(context.Background(), q, "", "")
-	if err != nil {
-		t.Fatalf("NearestSimilarity: %v", err)
-	}
-	if !ok {
-		t.Fatal("ok should be true")
-	}
-	// Cosine sim between normalized q and axisVec(1) = 0.99 / sqrt(.99^2 + .14^2)
-	// which is ~= 0.9902. We just assert we landed in the right ballpark.
-	if sim < 0.9 {
-		t.Errorf("expected nearest to be the axis-1 memory (sim ~0.99), got %v", sim)
-	}
 }
 
 // --- Scope filter ----------------------------------------------------------
 
-func TestNearestSimilarity_ScopeFilterIncludes(t *testing.T) {
-	s := setupMemoryStore(t)
-	insertMemory(t, s, "session fact", "session", axisVec(0))
-	insertMemory(t, s, "permanent fact", "permanent", axisVec(0))
-
-	sim, ok, err := s.NearestSimilarity(context.Background(), axisVec(0), "session", "")
-	if err != nil {
-		t.Fatalf("NearestSimilarity: %v", err)
-	}
-	if !ok || !approxEqual(sim, 1.0, 1e-5) {
-		t.Errorf("scope=session should match: ok=%v sim=%v", ok, sim)
-	}
-}
-
-func TestNearestSimilarity_ScopeFilterExcludes(t *testing.T) {
-	s := setupMemoryStore(t)
-	// Only a "permanent" row exists; a "session"-scoped query should
-	// return no matches even though the vector is identical.
-	insertMemory(t, s, "permanent fact", "permanent", axisVec(0))
-
-	sim, ok, err := s.NearestSimilarity(context.Background(), axisVec(0), "session", "")
-	if err != nil {
-		t.Fatalf("NearestSimilarity: %v", err)
-	}
-	if ok {
-		t.Errorf("scope=session should not match permanent-only store: sim=%v", sim)
-	}
-}
-
 // --- Superseded-row exclusion (the dedup-path guarantee) -------------------
-
-func TestNearestSimilarity_SkipsSupersededRow(t *testing.T) {
-	s := setupMemoryStore(t)
-	// A fact on axis 0 is later superseded by a newer fact on axis 1.
-	// A dedup query on axis 0 must NOT see the old superseded row.
-	oldID := insertMemory(t, s, "old fact", "session", axisVec(0))
-	insertSupersedingMemory(t, s, "new fact", "session", axisVec(1), oldID)
-
-	// Query on axis 0 — the only remaining match should be the new row
-	// on axis 1, so sim ~= 0 (orthogonal), not ~= 1.
-	sim, ok, err := s.NearestSimilarity(context.Background(), axisVec(0), "session", "")
-	if err != nil {
-		t.Fatalf("NearestSimilarity: %v", err)
-	}
-	if !ok {
-		t.Fatal("expected ok=true from the live row")
-	}
-	if sim > 0.5 {
-		t.Errorf("superseded row leaked into dedup query: sim=%v", sim)
-	}
-}
-
-func TestNearestSimilarity_LiveRowStillMatches(t *testing.T) {
-	// Inverse of the above: the NEW row's vector should still match a
-	// query that lines up with IT.
-	s := setupMemoryStore(t)
-	oldID := insertMemory(t, s, "old fact", "session", axisVec(0))
-	insertSupersedingMemory(t, s, "new fact", "session", axisVec(1), oldID)
-
-	sim, ok, err := s.NearestSimilarity(context.Background(), axisVec(1), "session", "")
-	if err != nil {
-		t.Fatalf("NearestSimilarity: %v", err)
-	}
-	if !ok || !approxEqual(sim, 1.0, 1e-5) {
-		t.Errorf("live row should match: ok=%v sim=%v", ok, sim)
-	}
-}
 
 // --- Search() superseded exclusion ----------------------------------------
 //
@@ -473,26 +310,6 @@ func TestSearch_EmptyUserIDReturnsGlobalOnly(t *testing.T) {
 	}
 	if len(results) != 1 || results[0].Content != "global fact" {
 		t.Errorf("empty userID should return only global: %+v", results)
-	}
-}
-
-func TestNearestSimilarity_UserScoped(t *testing.T) {
-	s := setupMemoryStore(t)
-	// Bob's row on axis 0, global on axis 1. Alice querying axis 0
-	// must not see Bob's row — the nearest live match from Alice's
-	// perspective is the orthogonal global fact on axis 1.
-	insertUserMemory(t, s, "bob axis0", "session", axisVec(0), "bob")
-	insertUserMemory(t, s, "global axis1", "session", axisVec(1), "")
-
-	sim, ok, err := s.NearestSimilarity(context.Background(), axisVec(0), "", "alice")
-	if err != nil {
-		t.Fatalf("NearestSimilarity: %v", err)
-	}
-	if !ok {
-		t.Fatal("expected ok=true (global row is visible)")
-	}
-	if sim > 0.5 {
-		t.Errorf("alice saw bob's high-similarity row: sim=%v", sim)
 	}
 }
 

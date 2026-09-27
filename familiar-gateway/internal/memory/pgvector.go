@@ -42,7 +42,6 @@ type MemoryResult struct {
 type MemoryStore interface {
 	Search(ctx context.Context, vector []float32, limit int, threshold float64, userID string) ([]MemoryResult, error)
 	HybridSearch(ctx context.Context, queryText string, vector []float32, limit int, threshold float64, userID string) ([]MemoryResult, error)
-	NearestSimilarity(ctx context.Context, vector []float32, scope string, userID string) (float64, bool, error)
 	NearestLiveFacts(ctx context.Context, vector []float32, userID, scopeTag string, limit int) ([]NearestFact, error)
 	ReinforceFacts(ctx context.Context, ids []string) error
 	Close() error
@@ -357,55 +356,6 @@ func parseVector(s string) ([]float32, error) {
 		out = append(out, float32(f))
 	}
 	return out, nil
-}
-
-// NearestSimilarity returns the cosine similarity of the single most
-// similar live memory (non-superseded) to the query vector, scoped to
-// an optional scope filter. Returns (0, false, nil) when the store is
-// empty or no live candidates match. Used by the extraction pipeline to
-// NOOP-skip facts that duplicate something already in memory.
-func (s *PgVectorStore) NearestSimilarity(ctx context.Context, vector []float32, scope string, userID string) (float64, bool, error) {
-	if len(vector) == 0 {
-		return 0, false, nil
-	}
-	vecStr := vectorToString(vector)
-
-	// user_id predicate mirrors Search: global rows + the caller's own.
-	// The scope filter is orthogonal and optional.
-	var query string
-	var args []any
-	if scope != "" {
-		query = `SELECT 1 - (embedding <=> $1::vector) AS similarity
-		         FROM memories m
-		         WHERE embedding IS NOT NULL
-		           AND source_type NOT IN ('conversation', 'wiki_page')
-		           AND scope = $2
-		           AND NOT EXISTS (SELECT 1 FROM memories s WHERE s.supersedes = m.id)
-		           AND (user_id IS NULL OR user_id = $3)
-		         ORDER BY embedding <=> $1::vector
-		         LIMIT 1`
-		args = []any{vecStr, scope, userID}
-	} else {
-		query = `SELECT 1 - (embedding <=> $1::vector) AS similarity
-		         FROM memories m
-		         WHERE embedding IS NOT NULL
-		           AND source_type NOT IN ('conversation', 'wiki_page')
-		           AND NOT EXISTS (SELECT 1 FROM memories s WHERE s.supersedes = m.id)
-		           AND (user_id IS NULL OR user_id = $2)
-		         ORDER BY embedding <=> $1::vector
-		         LIMIT 1`
-		args = []any{vecStr, userID}
-	}
-
-	var sim float64
-	err := s.db.QueryRowContext(ctx, query, args...).Scan(&sim)
-	if err == sql.ErrNoRows {
-		return 0, false, nil
-	}
-	if err != nil {
-		return 0, false, fmt.Errorf("pgvector nearest: %w", err)
-	}
-	return sim, true, nil
 }
 
 // NearestLiveFact returns the single most similar non-superseded memory

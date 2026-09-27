@@ -160,9 +160,6 @@ func (stubMemStore) Search(ctx context.Context, vector []float32, limit int, thr
 func (stubMemStore) HybridSearch(ctx context.Context, queryText string, vector []float32, limit int, threshold float64, userID string) ([]memory.MemoryResult, error) {
 	return nil, nil
 }
-func (stubMemStore) NearestSimilarity(ctx context.Context, vector []float32, scope string, userID string) (float64, bool, error) {
-	return 0, false, nil
-}
 func (stubMemStore) NearestLiveFacts(ctx context.Context, vector []float32, userID, scopeTag string, limit int) ([]memory.NearestFact, error) {
 	return nil, nil
 }

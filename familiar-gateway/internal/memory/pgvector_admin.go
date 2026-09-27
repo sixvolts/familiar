@@ -16,35 +16,29 @@ import (
 // actually inspects (ID + content + owner) so a full backfill scan
 // does not allocate the entire MemoryRow surface for 750+ rows.
 type BackfillItem struct {
-	ID      string
-	Content string
-	UserID  string
+	ID       string
+	Content  string
+	UserID   string
+	ScopeTag string
 }
 
-// ListForBackfill returns every curated memory eligible for the
-// relationship extraction backfill: non-superseded, non-session-scope,
-// and not a raw conversation snippet. When userID is empty the scan
-// returns global rows (user_id IS NULL) only; otherwise it returns
-// rows owned by that canonical user. Results are ordered oldest-first
-// so resumable runs cover the backlog deterministically.
+// ListForBackfill returns a user's curated memories eligible for the
+// relationship backfill, with their scope tags, oldest first. A user
+// is required: memories always have an owner, and the old "global
+// rows" scan for an empty user matched nothing.
 func (s *PgVectorStore) ListForBackfill(ctx context.Context, userID string) ([]BackfillItem, error) {
-	var (
-		rows *sql.Rows
-		err  error
-	)
-	base := `
-		SELECT m.id::text, m.content, COALESCE(m.user_id, '')
+	if userID == "" {
+		return nil, fmt.Errorf("memory: list for backfill: user required")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT m.id::text, m.content, COALESCE(m.user_id, ''), COALESCE(m.scope_tag, '')
 		FROM memories m
 		WHERE NOT EXISTS (SELECT 1 FROM memories s WHERE s.supersedes = m.id)
 		  AND COALESCE(m.scope,'') <> 'session'
 		  AND COALESCE(m.source_type,'') <> 'conversation'
 		  AND m.content <> ''
-	`
-	if userID == "" {
-		rows, err = s.db.QueryContext(ctx, base+` AND m.user_id IS NULL ORDER BY m.created_at ASC`)
-	} else {
-		rows, err = s.db.QueryContext(ctx, base+` AND m.user_id = $1 ORDER BY m.created_at ASC`, userID)
-	}
+		  AND m.user_id = $1
+		ORDER BY m.created_at ASC`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("memory: list for backfill: %w", err)
 	}
@@ -52,7 +46,7 @@ func (s *PgVectorStore) ListForBackfill(ctx context.Context, userID string) ([]B
 	var out []BackfillItem
 	for rows.Next() {
 		var it BackfillItem
-		if err := rows.Scan(&it.ID, &it.Content, &it.UserID); err != nil {
+		if err := rows.Scan(&it.ID, &it.Content, &it.UserID, &it.ScopeTag); err != nil {
 			return nil, fmt.Errorf("memory: scan backfill row: %w", err)
 		}
 		out = append(out, it)
@@ -527,7 +521,8 @@ func (s *PgVectorStore) ListVersions(ctx context.Context, memoryID string) ([]Me
 // nil CLEARS the stored vector rather than silently keeping the old
 // one — a stale embedding makes the row retrieve like its former text,
 // which is worse than temporarily dropping out of dense search (FTS
-// still matches). Returns ErrMemoryNotFound if the row doesn't exist.
+// still matches) — and queues the row for re-embedding. Returns
+// ErrMemoryNotFound if the row doesn't exist.
 func (s *PgVectorStore) UpdateMemoryContent(ctx context.Context, id, newContent, changedBy string, embedding []float32) error {
 	// Fetch current state for the version snapshot.
 	row, err := s.GetMemory(ctx, id)
@@ -569,6 +564,17 @@ func (s *PgVectorStore) UpdateMemoryContent(ctx context.Context, id, newContent,
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrMemoryNotFound
+	}
+	// No vector for the new text (the embedder was down): queue the row
+	// for the re-embed sweep, as a fact written without one is. Only the
+	// queue is swept, so without this the edited row had no vector for
+	// good and dense search never found it again.
+	if vec == nil {
+		if _, err := s.db.ExecContext(ctx, `
+			INSERT INTO pending_embeds (memory_id) VALUES ($1::uuid)
+			ON CONFLICT (memory_id) DO UPDATE SET attempts = 0`, id); err != nil {
+			return fmt.Errorf("memory: queue re-embed: %w", err)
+		}
 	}
 
 	// Record the new content as the next version.
@@ -617,11 +623,17 @@ func (s *PgVectorStore) ChainForMemory(ctx context.Context, id string) ([]Memory
 	return out, rows.Err()
 }
 
-// CollapseChain deletes every superseded row in id's chain, keeping
-// only the live tip (whose dangling supersedes pointer is cleared).
-// The version history already carries the lineage; collapse is for
-// pruning a long chain once its intermediate states stop mattering.
-// Returns the number of rows deleted and the surviving tip's id.
+// CollapseChain deletes the superseded rows in id's chain (the ones
+// another row points at), keeping every live row. The version history
+// already carries the lineage; collapse is for pruning a long chain
+// once its intermediate states stop mattering. Returns the number of
+// rows deleted and a surviving live row's id (id itself if it's live).
+//
+// A chain can branch: sleep dedup or two concurrent extractions can
+// point two newer rows at one older row, so it has several live heads.
+// Treating "the last live row" as the only survivor deleted the other
+// live heads, and a collapse started from one head left the other's
+// pointer at a deleted row (a foreign-key error, 500).
 func (s *PgVectorStore) CollapseChain(ctx context.Context, id string) (int64, string, error) {
 	chain, err := s.ChainForMemory(ctx, id)
 	if err != nil {
@@ -630,53 +642,41 @@ func (s *PgVectorStore) CollapseChain(ctx context.Context, id string) (int64, st
 	if len(chain) == 0 {
 		return 0, "", ErrMemoryNotFound
 	}
-	// The tip is the row nothing points at; ChainForMemory orders
-	// oldest→newest so scan from the end for determinism if a
-	// branchy chain has several live heads.
 	tip := ""
+	var doomed []string
 	for i := len(chain) - 1; i >= 0; i-- {
-		if !chain[i].Superseded {
+		if chain[i].Superseded {
+			doomed = append(doomed, chain[i].ID)
+		} else if tip == "" || chain[i].ID == id {
 			tip = chain[i].ID
-			break
 		}
 	}
-	if tip == "" || len(chain) == 1 {
+	if tip == "" || len(doomed) == 0 {
 		// Nothing superseded to prune (single live row, or a cycle
 		// where every row reads as replaced — leave that for repair).
 		return 0, tip, nil
 	}
 	// One transaction for the whole collapse: the supersedes FK is
-	// self-referential, so pointers must be cleared across the chain
-	// before any member can be deleted, and doing the unlink and the
-	// deletes as separate autocommit statements meant a failure between
-	// them left every pointer cleared but nothing deleted — resurfacing
-	// every previously-hidden superseded fact with the chain structure
-	// unrecoverable. Inside a tx the intermediate unlinked-but-present
-	// state is never visible and any error rolls the whole thing back.
+	// self-referential, so pointers into the doomed rows must be
+	// cleared before they can be deleted, and a failure between the
+	// unlink and the deletes must not leave hidden facts resurfaced.
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, tip, fmt.Errorf("memory: collapse begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-
-	var deleted int64
-	for _, row := range chain {
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE memories SET supersedes = NULL, updated_at = NOW() WHERE id = $1::uuid`, row.ID); err != nil {
-			return 0, tip, fmt.Errorf("memory: collapse unlink %s: %w", row.ID, err)
-		}
+	// Every row pointing at a doomed row, in the chain or not (a sibling
+	// head the walk from here didn't reach).
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE memories SET supersedes = NULL, updated_at = NOW()
+		 WHERE supersedes = ANY($1::uuid[])`, pq.Array(doomed)); err != nil {
+		return 0, tip, fmt.Errorf("memory: collapse unlink: %w", err)
 	}
-	for _, row := range chain {
-		if row.ID == tip {
-			continue
-		}
-		res, err := tx.ExecContext(ctx, `DELETE FROM memories WHERE id = $1::uuid`, row.ID)
-		if err != nil {
-			return 0, tip, fmt.Errorf("memory: collapse delete %s: %w", row.ID, err)
-		}
-		n, _ := res.RowsAffected()
-		deleted += n
+	res, err := tx.ExecContext(ctx, `DELETE FROM memories WHERE id = ANY($1::uuid[])`, pq.Array(doomed))
+	if err != nil {
+		return 0, tip, fmt.Errorf("memory: collapse delete: %w", err)
 	}
+	deleted, _ := res.RowsAffected()
 	if err := tx.Commit(); err != nil {
 		return 0, tip, fmt.Errorf("memory: collapse commit: %w", err)
 	}
@@ -827,13 +827,15 @@ type GrowthPoint struct {
 	EntityCount int    `json:"entity_count"`
 }
 
-// CountFactsForUser returns the number of non-superseded memory rows
-// owned by userID. includeShards controls whether scope_tag-prefixed
+// CountFactsForUser returns the number of non-superseded knowledge rows
+// owned by userID (conversation chunks are transcript, not facts: they
+// made the header mostly a count of chat turns). includeShards controls whether scope_tag-prefixed
 // rows (written by a shard, scope_tag = 'shard:<id>') count. Default
 // false keeps the "933 facts" header honest on shard-heavy users.
 func (s *PgVectorStore) CountFactsForUser(ctx context.Context, userID string, includeShards bool) (int, error) {
 	q := `SELECT COUNT(*) FROM memories m
 	      WHERE m.user_id = $1
+	        AND COALESCE(m.source_type,'') <> 'conversation'
 	        AND NOT EXISTS (SELECT 1 FROM memories sup WHERE sup.supersedes = m.id)`
 	if !includeShards {
 		q += ` AND m.scope_tag IS NULL`
@@ -845,8 +847,8 @@ func (s *PgVectorStore) CountFactsForUser(ctx context.Context, userID string, in
 	return n, nil
 }
 
-// RecentFactsForUser returns the N newest non-superseded memories for
-// userID, ordered created_at DESC. Mirrors ListMemories' return shape
+// RecentFactsForUser returns the N newest non-superseded knowledge rows
+// for userID (no conversation chunks), ordered created_at DESC. Mirrors ListMemories' return shape
 // so the dashboard card and the full memory panel render from the
 // same DTO. Limit is clamped to [1, 50] — the dashboard card only
 // renders five at a time, but callers may ask for more.
@@ -866,6 +868,7 @@ func (s *PgVectorStore) RecentFactsForUser(ctx context.Context, userID string, l
 		       (m.embedding IS NOT NULL) AS has_embed
 		FROM memories m
 		WHERE m.user_id = $1
+		  AND COALESCE(m.source_type,'') <> 'conversation'
 		  AND NOT EXISTS (SELECT 1 FROM memories sup WHERE sup.supersedes = m.id)
 	`
 	if !includeShards {
@@ -895,7 +898,8 @@ func (s *PgVectorStore) RecentFactsForUser(ctx context.Context, userID string, l
 
 // GrowthSparkline returns a daily snapshot of fact and entity counts
 // for the last `days` days. Day boundaries are UTC. Fact count is
-// non-superseded top-level memories (scope_tag IS NULL) at end-of-day;
+// non-superseded top-level knowledge rows (scope_tag IS NULL, no
+// conversation chunks) at end-of-day;
 // entity count is distinct entities across the user's relationship
 // rows. The series always runs from (today-days+1) to today, inclusive,
 // with zero-filled rows for days where the user had no data yet.
@@ -925,6 +929,7 @@ func (s *PgVectorStore) GrowthSparkline(ctx context.Context, userID string, days
 		       (SELECT COUNT(*) FROM memories m
 		        WHERE m.user_id = $1
 		          AND m.scope_tag IS NULL
+		          AND COALESCE(m.source_type,'') <> 'conversation'
 		          AND m.created_at < (d + interval '1 day')
 		          AND NOT EXISTS (SELECT 1 FROM memories sup WHERE sup.supersedes = m.id))
 		FROM day_series

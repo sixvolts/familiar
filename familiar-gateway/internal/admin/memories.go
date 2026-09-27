@@ -574,10 +574,3 @@ func parseMemoryFilter(r *http.Request) (memory.MemoryFilter, int, int) {
 	offset, _ := strconv.Atoi(q.Get("offset"))
 	return f, limit, offset
 }
-
-// mustJSON is used by tests and tooling; not wired here. Kept as a
-// helper so future endpoints can share encoding behaviour.
-func mustJSON(v any) []byte {
-	b, _ := json.Marshal(v)
-	return b
-}

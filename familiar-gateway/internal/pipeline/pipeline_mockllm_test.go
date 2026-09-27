@@ -69,10 +69,6 @@ func (r *recordingStore) HybridSearch(ctx context.Context, _ string, vec []float
 	return r.Search(ctx, vec, limit, threshold, userID)
 }
 
-func (r *recordingStore) NearestSimilarity(_ context.Context, _ []float32, _ string, _ string) (float64, bool, error) {
-	return 0, false, nil
-}
-
 func (r *recordingStore) NearestLiveFacts(_ context.Context, _ []float32, _, _ string, _ int) ([]memory.NearestFact, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

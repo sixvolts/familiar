@@ -114,7 +114,7 @@ func (s *PgRelationshipStore) UpsertRelationships(ctx context.Context, rels []Re
 			    updated_at  = EXCLUDED.updated_at
 			WHERE relationships.scope_tag IS NOT DISTINCT FROM EXCLUDED.scope_tag
 			   OR EXCLUDED.scope_tag IS NULL`,
-			strings.ToLower(r.Subject), strings.ToLower(r.Predicate), r.Object,
+			strings.ToLower(r.Subject), strings.ToLower(r.Predicate), strings.ToLower(r.Object),
 			userArg, sourceArg, conf, scopeArg, now)
 		if err != nil {
 			return fmt.Errorf("upsert relationship (%s, %s): %w", r.Subject, r.Predicate, err)
@@ -123,13 +123,56 @@ func (s *PgRelationshipStore) UpsertRelationships(ctx context.Context, rels []Re
 	return nil
 }
 
-// RelatedForContents returns triples whose subject appears as a
-// substring of any content in the provided slice. Used by the
+// InsertRelationshipsIfAbsent adds the triples that aren't stored yet
+// (by subject, predicate and owner, lowercased like
+// UpsertRelationships) and leaves existing ones alone, reporting how
+// many it added. The relationship backfill uses it: a re-run
+// upserting its extraction reset every edge the user had re-weighted
+// or re-pointed in the graph editor.
+func (s *PgRelationshipStore) InsertRelationshipsIfAbsent(ctx context.Context, rels []Relationship) (int, error) {
+	added := 0
+	for _, r := range rels {
+		if r.Subject == "" || r.Predicate == "" || r.Object == "" {
+			continue
+		}
+		var userArg, sourceArg, scopeArg any
+		if r.UserID != "" {
+			userArg = r.UserID
+		}
+		if r.SourceFact != "" {
+			sourceArg = r.SourceFact
+		}
+		if r.ScopeTag != "" {
+			scopeArg = r.ScopeTag
+		}
+		conf := r.Confidence
+		if conf <= 0 {
+			conf = 1.0
+		}
+		res, err := s.db.ExecContext(ctx, `
+			INSERT INTO relationships (subject, predicate, object, user_id, source_fact, confidence, scope_tag, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5::uuid, $6, $7, NOW(), NOW())
+			ON CONFLICT (subject, predicate, user_id_key) DO NOTHING`,
+			strings.ToLower(r.Subject), strings.ToLower(r.Predicate), strings.ToLower(r.Object),
+			userArg, sourceArg, conf, scopeArg)
+		if err != nil {
+			return added, fmt.Errorf("insert relationship (%s, %s): %w", r.Subject, r.Predicate, err)
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			added++
+		}
+	}
+	return added, nil
+}
+
+// RelatedForContents returns triples whose subject appears as a whole
+// word (or words) in any content in the provided slice. Used by the
 // retrieval path to attach one-hop structured context to the
-// vector-search results. Matching is case-insensitive and anchored on
-// word boundaries via ILIKE '%' || subject || '%', which is cheap on
-// small content lists and correct enough for entity names extracted
-// in lowercase form by UpsertRelationships.
+// vector-search results. Matching is case-insensitive, on word
+// boundaries, for subjects of at least 3 characters (the entity
+// vocabulary's floor). A plain substring test matched "ai" inside
+// "said" and "art" inside "start", filling every prompt's graph budget
+// with unrelated triples.
 //
 // limit caps the number of triples returned; callers should use a
 // small value (10-20) because the block is injected into the LLM
@@ -149,7 +192,8 @@ func (s *PgRelationshipStore) RelatedForContents(ctx context.Context, contents [
 		SELECT r.subject, r.predicate, r.object
 		FROM relationships r
 		WHERE `+recallVisible("r", "$1")+`
-		  AND position(r.subject IN $2) > 0
+		  AND length(r.subject) >= 3
+		  AND $2 ~* ('\m' || regexp_replace(r.subject, '([^[:alnum:]_ ])', '\\\1', 'g') || '\M')
 		ORDER BY r.updated_at DESC
 		LIMIT $3`,
 		userID, haystack, limit)
@@ -281,75 +325,6 @@ func (s *PgRelationshipStore) ListDistinctEntities(ctx context.Context, userID s
 		out[ent] += count
 	}
 	return out, rows.Err()
-}
-
-// MergeEntity rewrites every triple owned by userID so that any
-// appearance of one of the aliases as a subject or an object is replaced
-// by the canonical name. Runs in a single transaction so a partial
-// merge can't leave the graph half-rewritten. Returns the number of
-// rows affected across both updates.
-//
-// Callers are responsible for deduping: two triples that collapse to
-// the same (subject, predicate, object) after the rewrite will still
-// exist as separate rows because the unique index is on
-// (subject, predicate, user_id_key) only — the object is free, so an
-// update from "rune" → "host-a" can't conflict with a pre-existing
-// "host-a has_ip X" row. A follow-up DELETE on exact duplicates is run
-// at the end of the transaction to clean those up.
-func (s *PgRelationshipStore) MergeEntity(ctx context.Context, userID string, canonical string, aliases []string) (int64, error) {
-	if canonical == "" || len(aliases) == 0 {
-		return 0, nil
-	}
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, fmt.Errorf("merge entity: begin: %w", err)
-	}
-	defer tx.Rollback()
-
-	var userFilter string
-	args := []any{canonical, aliases}
-	if userID == "" {
-		userFilter = "user_id IS NULL"
-	} else {
-		userFilter = "(user_id IS NULL OR user_id = $3)"
-		args = append(args, userID)
-	}
-
-	subjRes, err := tx.ExecContext(ctx,
-		`UPDATE relationships SET subject = $1, updated_at = NOW()
-		 WHERE subject = ANY($2) AND `+userFilter, args...)
-	if err != nil {
-		return 0, fmt.Errorf("merge entity: subject update: %w", err)
-	}
-	subjN, _ := subjRes.RowsAffected()
-
-	objRes, err := tx.ExecContext(ctx,
-		`UPDATE relationships SET object = $1, updated_at = NOW()
-		 WHERE object = ANY($2) AND `+userFilter, args...)
-	if err != nil {
-		return 0, fmt.Errorf("merge entity: object update: %w", err)
-	}
-	objN, _ := objRes.RowsAffected()
-
-	// Collapse exact duplicates the rewrite may have produced. Keep the
-	// oldest row (MIN(ctid)) so source_fact provenance sticks with the
-	// first triple extracted, not the most recently rewritten one.
-	if _, err := tx.ExecContext(ctx, `
-		DELETE FROM relationships a
-		USING relationships b
-		WHERE a.ctid > b.ctid
-		  AND a.subject = b.subject
-		  AND a.predicate = b.predicate
-		  AND a.object = b.object
-		  AND COALESCE(a.user_id::text, '') = COALESCE(b.user_id::text, '')`); err != nil {
-		return 0, fmt.Errorf("merge entity: dedupe: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("merge entity: commit: %w", err)
-	}
-	return subjN + objN, nil
 }
 
 // EntityVocab is an in-memory cache of every distinct entity name
@@ -1035,8 +1010,10 @@ func (s *PgRelationshipStore) OrphanEdges(ctx context.Context, userID string) (i
 
 // DeleteEntity removes all relationships where the entity name
 // appears as either subject or object, scoped to the given user.
-// Returns the number of deleted rows.
+// Returns the number of deleted rows. Entity names are lowercase, as
+// every other lookup assumes.
 func (s *PgRelationshipStore) DeleteEntity(ctx context.Context, name, userID string) (int64, error) {
+	name = strings.ToLower(strings.TrimSpace(name))
 	res, err := s.db.ExecContext(ctx,
 		`DELETE FROM relationships WHERE user_id = $1 AND (subject = $2 OR object = $2)`,
 		userID, name)

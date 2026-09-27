@@ -132,3 +132,15 @@ test("a failed diagram doesn't take the next one down with it", async () => {
     expect(env.removed.sort()).toEqual(["dfamiliar-mmd-1", "familiar-mmd-1"]);
     expect(good.innerHTML).toBe("<svg></svg>");
 });
+
+// Rich Text writes a code block back with a fence no line inside it
+// can close: Toast UI always wrote ```, which broke any block showing
+// fenced code.
+test("code blocks are written back with a fence their content can't close", () => {
+    const { fm } = load();
+    expect(fm.fenceFor("plain code")).toBe("```");
+    expect(fm.fenceFor("```mermaid\ngraph TD; A-->B;\n```")).toBe("````");
+    expect(fm.fenceFor("  ````\nx")).toBe("`````");
+    expect(fm.fenceFor("a ``` in the middle")).toBe("```");
+    expect(fm.fenceFor("    ```` indented four is code, not a fence")).toBe("```");
+});

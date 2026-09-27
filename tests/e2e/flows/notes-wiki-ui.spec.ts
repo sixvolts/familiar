@@ -463,6 +463,34 @@ test("Add diagram opens the new fence on a page with other diagrams", async ({ s
     }
 });
 
+// A Rich Text edit keeps a block that shows fenced code intact. The
+// editor wrote every code block back with ```, so the ```mermaid example
+// inside a ````markdown block closed it early: the example became a
+// real diagram and every fence after it shifted.
+test("a Rich Text edit keeps a block showing fenced code intact", async ({ stack, browser, request }) => {
+    const user = await createTestUser();
+    const example = "````markdown\n```mermaid\ngraph TD; EX-->AMPLE;\n```\n````";
+    const real = "```Mermaid\ngraph TD; REAL-->ONE;\n```";
+    const note = await createNote(request, stack, user, "Fenced", `intro\n\n${example}\n\n${real}\n`);
+    const { ctx, page } = await newPage(browser, stack, user);
+    try {
+        const { editor } = await openNote(page, note.id);
+        await editor.locator("p", { hasText: "intro" }).click();
+        await page.keyboard.press("End");
+        await page.keyboard.type("X");
+        await expect.poll(async () => (await getNote(request, stack, user, note.id)).content, { timeout: 10_000 })
+            .toContain("introX");
+        const saved: string = (await getNote(request, stack, user, note.id)).content;
+        expect(saved).toContain(example);
+        expect(saved).toContain(real);
+        const fences = await page.evaluate((md) =>
+            (window as any).familiarMermaid.fences(md).map((f: any) => f.body.trim()), saved);
+        expect(fences).toEqual(["graph TD; REAL-->ONE;"]);
+    } finally {
+        await ctx.close();
+    }
+});
+
 async function createBook(api: APIRequestContext, stack: GatewayStack, user: TestUser, name: string) {
     const r = await api.post(`${stack.workspaceURL}/console/api/books`, { headers: hdrs(user), data: { name } });
     expect(r.ok(), `create book: HTTP ${r.status()}`).toBeTruthy();

@@ -162,12 +162,39 @@
     MermaidWWView.prototype.ignoreMutation = function () { return true; };
     MermaidWWView.prototype.stopEvent = function () { return true; };
 
-    // editorPlugin is passed in Toast UI's `plugins` option. Only
-    // mermaid code blocks get the custom view; returning null falls
-    // back to the default editable code block for every other
-    // language.
+    // fenceFor picks the fence for a code block's text: longer than any
+    // run of backticks opening one of its lines, so none of them closes
+    // the block (CommonMark). Toast UI wrote ``` for every block, so a
+    // block showing fenced code (a ```mermaid example inside
+    // ````markdown) came back broken from any Rich Text edit: its inner
+    // fence closed it early, the example became a real diagram, and
+    // every fence after it shifted.
+    function fenceFor(text) {
+        var longest = 0;
+        String(text || "").split("\n").forEach(function (line) {
+            var m = /^ {0,3}(`+)/.exec(line);
+            if (m && m[1].length > longest) longest = m[1].length;
+        });
+        return new Array(Math.max(3, longest + 1) + 1).join("`");
+    }
+
+    // editorPlugin is passed in Toast UI's `plugins` option (every
+    // notes and wiki editor, desktop and mobile). Only mermaid code
+    // blocks get the custom view; returning null falls back to the
+    // default editable code block for every other language. It also
+    // owns how Rich Text code blocks are written back as markdown.
     function editorPlugin() {
         return {
+            toMarkdownRenderers: {
+                codeBlock: function (nodeInfo, context) {
+                    var out = context.origin();
+                    var node = nodeInfo.node;
+                    var fence = fenceFor(node.textContent);
+                    var lang = (node.attrs && node.attrs.language) || "";
+                    out.delim = [fence + lang, fence];
+                    return out;
+                },
+            },
             wysiwygNodeViews: {
                 codeBlock: function (node, view, getPos) {
                     var lang = String((node.attrs && node.attrs.language) || "").toLowerCase();
@@ -377,6 +404,7 @@
         renderBlock: renderBlock,
         observe: observe,
         editorPlugin: editorPlugin,
+        fenceFor: fenceFor,
         syncShareRenders: syncShareRenders,
         fences: mermaidFences,
     };

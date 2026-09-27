@@ -146,16 +146,11 @@ func (s *PgRelationshipStore) RelatedForContents(ctx context.Context, contents [
 	haystack := strings.ToLower(strings.Join(contents, "\n"))
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT subject, predicate, object
-		FROM relationships
-		WHERE (user_id IS NULL OR user_id = $1)
-		  AND position(subject IN $2) > 0
-		  AND (scope_tag IS NULL
-		       OR NOT EXISTS (SELECT 1 FROM shards sh
-		                       WHERE sh.scope_tag = relationships.scope_tag
-		                         AND sh.owner_id = relationships.user_id
-		                         AND sh.visibility = 'isolated'))
-		ORDER BY updated_at DESC
+		SELECT r.subject, r.predicate, r.object
+		FROM relationships r
+		WHERE `+recallVisible("r", "$1")+`
+		  AND position(r.subject IN $2) > 0
+		ORDER BY r.updated_at DESC
 		LIMIT $3`,
 		userID, haystack, limit)
 	if err != nil {
@@ -215,22 +210,12 @@ func (s *PgRelationshipStore) TraverseFrom(ctx context.Context, entity string, u
 			FROM relationships r
 			JOIN frontier f ON (r.subject = f.entity OR r.object = f.entity)
 			WHERE f.depth < $3
-			  AND (r.user_id IS NULL OR r.user_id = $2)
-			  AND (r.scope_tag IS NULL
-			       OR NOT EXISTS (SELECT 1 FROM shards sh
-			                       WHERE sh.scope_tag = r.scope_tag
-			                         AND sh.owner_id = r.user_id
-			                         AND sh.visibility = 'isolated'))
+			  AND `+recallVisible("r", "$2")+`
 		)
 		SELECT DISTINCT r.subject, r.predicate, r.object
 		FROM relationships r
 		JOIN frontier f ON (r.subject = f.entity OR r.object = f.entity)
-		WHERE (r.user_id IS NULL OR r.user_id = $2)
-		  AND (r.scope_tag IS NULL
-		       OR NOT EXISTS (SELECT 1 FROM shards sh
-		                       WHERE sh.scope_tag = r.scope_tag
-		                         AND sh.owner_id = r.user_id
-		                         AND sh.visibility = 'isolated'))
+		WHERE `+recallVisible("r", "$2")+`
 		ORDER BY r.subject, r.predicate
 		LIMIT $4`,
 		entity, userID, depth, limit)

@@ -9,7 +9,8 @@
 //     result in one transaction (Engine.ReplaceSourceFacts), with
 //     scope_tag = "book:{id}", source_type = "wiki_page", source_ref =
 //     "page:{page_id}". A failed or timed-out extraction leaves the
-//     page's existing facts alone.
+//     page's existing facts alone. Every current member of the book
+//     recalls them (and its triples), whoever saved the page.
 //  3. Upsert any extracted entity-relationship triples into
 //     relationships, again carrying the book scope_tag.
 //  4. For every resolved [[]] outbound link on this page, emit
@@ -473,6 +474,9 @@ func (p *Pipeline) buildFacts(ctx context.Context, evt SaveEvent, scopeTag, sour
 		if f.Category != "" {
 			tags = append(tags, f.Category)
 		}
+		// UserId is the saver, who owns the row (console, dedup);
+		// recall of a "book:" row follows the book's current
+		// membership, not this id (memory.recallVisible).
 		pbFacts = append(pbFacts, &pb.FactProto{
 			Id:                uuid.NewString(),
 			Content:           content,

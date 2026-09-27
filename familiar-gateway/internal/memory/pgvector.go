@@ -75,6 +75,32 @@ func NewPgVectorStore(pool *db.Pool) (*PgVectorStore, error) {
 	return &PgVectorStore{db: pool}, nil
 }
 
+// recallVisible is the recall predicate for a memories or relationships
+// row aliased a, for the user bound at parameter u:
+//   - a wiki row (scope_tag "book:{id}") is visible to the book's current
+//     members, whoever saved the page. It was keyed to the saver's user
+//     id alone, so only the member who last saved a page recalled its
+//     facts (the other stopped when one saved), and a member removed
+//     from the book kept recalling the pages they had saved.
+//   - any other row: global (no owner) or the user's own, except rows
+//     tagged to one of the owner's isolated shards.
+//
+// Recall only: the console, the dedup and conflict lookups, and shard
+// sessions (confined to their own scope tag) stay owner-scoped.
+func recallVisible(a, u string) string {
+	return `(CASE WHEN ` + a + `.scope_tag LIKE 'book:%'
+	    THEN EXISTS (SELECT 1 FROM book_members bm
+	                  WHERE bm.user_id = ` + u + `
+	                    AND ` + a + `.scope_tag = 'book:' || bm.book_id::text)
+	    ELSE (` + a + `.user_id IS NULL OR ` + a + `.user_id = ` + u + `)
+	     AND (` + a + `.scope_tag IS NULL
+	          OR NOT EXISTS (SELECT 1 FROM shards sh
+	                          WHERE sh.scope_tag = ` + a + `.scope_tag
+	                            AND sh.owner_id = ` + a + `.user_id
+	                            AND sh.visibility = 'isolated'))
+	    END)`
+}
+
 // Search finds memories similar to the given query vector.
 // Returns results above the similarity threshold, ordered by relevance.
 //
@@ -114,14 +140,7 @@ func (s *PgVectorStore) Search(ctx context.Context, vector []float32, limit int,
 		   AND 1 - (embedding <=> $1::vector) > $2
 		   AND source_type != 'conversation'
 		   AND NOT EXISTS (SELECT 1 FROM memories s WHERE s.supersedes = m.id)
-		   AND (user_id IS NULL OR user_id = $4)
-		   AND (m.scope_tag IS NULL
-		        OR NOT EXISTS (
-		          SELECT 1 FROM shards sh
-		          WHERE sh.scope_tag = m.scope_tag
-		            AND sh.owner_id = m.user_id
-		            AND sh.visibility = 'isolated'
-		        ))
+		   AND `+recallVisible("m", "$4")+`
 		 ORDER BY embedding <=> $1::vector
 		 LIMIT $3`,
 		vecStr, threshold, limit, userID)
@@ -207,12 +226,7 @@ func (s *PgVectorStore) HybridSearch(ctx context.Context, queryText string, vect
 		       AND 1 - (m.embedding <=> $1::vector) > $2
 		       AND m.source_type != 'conversation'
 		       AND NOT EXISTS (SELECT 1 FROM memories sup WHERE sup.supersedes = m.id)
-		       AND (m.user_id IS NULL OR m.user_id = $3)
-		       AND (m.scope_tag IS NULL
-		            OR NOT EXISTS (SELECT 1 FROM shards sh
-		                            WHERE sh.scope_tag = m.scope_tag
-		                              AND sh.owner_id = m.user_id
-		                              AND sh.visibility = 'isolated'))
+		       AND `+recallVisible("m", "$3")+`
 		     ORDER BY m.embedding <=> $1::vector
 		     LIMIT $4
 		),
@@ -225,12 +239,7 @@ func (s *PgVectorStore) HybridSearch(ctx context.Context, queryText string, vect
 		     WHERE to_tsvector('english', m.content) @@ q
 		       AND m.source_type != 'conversation'
 		       AND NOT EXISTS (SELECT 1 FROM memories sup WHERE sup.supersedes = m.id)
-		       AND (m.user_id IS NULL OR m.user_id = $3)
-		       AND (m.scope_tag IS NULL
-		            OR NOT EXISTS (SELECT 1 FROM shards sh
-		                            WHERE sh.scope_tag = m.scope_tag
-		                              AND sh.owner_id = m.user_id
-		                              AND sh.visibility = 'isolated'))
+		       AND `+recallVisible("m", "$3")+`
 		     ORDER BY ts_rank_cd(to_tsvector('english', m.content), q) DESC
 		     LIMIT $4
 		),
@@ -301,12 +310,7 @@ func (s *PgVectorStore) keywordSearch(ctx context.Context, queryText string, lim
 		 WHERE to_tsvector('english', m.content) @@ q
 		   AND m.source_type != 'conversation'
 		   AND NOT EXISTS (SELECT 1 FROM memories sup WHERE sup.supersedes = m.id)
-		   AND (m.user_id IS NULL OR m.user_id = $2)
-		   AND (m.scope_tag IS NULL
-		        OR NOT EXISTS (SELECT 1 FROM shards sh
-		                        WHERE sh.scope_tag = m.scope_tag
-		                          AND sh.owner_id = m.user_id
-		                          AND sh.visibility = 'isolated'))
+		   AND `+recallVisible("m", "$2")+`
 		 ORDER BY ts_rank_cd(to_tsvector('english', m.content), q) DESC
 		 LIMIT $3`,
 		queryText, userID, limit, rrfK)

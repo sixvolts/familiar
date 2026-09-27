@@ -57,13 +57,16 @@ var trivialPhrases = map[string]struct{}{
 	// farewells
 	"bye": {}, "goodbye": {}, "bye bye": {}, "cya": {}, "see you": {},
 	"see ya": {}, "see you later": {}, "talk later": {},
-	"talk to you later": {}, "ttyl": {}, "later": {}, "take care": {},
+	"talk to you later": {}, "ttyl": {}, "take care": {},
 	"good night": {}, "goodnight": {}, "gn": {},
-	// brief reactions (no instruction, no confirmation)
+	// brief reactions (no instruction, no confirmation). Approving
+	// reactions ("perfect", "great", "cool", "nice", "awesome", "sweet",
+	// "excellent", "wonderful", "amazing", "brilliant", "well done") are
+	// NOT here: after "Want me to publish it?" they are the yes, and the
+	// trivial verdict strips the tools the yes needs. Nor is "later",
+	// which answers "should I run it now?".
 	"lol": {}, "lmao": {}, "rofl": {}, "haha": {}, "hahaha": {}, "hehe": {},
-	"cool": {}, "nice": {}, "nice one": {}, "awesome": {}, "great": {},
-	"perfect": {}, "sweet": {}, "wonderful": {}, "amazing": {},
-	"excellent": {}, "brilliant": {}, "well done": {}, "good bot": {},
+	"good bot": {},
 }
 
 // TrivialVerdict is the verdict assigned to a fast-pathed trivial turn: no

@@ -535,31 +535,6 @@ func TestSaveFact_TrustedPathLeavesScopeTagEmpty(t *testing.T) {
 	}
 }
 
-// TestSaveFact_PropagatesExcludeFromHot ensures the SessionContext
-// flag (set by the pipeline only for isolated-visibility shards)
-// reaches the FactProto so the engine routes the write past its RAM
-// tier (FAMILIAR-SHARDS-PHASE1-FINDINGS Issue 3).
-func TestSaveFact_PropagatesExcludeFromHot(t *testing.T) {
-	eng := &fakeEngine{}
-	s := New(eng, nil, func(_ context.Context, _ string) ([]float32, error) {
-		return []float32{0.1}, nil
-	})
-	ctx := skills.WithContext(context.Background(), skills.SessionContext{
-		UserID:         "owner",
-		ScopeTag:       "shard:isolated",
-		ExcludeFromHot: true,
-	})
-	if _, err := s.Execute(ctx, "save_fact", json.RawMessage(`{"content":"isolated fact"}`)); err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if len(eng.committed) != 1 {
-		t.Fatalf("committed = %d", len(eng.committed))
-	}
-	if !eng.committed[0].ExcludeFromHot {
-		t.Errorf("FactProto.ExcludeFromHot = false, want true")
-	}
-}
-
 // fakeManager records the args forget_fact/correct_fact pass to the
 // manager and lets a test dictate which (id, user) pairs "own" a row.
 type fakeManager struct {

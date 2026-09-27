@@ -226,11 +226,7 @@ func main() {
 	// failover chain without a separate health loop.
 	var sc *sidecar.Client
 	if cfg.Sidecar.Enabled {
-		sc = sidecar.NewClient(cfg.Sidecar, cfg.Router, reg, roleRes)
-		sc.Start(ctx)
-		defer sc.Stop()
-
-		rtr.SetSidecar(sc)
+		sc = sidecar.NewClient(cfg.Sidecar, reg, roleRes)
 		log.Printf("[gateway] sidecar enabled")
 		// Print the resolved task → chain → live model table so the
 		// operator can verify routing without reverse-engineering it.

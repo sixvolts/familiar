@@ -93,6 +93,20 @@ func TestResolveDecision(t *testing.T) {
 			why: "dropping a write on a hallucinated id contradicts this path's prefer-a-duplicate rule",
 		},
 		{
+			name:     "unnamed duplicate of a close neighbour drops the write",
+			decision: sidecar.BatchDecision{Action: "DUPLICATE"},
+			neighbor: nbr("nbr-5", 0.90), hasNeighbor: true,
+			wantAction: "DUPLICATE", wantTarget: "nbr-5",
+			why: "the nearest neighbour clears the floor, and is the row to reinforce",
+		},
+		{
+			name:     "unnamed duplicate of a distant neighbour keeps the write",
+			decision: sidecar.BatchDecision{Action: "DUPLICATE"},
+			neighbor: nbr("nbr-6", 0.21), hasNeighbor: true,
+			wantAction: "ADD", wantTarget: "",
+			why: "at 0.21 they are different facts; the dog's name must not be dropped",
+		},
+		{
 			name:        "duplicate with no neighbour keeps the write",
 			decision:    sidecar.BatchDecision{Action: "DUPLICATE"},
 			hasNeighbor: false,
@@ -127,6 +141,21 @@ func TestResolveDecision(t *testing.T) {
 					}())
 			}
 		})
+	}
+}
+
+// Decisions that name their candidate are matched by it: a model that
+// skipped [0]'s decision used to hand [0] the next one, a DUPLICATE meant
+// for [1], and drop it.
+func TestResolveDecisionMatchesByCandidateIndex(t *testing.T) {
+	one := 1
+	decisions := []sidecar.BatchDecision{{Candidate: &one, Action: "DUPLICATE", TargetID: "shared"}}
+	neighbors := []memory.NearestFact{nbr("shared", 0.95)}
+	if a, tgt := resolveDecision(0, decisions, neighbors, testFloor); a != "ADD" || tgt != "" {
+		t.Errorf("candidate 0 took candidate 1's decision: (%q, %q)", a, tgt)
+	}
+	if a, tgt := resolveDecision(1, decisions, neighbors, testFloor); a != "DUPLICATE" || tgt != "shared" {
+		t.Errorf("candidate 1: got (%q, %q), want its DUPLICATE", a, tgt)
 	}
 }
 

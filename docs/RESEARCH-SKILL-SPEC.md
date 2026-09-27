@@ -154,8 +154,8 @@ the membership/fork-race handling that shored it up.
 `- finding — [Source](url)` bullets appended to the evidence page;
 final reply is a one-line status); `ToolAllowlist` =
 `web_search, fetch_page, read_page, append_to_page`; `BookAccess` =
-research book only; `Skip*`/`ExcludeFromHot` all true; `TierHint`
-`technical` (config; `tier2` pins the sidecar model for cheap workers —
+research book only; `SkipSessionHydration`/`SkipCommit` true; `TierHint`
+`technical` (config; `tier2` pins the classify role's model for cheap workers —
 validated at construction, unknown aliases fall back loudly);
 `ModelOverride` = `worker_model` when configured (explicit registry
 pin — validated at startup for existence + tools capability; the tier

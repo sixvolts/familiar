@@ -27,14 +27,16 @@ type mockEngine struct {
 	commitErr    error
 
 	// Capture calls
-	commitCalled bool
-	commitFacts  []*pb.FactProto
+	commitCalled  bool
+	commitFacts   []*pb.FactProto
+	assembleCalls int
 }
 
 func (m *mockEngine) Ping(ctx context.Context) (*pb.PingResponse, error) {
 	return &pb.PingResponse{Version: "test", UptimeSecs: 1, MemoryTier: "ram_only"}, nil
 }
 func (m *mockEngine) AssembleContext(ctx context.Context, sessionID, userMsg string, vis *pb.VisibilityContext, queryVec []float32) (*pb.AssembleContextResponse, error) {
+	m.assembleCalls++
 	if m.assembleErr != nil {
 		return nil, m.assembleErr
 	}
@@ -341,7 +343,10 @@ func TestPipelineSessionTurnsUpdated(t *testing.T) {
 	}
 }
 
-func TestPipelineHandleAssembleError(t *testing.T) {
+// A turn no longer asks the engine to assemble context: that round-trip
+// (under a 5s timeout) produced only a "History: N turns" status line
+// counting the session buffer the pipeline already holds.
+func TestPipelineHandleSkipsEngineAssemble(t *testing.T) {
 	srv := fakeOpenAIServer("still works")
 	defer srv.Close()
 
@@ -349,15 +354,15 @@ func TestPipelineHandleAssembleError(t *testing.T) {
 		assembleErr: fmt.Errorf("engine down"),
 	}
 	pl := makePipeline(eng, srv)
+	pl.embedder = func(context.Context, string) ([]float32, error) { return []float32{0.1}, nil }
 	sess := pl.sessions.GetOrCreate("cli", "user1")
 
-	// Pipeline should continue even when AssembleContext fails
-	resp, _, err := pl.Handle(context.Background(), sess, "hello", nil)
-	if err != nil {
-		t.Fatalf("expected no error (graceful degradation), got: %v", err)
+	resp, _, err := pl.Handle(context.Background(), sess, "what did we decide about backups", nil)
+	if err != nil || resp != "still works" {
+		t.Fatalf("Handle = %q, %v", resp, err)
 	}
-	if resp != "still works" {
-		t.Fatalf("expected 'still works', got %q", resp)
+	if eng.assembleCalls != 0 {
+		t.Errorf("AssembleContext called %d times, want 0", eng.assembleCalls)
 	}
 }
 
@@ -421,7 +426,7 @@ func TestPostTurnExtract_SkipsWhenNoIdentity(t *testing.T) {
 		t.Fatalf("precondition: expected empty UserID, got %q", sess.UserID())
 	}
 
-	pl.runPostTurnExtract(sess, "remember my api key is sk-123", "noted", nil, nil)
+	pl.runPostTurnExtract(sess, "remember my api key is sk-123", "noted", nil, nil, nil)
 
 	if eng.commitCalled {
 		t.Error("extracted/committed facts for an unresolved-identity session (tenant-leak guard removed?)")
@@ -484,7 +489,6 @@ func (c classifyOnlyRoutes) Chain(role string) []string {
 	}
 	return nil
 }
-func (c classifyOnlyRoutes) EndpointForRole(string) string { return "" }
 func (c classifyOnlyRoutes) EndpointForModel(id string) string {
 	if id == testClassifyModelID {
 		return c.endpoint
@@ -500,5 +504,5 @@ func attachClassifier(t *testing.T, pl *Pipeline, verdict classifier.Output) {
 	t.Cleanup(srv.Close)
 	routes := classifyOnlyRoutes{endpoint: srv.URL}
 	pl.sidecarClient = sidecar.NewClient(
-		config.SidecarConfig{Enabled: true}, config.RouterConfig{}, routes, routes)
+		config.SidecarConfig{Enabled: true}, routes, routes)
 }

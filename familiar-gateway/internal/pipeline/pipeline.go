@@ -7,17 +7,19 @@
 // ordering here is intentional: each downstream step assumes upstream
 // failures have already been absorbed.
 //
-//  1. Sidecar router down → fall back to rule-based routing in router.Router.
-//  2. Embedder down → pgvector and engine-side semantic search are skipped;
-//     keyword-only retrieval proceeds.
+//  1. Sidecar down → the classifier's static default verdict, no
+//     preamble, no extraction or summaries (each task fails on its own).
+//  2. Embedder down → memory search runs keyword-only (full text).
 //  3. Memory store down → assembleMessages logs and continues; the zone
 //     stays empty and the LLM sees no retrieved memories for this turn.
-//  4. Profile store down → working-context zone stays empty; the
-//     system prompt still loads.
+//  4. Profile store down → no personality prompt; the system prompt
+//     still loads.
 //  5. Skill execution fails → the failure text is returned to the LLM
 //     as the tool result so the model can handle it gracefully.
-//  6. Session store down → rolling summary stays in memory only.
-//  7. Engine down → hard failure; the gateway cannot start without it.
+//  6. Session store down → hydration retries each turn and the session
+//     isn't summarized until its summary loads.
+//  7. Chat model fails → the next candidate in [roles.chat] before any
+//     visible token; the memory engine runs in-process over Postgres.
 //
 // The pattern throughout: log the degradation once at the failure
 // site, never abort the turn for an optional component, and never
@@ -601,7 +603,7 @@ type IntermediateMessage struct {
 // Required fields: Engine, Router, Sessions, AgentID. Optional fields
 // may be left zero; a nil field disables the corresponding feature
 // (e.g. no MemoryStore → no pgvector retrieval, no ProfileStore → no
-// working-context zone). MaxToolIters defaults to 5 when zero.
+// personality prompt). MaxToolIters defaults to 10 when zero.
 type Deps struct {
 	Engine       engine.Service
 	Router       *router.Router
@@ -798,11 +800,15 @@ func (p *Pipeline) generatePreamble(ctx context.Context, userMsg string, complex
 	// Borrow the classify task's model, which the operator points at a
 	// fast model. Resolved per call through the sidecar client, so the
 	// preamble follows the classify role's failover and names the model
-	// it reaches; the endpoint captured at boot is the fallback.
+	// it reaches. With the classify chain offline there is no preamble:
+	// falling back to the endpoint captured at boot stalled each
+	// thinking=high turn up to 15s on a dead host. The boot endpoint is
+	// used only without a sidecar client.
 	endpoint, model := p.sidecarEndpoint, sidecarModelLabel
 	if p.sidecarClient != nil {
-		if ep, m := p.sidecarClient.TaskTarget(sidecar.TaskClassify); ep != "" {
-			endpoint, model = ep, m
+		endpoint, model = p.sidecarClient.TaskTarget(sidecar.TaskClassify)
+		if endpoint == "" {
+			return ""
 		}
 	}
 	body := sidecarReq{
@@ -917,7 +923,6 @@ func (p *Pipeline) assembleMessages(
 
 	memBudget := p.effort.MemoryFor(memDepth)
 
-	var convHistory []*pb.ConversationTurn
 	var queryVec []float32
 
 	// retrievalQuery is what we search memory with. The classifier already
@@ -937,32 +942,11 @@ func (p *Pipeline) assembleMessages(
 			onStatus("Searching memories...\n")
 		}
 		queryVec = p.embedText(ctx, retrievalQuery)
-		assembleCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		vis := &pb.VisibilityContext{
-			ChannelId: sess.ChannelID,
-			AgentId:   p.agentID,
-			// UserID() (canonical, falling back to SenderID) so the read
-			// axis matches the write axis used in commitAndExtract.
-			UserId: sess.UserID(),
-		}
-		// AssembleContext returns conversation history only (memory retrieval
-		// is searchPgVector's job below). The per-tier ConvBudget/MemBudget
-		// caps once threaded here were a dead second budgeting layer — ctxbuild's
-		// window-aware zones (which scale to the model's context window) are the
-		// single authority now, so history depth follows the window, not a tier
-		// literal that clipped the 262K window to ~3K.
-		ctxResp, err := p.engine.AssembleContext(assembleCtx, sess.ID, retrievalQuery, vis, queryVec)
-		if err != nil {
-			log.Printf("[pipeline] AssembleContext error (continuing): %v", err)
-		} else {
-			if ctxResp.Error != "" {
-				log.Printf("[pipeline] AssembleContext engine error: %s", ctxResp.Error)
-			}
-			convHistory = ctxResp.ConversationHistory
-			if onStatus != nil {
-				onStatus(fmt.Sprintf("History: %d turns\n", len(convHistory)))
-			}
+		// History comes from the session buffer (below). The engine's
+		// AssembleContext was called here, under a 5s timeout, only to
+		// count that same buffer for this status line.
+		if onStatus != nil {
+			onStatus(fmt.Sprintf("History: %d turns\n", sess.TurnCount()))
 		}
 	} else {
 		log.Printf("[pipeline] trivial complexity (no memory requested) — skipping embedder/pgvector/engine context")
@@ -975,25 +959,30 @@ func (p *Pipeline) assembleMessages(
 	var mems []ctxbuild.Memory
 
 	// pgvector persistent tier, with optional tier-driven query expansion.
-	// Tier overrides on threshold/max_results fall through zero values to
-	// the global memoryCfg defaults.
-	if p.memStore != nil && queryVec != nil {
-		// Effort-resolved MemoryBudget wins; fall through to tier-driven and
-		// then global config defaults. The classifier is the new authority,
-		// but tier-based deployments without effort overrides keep working.
-		limit := p.memoryCfg.MaxInjected
-		if tier.MemoryConfig.MaxResults > 0 {
-			limit = tier.MemoryConfig.MaxResults
+	// With the embedder down (queryVec nil) the search runs keyword-only
+	// (HybridSearch's full-text arm). It used to be skipped, so an
+	// embedder outage removed long-term memory from every turn, silently.
+	if p.memStore != nil && !memBudget.Skip {
+		if queryVec == nil {
+			log.Printf("[pipeline] embedder unavailable — memory search is keyword-only this turn")
+			if onStatus != nil {
+				onStatus("Memory search: keyword only (embedder unavailable)\n")
+			}
 		}
-		if memBudget.TopK > 0 {
-			limit = memBudget.TopK
+		// The effort resolver ([effort.memory_depth.*], from the
+		// classifier's memory depth) sets how many memories and how close.
+		// Its defaults are never zero, so the per-tier threshold and
+		// max_results that this used to fall through to (and that a test
+		// "verified" by recomputing them itself) never applied; they're
+		// gone. [memory] max_injected_memories / relevance_threshold are
+		// only a floor for a resolver configured to zero.
+		limit := memBudget.TopK
+		if limit <= 0 {
+			limit = p.memoryCfg.MaxInjected
 		}
-		threshold := p.memoryCfg.RelevanceThreshold
-		if tier.MemoryConfig.Threshold > 0 {
-			threshold = tier.MemoryConfig.Threshold
-		}
-		if memBudget.SimilarityThreshold > 0 {
-			threshold = memBudget.SimilarityThreshold
+		threshold := memBudget.SimilarityThreshold
+		if threshold <= 0 {
+			threshold = p.memoryCfg.RelevanceThreshold
 		}
 
 		pgResults := p.searchPgVector(ctx, sess.UserID(), retrievalQuery, queryVec, tier, limit, threshold, onStatus)
@@ -1203,6 +1192,45 @@ func (p *Pipeline) windowConfig(modelID string) ctxbuild.Config {
 	return cfg
 }
 
+// conversationTurns returns up to n of the latest user and assistant
+// messages in turns that carry text, oldest first, merging consecutive
+// messages from one role. Tool results and tool-calling assistant
+// messages are left out (the prose of the latter is in the turn's
+// reply). The classifier and the extractor took the last n raw
+// messages, which after a tool-heavy turn were all tool results and
+// empty tool-call stubs: no user message to resolve "what about the
+// timeout?" against, and empty assistant messages that templates
+// requiring alternation reject.
+func conversationTurns(turns []session.Turn, n int) []sidecar.Turn {
+	var rev []sidecar.Turn
+	for i := len(turns) - 1; i >= 0 && len(rev) < n; i-- {
+		t := turns[i]
+		if (t.Role != "user" && t.Role != "assistant") || len(t.ToolCalls) > 0 || strings.TrimSpace(t.Content) == "" {
+			continue
+		}
+		if k := len(rev) - 1; k >= 0 && rev[k].Role == t.Role {
+			rev[k].Content = t.Content + "\n\n" + rev[k].Content
+			continue
+		}
+		rev = append(rev, sidecar.Turn{Role: t.Role, Content: t.Content})
+	}
+	out := make([]sidecar.Turn, len(rev))
+	for i, t := range rev {
+		out[len(rev)-1-i] = t
+	}
+	return out
+}
+
+// asksAQuestion reports whether the last message in history is a reply
+// that ends with a question.
+func asksAQuestion(history []sidecar.Turn) bool {
+	if len(history) == 0 {
+		return false
+	}
+	last := history[len(history)-1]
+	return last.Role == "assistant" && strings.HasSuffix(strings.TrimSpace(last.Content), "?")
+}
+
 // lastExchange returns the most recent exchange in turns: the last user
 // message and everything after it.
 func lastExchange(turns []session.Turn) []session.Turn {
@@ -1256,8 +1284,10 @@ func (p *Pipeline) searchPgVector(
 
 	type searchJob struct {
 		label string
-		vec   []float32 // nil → embed lazily in the fan-out worker
+		vec   []float32 // nil: embed lazily in the fan-out worker if embed
+		embed bool
 	}
+	// The primary query's embedding was already attempted (queryVec).
 	jobs := []searchJob{{label: userMsg, vec: queryVec}}
 
 	if tier.MemoryConfig.ExpandQueries && p.sidecarClient != nil && p.embedder != nil {
@@ -1276,7 +1306,7 @@ func (p *Pipeline) searchPgVector(
 					continue
 				}
 				// Embedded lazily in the concurrent fan-out below (vec nil).
-				jobs = append(jobs, searchJob{label: q})
+				jobs = append(jobs, searchJob{label: q, embed: true})
 			}
 		}
 	}
@@ -1295,12 +1325,11 @@ func (p *Pipeline) searchPgVector(
 			// Expansion sub-queries embed lazily here so each embed and its
 			// search run in the same goroutine — the fan-out's wall time is
 			// ~max(sub-query embed+search), not the serial sum of them all.
+			// No vector (the embedder is down): HybridSearch runs its
+			// keyword arm alone.
 			vec := job.vec
-			if len(vec) == 0 {
+			if len(vec) == 0 && job.embed {
 				vec = p.embedText(ctx, job.label)
-				if len(vec) == 0 {
-					return
-				}
 			}
 			// Bound each sub-query search like its siblings (engine 5s,
 			// rels 2s, rerank 5s) so a slow Postgres can't stall the whole
@@ -1462,13 +1491,13 @@ func flattenAssembled(a ctxbuild.AssembledContext, userMsg string) []llm.Message
 // When `overrides` is non-nil and overrides.SkipSessionHydration is
 // true, the persisted-summary load is skipped (ephemeral shards start
 // fresh every invocation).
-func (p *Pipeline) beginTurn(ctx context.Context, sess *session.Session, userMsg string, convCtx *sidecar.ConversationContext, overrides *ShardOverrides) (*routeResult, *RouteInfo, error) {
+func (p *Pipeline) beginTurn(ctx context.Context, sess *session.Session, userMsg string, overrides *ShardOverrides) (*routeResult, *RouteInfo, error) {
 	info := &RouteInfo{}
 	p.resolveIdentity(sess)
 	if overrides == nil || !overrides.SkipSessionHydration {
 		p.hydrateSession(ctx, sess, userMsg)
 	}
-	route, err := p.classifyRequest(ctx, sess, userMsg, convCtx, overrides)
+	route, err := p.classifyRequest(ctx, sess, userMsg, overrides)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1651,7 +1680,7 @@ func (p *Pipeline) handle(ctx context.Context, sess *session.Session, userMsg st
 	defer turnCancel()
 
 	prepCtx, prepCancel := prepContext(turnCtx, ctx)
-	route, info, err := p.beginTurn(prepCtx, sess, userMsg, convCtx, overrides)
+	route, info, err := p.beginTurn(prepCtx, sess, userMsg, overrides)
 	prepCancel()
 	if err != nil {
 		return "", nil, err
@@ -1668,9 +1697,11 @@ func (p *Pipeline) handle(ctx context.Context, sess *session.Session, userMsg st
 }
 
 // HandleStream is like Handle but streams chunks via onChunk callback.
-// Divergence from Handle is limited to what must differ: tool
-// orchestration runs concurrently with the preamble, LLM calls use the
+// Divergence from Handle is limited to what must differ: a thinking=high
+// turn first streams a short preamble from the sidecar (before retrieval,
+// so it delays the answer by up to its 15s timeout), LLM calls use the
 // streaming provider path, and status/reasoning callbacks are wired up.
+// convCtx is unused (the classifier reads the session's own history).
 func (p *Pipeline) HandleStream(
 	ctx context.Context,
 	sess *session.Session,
@@ -1711,7 +1742,7 @@ func (p *Pipeline) handleStream(
 	defer turnCancel()
 
 	prepCtx, prepCancel := prepContext(turnCtx, ctx)
-	route, info, err := p.beginTurn(prepCtx, sess, userMsg, convCtx, overrides)
+	route, info, err := p.beginTurn(prepCtx, sess, userMsg, overrides)
 	prepCancel()
 	if err != nil {
 		return "", nil, err
@@ -2534,7 +2565,7 @@ func orNone(s string) string {
 //
 // Replaces the old routeRequest which carried complexity strings,
 // inject_memory / enable_thinking booleans, and force_tools flags.
-func (p *Pipeline) classifyRequest(ctx context.Context, sess *session.Session, userMsg string, convCtx *sidecar.ConversationContext, overrides *ShardOverrides) (*routeResult, error) {
+func (p *Pipeline) classifyRequest(ctx context.Context, sess *session.Session, userMsg string, overrides *ShardOverrides) (*routeResult, error) {
 	r := &routeResult{}
 
 	// Shard path: explicit model wins. Synthesize a conservative
@@ -2606,7 +2637,8 @@ func (p *Pipeline) classifyRequest(ctx context.Context, sess *session.Session, u
 	// whether it is a real verdict or a default, and stats carry the
 	// latency + token cost so this call stops being unmeasurable.
 	var cstats sidecar.ClassifyStats
-	if verdict, ok := classifier.TrivialFastPath(userMsg); ok {
+	history := conversationTurns(sess.RecentTurns(0), 6)
+	if verdict, ok := classifier.TrivialFastPath(userMsg); ok && !asksAQuestion(history) {
 		// Deterministic trivial gate: a pure social pleasantry ("thanks",
 		// "hi", "bye") needs no reasoning, retrieval, or web search, and we
 		// know that without a model call. Short-circuit to off/none/none,
@@ -2614,18 +2646,14 @@ func (p *Pipeline) classifyRequest(ctx context.Context, sess *session.Session, u
 		// High-precision by construction (see classifier.TrivialFastPath) —
 		// anything ambiguous falls through to the model below. This also
 		// wins when the sidecar is down, where the default would otherwise
-		// send "thanks" to the analytical tier.
+		// send "thanks" to the analytical tier. Not when the last reply
+		// asked something: then even "thanks" may be the answer, and the
+		// classifier (which sees the question) decides.
 		r.classifier = verdict
 	} else if p.sidecarClient != nil {
-		// Build the recent-history slice (chronological, not reversed —
-		// reversed dialogue reads as off-distribution) the classifier
-		// prompt expects. Six turns: enough for both the effort verdict
-		// and the condensed-query rewrite the same call now produces.
-		recent := sess.RecentTurns(6)
-		history := make([]sidecar.Turn, 0, len(recent))
-		for _, t := range recent {
-			history = append(history, sidecar.Turn{Role: t.Role, Content: t.Content})
-		}
+		// The recent conversation, chronological (reversed dialogue reads
+		// as off-distribution), six messages: enough for both the effort
+		// verdict and the condensed-query rewrite the same call produces.
 		r.classifier, cstats = p.sidecarClient.ClassifyWithStats(ctx, history, userMsg)
 	} else {
 		// No classifier configured at all. Take the cheap middle setting,
@@ -2836,14 +2864,13 @@ func (p *Pipeline) buildLLMRequest(messages []llm.Message, route *routeResult, i
 func (p *Pipeline) runCompletion(ctx context.Context, sess *session.Session, provider llm.Provider, req llm.CompletionRequest, modelID string, complexity string, searchDepth classifier.SearchDepth, complete completeFn, onStatus func(string), overrides *ShardOverrides, userSkillsUnlocked bool, pagesFetched *int, researchNote *ResearchNoteRef) (*llm.CompletionResponse, []llm.Message, error) {
 	if len(req.Tools) > 0 {
 		loopCtx := skills.WithContext(ctx, skills.SessionContext{
-			SessionID:      sess.ID,
-			UserID:         sess.UserID(),
-			AgentID:        p.agentID,
-			ChannelID:      sess.ChannelID,
-			ShardID:        shardIDFor(overrides),
-			ScopeTag:       scopeTagFor(overrides),
-			BookScope:      bookScopeFor(overrides),
-			ExcludeFromHot: excludeFromHotFor(overrides),
+			SessionID: sess.ID,
+			UserID:    sess.UserID(),
+			AgentID:   p.agentID,
+			ChannelID: sess.ChannelID,
+			ShardID:   shardIDFor(overrides),
+			ScopeTag:  scopeTagFor(overrides),
+			BookScope: bookScopeFor(overrides),
 		})
 		var allowlist map[string]bool
 		if overrides != nil {
@@ -3036,8 +3063,8 @@ func turnUsedTools(msgs []llm.Message) bool {
 //  2. Append verbatim turns to the session buffer.
 //  3. Async: extract facts from this turn (small slot) → batched
 //     conflict + relationship pass (medium slot) → commit candidates
-//     and relationships. Wrapped in a 10s soft deadline per
-//     CHAT-REARCH §"Memory Write Pipeline" — on miss, log + drop.
+//     and relationships, under postTurnDeadline (see
+//     runPostTurnExtract).
 //  4. Async: maybeSummarize fires only when the verbatim window has
 //     been exceeded. Compaction is now decoupled from extraction —
 //     it summarizes but does NOT extract facts (per-turn extraction
@@ -3120,10 +3147,6 @@ func (p *Pipeline) commitAndExtract(ctx context.Context, sess *session.Session, 
 			// trusted path (nil overrides). Ephemeral shards never reach
 			// here — SkipCommit short-circuits at the top of this function.
 			ScopeTag: scopeTagFor(overrides),
-			// ExcludeFromHot forces an isolated shard's conversation fact
-			// past the engine's RAM cache so top-level retrieval can never
-			// see it (FAMILIAR-SHARDS-PHASE1-FINDINGS Issue 3).
-			ExcludeFromHot: excludeFromHotFor(overrides),
 		}
 
 		commitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -3133,6 +3156,9 @@ func (p *Pipeline) commitAndExtract(ctx context.Context, sess *session.Session, 
 		cancel()
 	}
 
+	// The conversation before this turn, for the extractor to resolve
+	// "it" and "that server" against; taken before the turn is added.
+	prior := conversationTurns(sess.RecentTurns(0), extractContextTurns)
 	p.appendTurn(ctx, sess, userMsg, responseText, loopMsgs, info)
 
 	// Snapshot retrieved rels for the post-turn extract pipeline before
@@ -3141,7 +3167,7 @@ func (p *Pipeline) commitAndExtract(ctx context.Context, sess *session.Session, 
 	if info != nil {
 		retrievedRels = info.RetrievedRelationships
 	}
-	p.kickoffPostTurnExtract(sess, userMsg, responseText, retrievedRels, overrides)
+	p.kickoffPostTurnExtract(sess, userMsg, responseText, prior, retrievedRels, overrides)
 	p.maybeSummarize(sess, overrides)
 }
 

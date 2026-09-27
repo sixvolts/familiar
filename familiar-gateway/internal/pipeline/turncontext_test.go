@@ -144,7 +144,7 @@ func TestStopTurn_CancelsTurnStuckInClassification(t *testing.T) {
 	routes := classifyOnlyRoutes{endpoint: clf.URL}
 	pl.sidecarClient = sidecar.NewClient(
 		config.SidecarConfig{Enabled: true, RequestTimeoutMs: 30000}, // long, so Stop is what cuts it
-		config.RouterConfig{}, routes, routes)
+		routes, routes)
 
 	sess := pl.sessions.GetOrCreate("cli", "stop-user")
 
@@ -212,7 +212,7 @@ func TestPrepContext_ClientDisconnectCancelsClassification(t *testing.T) {
 	pl.sidecarClient = sidecar.NewClient(
 		// Long enough that the sidecar deadline is not what frees us.
 		config.SidecarConfig{Enabled: true, RequestTimeoutMs: 30000},
-		config.RouterConfig{}, routes, routes)
+		routes, routes)
 
 	sess := pl.sessions.GetOrCreate("cli", "disc-user")
 	reqCtx, disconnect := context.WithCancel(context.Background())

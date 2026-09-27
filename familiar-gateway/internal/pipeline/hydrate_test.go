@@ -221,7 +221,7 @@ func TestHydrate_SummaryPastTheEndReplaysTheTail(t *testing.T) {
 func TestSummarize_WaitsForTheSummaryToLoad(t *testing.T) {
 	sums := &fakeSummaries{fail: true}
 	pl, sess := hydratePipeline(t, testutil.NewMockLLM(t), sums, &fakeConversation{})
-	sc := newFakeSidecar(t, func(string) string { return "a new summary" })
+	sc := newFakeSidecar(t, func(string) string { return "A new summary of the whole conversation so far." })
 	pl.sidecarClient = sidecarFor(sc, sidecar.TaskSummarize)
 	pl.hydrateSession(context.Background(), sess, "x")
 	for i := 0; i < VerbatimWindow+4; i++ {

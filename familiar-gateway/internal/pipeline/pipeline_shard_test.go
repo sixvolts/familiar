@@ -78,7 +78,6 @@ func TestShard_BasicInvocation(t *testing.T) {
 	overrides := &ShardOverrides{
 		ShardID:              "charger-extractor",
 		SystemPrompt:         "You extract charger metadata. Return JSON only.",
-		SkipMemoryRetrieval:  true,
 		SkipSessionHydration: true,
 		SkipCommit:           true,
 		ModelOverride:        "mock-model",
@@ -167,7 +166,6 @@ func TestShard_EphemeralSkipsCommit(t *testing.T) {
 	overrides := &ShardOverrides{
 		ShardID:              "eph",
 		SystemPrompt:         "test",
-		SkipMemoryRetrieval:  true,
 		SkipSessionHydration: true,
 		SkipCommit:           true,
 		ModelOverride:        "mock-model",
@@ -195,11 +193,10 @@ func TestShard_PersistentCommitsAndAppendsTurns(t *testing.T) {
 	sess := pl.sessions.GetOrCreate("shards", "persistent")
 
 	overrides := &ShardOverrides{
-		ShardID:             "pers",
-		SystemPrompt:        "test",
-		SkipMemoryRetrieval: true,
-		ModelOverride:       "mock-model",
-		ScopeTag:            "shard:pers",
+		ShardID:       "pers",
+		SystemPrompt:  "test",
+		ModelOverride: "mock-model",
+		ScopeTag:      "shard:pers",
 	}
 	if _, _, err := pl.HandleShard(context.Background(), sess, "keep me", overrides); err != nil {
 		t.Fatalf("HandleShard: %v", err)
@@ -280,7 +277,6 @@ func TestShard_ToolAllowlistFiltersAdvertised(t *testing.T) {
 	overrides := &ShardOverrides{
 		ShardID:              "filtered",
 		SystemPrompt:         "use tools sparingly",
-		SkipMemoryRetrieval:  true,
 		SkipSessionHydration: true,
 		SkipCommit:           true,
 		ModelOverride:        "mock-model",
@@ -338,7 +334,6 @@ func TestShard_BlockedToolCallReturnsSyntheticError(t *testing.T) {
 	overrides := &ShardOverrides{
 		ShardID:              "locked",
 		SystemPrompt:         "no tools for you",
-		SkipMemoryRetrieval:  true,
 		SkipSessionHydration: true,
 		SkipCommit:           true,
 		ModelOverride:        "mock-model",
@@ -402,7 +397,6 @@ func TestShard_ScopeTagReachesSkillContext(t *testing.T) {
 	overrides := &ShardOverrides{
 		ShardID:              "tagged",
 		SystemPrompt:         "capture the context",
-		SkipMemoryRetrieval:  true,
 		SkipSessionHydration: true,
 		SkipCommit:           true,
 		ModelOverride:        "mock-model",
@@ -449,7 +443,6 @@ func TestShard_BookScopeReachesSkillContext(t *testing.T) {
 	overrides := &ShardOverrides{
 		ShardID:              "scoped",
 		SystemPrompt:         "capture the context",
-		SkipMemoryRetrieval:  true,
 		SkipSessionHydration: true,
 		SkipCommit:           true,
 		ModelOverride:        "mock-model",
@@ -585,7 +578,6 @@ func TestShard_SearchBudgetZeroKeepsWebSearchDisabled(t *testing.T) {
 	overrides := &ShardOverrides{
 		ShardID:              "worker-no-budget",
 		SystemPrompt:         "You are a test worker.",
-		SkipMemoryRetrieval:  true,
 		SkipSessionHydration: true,
 		SkipCommit:           true,
 		ModelOverride:        "mock-model",
@@ -644,7 +636,6 @@ func TestShard_SearchBudgetGrantsWebSearch(t *testing.T) {
 	overrides := &ShardOverrides{
 		ShardID:              "research-worker",
 		SystemPrompt:         "You are a research worker.",
-		SkipMemoryRetrieval:  true,
 		SkipSessionHydration: true,
 		SkipCommit:           true,
 		ModelOverride:        "mock-model",

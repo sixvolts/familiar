@@ -38,55 +38,34 @@ func TestRouterSelectDisabled(t *testing.T) {
 	}
 }
 
-func TestRouterSelectForceRule(t *testing.T) {
+// [[router.rules.force]] is no longer read: Select runs only when no chat
+// model resolves, so the rules never applied in a normal config (Validate
+// warns when they're set). Select picks in id order, not map order.
+func TestRouterSelectIgnoresForceRules(t *testing.T) {
 	reg := makeRegistryWithModels(
-		config.ModelConfig{ID: "big-model", Provider: "openai", Endpoint: "https://example.test"},
-		config.ModelConfig{ID: "small-model", Provider: "openai", Endpoint: "https://example.test"},
+		config.ModelConfig{ID: "a-model", Provider: "openai", Endpoint: "https://example.test"},
+		config.ModelConfig{ID: "z-model", Provider: "openai", Endpoint: "https://example.test"},
 	)
 	router := NewRouter(config.RouterConfig{
 		Enabled: true,
-		Rules: config.RouterRules{
-			Force: []config.ForceRule{
-				{Pattern: "(?i)analyze", Model: "big-model"},
-			},
-		},
+		Rules:   config.RouterRules{Force: []config.ForceRule{{Pattern: "(?i)analyze", Model: "z-model"}}},
 	}, reg)
-
 	modelID, _, err := router.Select(context.Background(), "please Analyze this", "cli", noKey)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if modelID != "big-model" {
-		t.Fatalf("expected big-model, got %q", modelID)
+	if err != nil || modelID != "a-model" {
+		t.Fatalf("Select = %q, %v; want a-model (id order, force rule ignored)", modelID, err)
 	}
 }
 
-func TestRouterSelectForceRuleChannelMismatch(t *testing.T) {
-	// big-model is NOT online — only default-model is.
-	// If the force rule incorrectly fires, it'll try big-model and fail.
-	reg := NewRegistry([]config.ModelConfig{
-		{ID: "big-model", Provider: "openai", Endpoint: "https://example.test"},
-		{ID: "default-model", Provider: "openai", Endpoint: "https://example.test"},
-	})
-	reg.setStatus("default-model", "online")
-	// big-model stays "unknown" (offline)
-
-	router := NewRouter(config.RouterConfig{
-		Enabled: true,
-		Rules: config.RouterRules{
-			Force: []config.ForceRule{
-				{Pattern: "analyze", Channel: "slack", Model: "big-model"},
-			},
-		},
-	}, reg)
-
-	// Channel is "cli", not "slack" — rule should not match, falls through to default-model
-	modelID, _, err := router.Select(context.Background(), "analyze this", "cli", noKey)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if modelID != "default-model" {
-		t.Fatalf("expected default-model, got %q", modelID)
+// Select never picks an embeddings model: it can't answer chat.
+func TestRouterSelectSkipsEmbeddings(t *testing.T) {
+	reg := makeRegistryWithModels(
+		config.ModelConfig{ID: "a-embed", Provider: "embeddings", Endpoint: "http://e"},
+		config.ModelConfig{ID: "b-chat", Provider: "openai", Endpoint: "https://example.test"},
+	)
+	for i := 0; i < 20; i++ {
+		if id, _, err := NewRouter(config.RouterConfig{Enabled: true}, reg).Select(context.Background(), "hi", "cli", noKey); err != nil || id != "b-chat" {
+			t.Fatalf("Select = %q, %v; want b-chat", id, err)
+		}
 	}
 }
 
@@ -129,13 +108,14 @@ func TestRouterSelectFirstOnline(t *testing.T) {
 	)
 	router := NewRouter(config.RouterConfig{Enabled: true}, reg)
 
-	modelID, _, err := router.Select(context.Background(), "hello", "cli", noKey)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	// Should get one of the online models
-	if modelID != "model-a" && modelID != "model-b" {
-		t.Fatalf("expected model-a or model-b, got %q", modelID)
+	for i := 0; i < 20; i++ { // map order would vary between runs
+		modelID, _, err := router.Select(context.Background(), "hello", "cli", noKey)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if modelID != "model-a" {
+			t.Fatalf("expected model-a (id order), got %q", modelID)
+		}
 	}
 }
 
@@ -248,3 +228,50 @@ func TestChatModelIDFromConfigSkipsEmbeddings(t *testing.T) {
 // interface; if the registry stopped satisfying it, sidecar requests
 // would silently fall back to the id without its namespace.
 var _ sidecar.RequestModelNamer = (*Registry)(nil)
+
+// noClassifyRole resolves nothing.
+type noClassifyRole struct{}
+
+func (noClassifyRole) Resolve(string) (string, int, bool) { return "", 0, false }
+func (noClassifyRole) Chain(string) []string              { return nil }
+
+// classifyRole resolves the classify role to one model.
+type classifyRole struct{ id string }
+
+func (c classifyRole) Resolve(role string) (string, int, bool) {
+	if role == config.RoleClassify {
+		return c.id, 0, true
+	}
+	return "", 0, false
+}
+func (classifyRole) Chain(string) []string { return nil }
+
+// Shard tier1/tier2 run on what the classify role resolves to. It was the
+// first "sidecar/"-prefixed id in map order: "mac/gemma" broke every tier1
+// shard, and two sidecar models were a coin toss.
+func TestGetSidecarModelIDFollowsTheClassifyRole(t *testing.T) {
+	reg := makeRegistryWithModels(
+		config.ModelConfig{ID: "mac/gemma", Provider: "llama-server", Endpoint: "http://m"},
+		config.ModelConfig{ID: "sidecar/other", Provider: "llama-server", Endpoint: "http://s"},
+	)
+	r := NewRouter(config.RouterConfig{Enabled: true}, reg)
+	r.SetChatRole(classifyRole{id: "mac/gemma"})
+	if got := r.GetSidecarModelID(); got != "mac/gemma" {
+		t.Errorf("GetSidecarModelID = %q, want the classify role's mac/gemma", got)
+	}
+	// No classify model: the chat model rather than nothing.
+	r.SetChatRole(noClassifyRole{})
+	if got := r.GetSidecarModelID(); got != "mac/gemma" {
+		t.Errorf("no classify role: GetSidecarModelID = %q, want the chat model (mac/gemma, first in id order)", got)
+	}
+	// No resolver: the prefix, in id order.
+	reg2 := makeRegistryWithModels(
+		config.ModelConfig{ID: "sidecar/zeta", Provider: "llama-server", Endpoint: "http://z"},
+		config.ModelConfig{ID: "sidecar/alpha", Provider: "llama-server", Endpoint: "http://a"},
+	)
+	for i := 0; i < 20; i++ {
+		if got := NewRouter(config.RouterConfig{}, reg2).GetSidecarModelID(); got != "sidecar/alpha" {
+			t.Fatalf("GetSidecarModelID = %q, want sidecar/alpha", got)
+		}
+	}
+}

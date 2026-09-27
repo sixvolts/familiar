@@ -2,6 +2,7 @@ package sidecar
 
 import (
 	"context"
+	"regexp"
 	"strings"
 )
 
@@ -46,17 +47,18 @@ func (r *HTTPRouter) ExpandQueries(ctx context.Context, userMsg string) ([]strin
 }
 
 // parseExpandedQueries splits the sidecar's newline-separated response
-// into clean query strings. Empty lines and trivial markdown cruft are
-// dropped. Exported for tests.
+// into clean query strings, at most maxExpandedQueries of them. Empty
+// lines and trivial markdown cruft are dropped.
 func parseExpandedQueries(raw string) []string {
 	lines := strings.Split(strings.TrimSpace(raw), "\n")
 	out := make([]string, 0, len(lines))
 	seen := make(map[string]bool)
 	for _, line := range lines {
-		q := strings.TrimSpace(line)
-		// Strip leading bullets / numbering if the model ignored the
-		// "no numbering" instruction.
-		q = strings.TrimLeft(q, "-*0123456789. )")
+		// Strip a leading bullet or list number if the model ignored the
+		// "no numbering" instruction. Only a marker followed by space:
+		// trimming every leading digit and dot turned "10.0.0.21 open
+		// ports" into "open ports" and "3090 vram" into "vram".
+		q := listMarker.ReplaceAllString(strings.TrimSpace(line), "")
 		q = strings.TrimSpace(q)
 		// Strip surrounding quotes.
 		q = strings.Trim(q, `"'`)
@@ -65,6 +67,19 @@ func parseExpandedQueries(raw string) []string {
 		}
 		seen[q] = true
 		out = append(out, q)
+		// Each query is an embedding and a search on the turn's critical
+		// path; a rambling reply used to fan out to dozens.
+		if len(out) == maxExpandedQueries {
+			break
+		}
 	}
 	return out
 }
+
+// listMarker matches a leading "-", "*", "•", "1." or "1)" and the space
+// after it.
+var listMarker = regexp.MustCompile(`^(?:[-*•]|\d+[.)])\s+`)
+
+// maxExpandedQueries caps the sub-queries one expansion yields (the
+// prompt asks for 2-4).
+const maxExpandedQueries = 4

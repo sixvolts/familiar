@@ -179,11 +179,13 @@ const rrfK = 60
 // carries the RRF value the rows are ordered by.
 //
 // queryText="" or an all-stopword query collapses the sparse arm to
-// empty — RRF degrades gracefully to dense-only. Shard isolation +
-// user scoping match Search exactly.
+// empty — RRF degrades gracefully to dense-only. With no vector (the
+// embedder is down) only the sparse arm runs (keywordSearch); this
+// returned nothing, so an embedder outage removed long-term memory from
+// every turn. Shard isolation + user scoping match Search exactly.
 func (s *PgVectorStore) HybridSearch(ctx context.Context, queryText string, vector []float32, limit int, threshold float64, userID string) ([]MemoryResult, error) {
 	if len(vector) == 0 {
-		return nil, nil
+		return s.keywordSearch(ctx, queryText, limit, userID)
 	}
 	vecStr := vectorToString(vector)
 
@@ -275,6 +277,52 @@ func (s *PgVectorStore) HybridSearch(ctx context.Context, queryText string, vect
 			if v, perr := parseVector(embText.String); perr == nil {
 				r.Embedding = v
 			}
+		}
+		results = append(results, r)
+	}
+	return results, rows.Err()
+}
+
+// keywordSearch is HybridSearch's sparse arm alone, for a query with no
+// embedding: full-text matches ranked by ts_rank_cd, with the same
+// visibility rules. Similarity is 0 (there is no vector to compare);
+// FusedScore is the arm's RRF term, so the rows sort as HybridSearch's
+// do.
+func (s *PgVectorStore) keywordSearch(ctx context.Context, queryText string, limit int, userID string) ([]MemoryResult, error) {
+	if strings.TrimSpace(queryText) == "" || limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT m.id::text, m.content, m.scope,
+		       1.0 / ($4 + row_number() OVER (
+		           ORDER BY ts_rank_cd(to_tsvector('english', m.content), q) DESC)) AS rrf,
+		       m.created_at
+		  FROM memories m, plainto_tsquery('english', $1) q
+		 WHERE to_tsvector('english', m.content) @@ q
+		   AND m.source_type != 'conversation'
+		   AND NOT EXISTS (SELECT 1 FROM memories sup WHERE sup.supersedes = m.id)
+		   AND (m.user_id IS NULL OR m.user_id = $2)
+		   AND (m.scope_tag IS NULL
+		        OR NOT EXISTS (SELECT 1 FROM shards sh
+		                        WHERE sh.scope_tag = m.scope_tag
+		                          AND sh.owner_id = m.user_id
+		                          AND sh.visibility = 'isolated'))
+		 ORDER BY ts_rank_cd(to_tsvector('english', m.content), q) DESC
+		 LIMIT $3`,
+		queryText, userID, limit, rrfK)
+	if err != nil {
+		return nil, fmt.Errorf("pgvector keyword search: %w", err)
+	}
+	defer rows.Close()
+	var results []MemoryResult
+	for rows.Next() {
+		var r MemoryResult
+		var scope sql.NullString
+		if err := rows.Scan(&r.ID, &r.Content, &scope, &r.FusedScore, &r.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scanning keyword memory row: %w", err)
+		}
+		if scope.Valid {
+			r.Scope = scope.String
 		}
 		results = append(results, r)
 	}

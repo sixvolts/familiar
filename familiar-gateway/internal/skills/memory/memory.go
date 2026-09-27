@@ -488,11 +488,6 @@ func (s *Skill) execSaveFact(ctx context.Context, params json.RawMessage) (skill
 		// pipeline populates sc.ScopeTag at the skills.SessionContext
 		// boundary (see pipeline.runCompletion).
 		ScopeTag: sc.ScopeTag,
-		// ExcludeFromHot mirrors the FactProto field — set by the
-		// pipeline only when running an isolated-visibility shard, so
-		// the engine writes this fact past its RAM cache straight to
-		// pgvector (FAMILIAR-SHARDS-PHASE1-FINDINGS Issue 3).
-		ExcludeFromHot: sc.ExcludeFromHot,
 	}
 
 	commitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -587,8 +582,7 @@ func (s *Skill) execRemember(ctx context.Context, params json.RawMessage) (skill
 		CreatedAt:         timestamppb.New(now),
 		LastAccessed:      timestamppb.New(now),
 		// See execSaveFact above for the shard-scoping rationale.
-		ScopeTag:       sc.ScopeTag,
-		ExcludeFromHot: sc.ExcludeFromHot,
+		ScopeTag: sc.ScopeTag,
 	}
 
 	commitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)

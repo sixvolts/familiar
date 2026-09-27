@@ -3,21 +3,18 @@ package router
 import (
 	"context"
 	"fmt"
-	"regexp"
+	"log"
 	"sort"
 	"strings"
 
 	"github.com/familiar/gateway/internal/config"
 	"github.com/familiar/gateway/internal/llm"
-	"github.com/familiar/gateway/internal/sidecar"
 )
 
 // Router selects an LLM provider for each incoming message.
 type Router struct {
 	cfg      config.RouterConfig
 	registry *Registry
-	sidecar  *sidecar.Client
-	compiled []*compiledRule
 
 	// chatRole resolves the "chat" role's primary→backup→fallback chain
 	// against live health. When set, GetChatModelID returns whatever it
@@ -40,39 +37,9 @@ type ChatRoleResolver interface {
 	Chain(role string) []string
 }
 
-type compiledRule struct {
-	ForceRule config.ForceRule
-	re        *regexp.Regexp
-}
-
 // NewRouter constructs a Router from config and a model registry.
-// sidecarClient may be nil if the sidecar is not configured.
-func NewRouter(cfg config.RouterConfig, registry *Registry, sidecarClient ...*sidecar.Client) *Router {
-	r := &Router{
-		cfg:      cfg,
-		registry: registry,
-	}
-
-	if len(sidecarClient) > 0 {
-		r.sidecar = sidecarClient[0]
-	}
-
-	for _, rule := range cfg.Rules.Force {
-		rule := rule
-		re, err := regexp.Compile(rule.Pattern)
-		if err != nil {
-			// Skip invalid patterns.
-			continue
-		}
-		r.compiled = append(r.compiled, &compiledRule{ForceRule: rule, re: re})
-	}
-
-	return r
-}
-
-// SetSidecar attaches or replaces the sidecar client used for smart routing.
-func (r *Router) SetSidecar(sc *sidecar.Client) {
-	r.sidecar = sc
+func NewRouter(cfg config.RouterConfig, registry *Registry) *Router {
+	return &Router{cfg: cfg, registry: registry}
 }
 
 // SetChatRole attaches the role resolver backing GetChatModelID, so the
@@ -91,60 +58,42 @@ func (r *Router) GetChatChain() []string {
 	return r.chatRole.Chain(config.RoleChat)
 }
 
-// Select picks a chat model for the given message + channel.
-// Returns (modelID, provider, error).
+// Select picks a chat model when no chat model resolves (the pipeline
+// calls it only then): an online model that can answer chat, local
+// first when prefer_local is set, in id order. Returns (modelID,
+// provider, error).
 //
-// CHAT-REARCH: classification is no longer a router concern —
-// the pipeline calls sidecar.Client.Classify directly. The router
-// only picks WHICH model to dispatch to. Two layers:
-//  1. force rules (regex match on the message)
-//  2. rule-based fallback (first online model, prefer-local
-//     honored when set)
+// It used to try [[router.rules.force]] first, which therefore applied
+// only in configs with no chat model at all, and then took a random
+// online model (map order), embeddings models included. Force rules are
+// no longer read (Validate warns when they're set).
 func (r *Router) Select(ctx context.Context, msg string, channelID string, apiKeyFn func(string) string) (string, llm.Provider, error) {
-	if !r.cfg.Enabled {
-		return r.selectFallback(apiKeyFn)
-	}
-
-	// 1. Check force rules (highest priority — explicit overrides).
-	for _, rule := range r.compiled {
-		if rule.re.MatchString(msg) {
-			if rule.ForceRule.Channel == "" || rule.ForceRule.Channel == channelID {
-				p, err := r.registry.GetProvider(rule.ForceRule.Model, apiKeyFn)
-				if err == nil {
-					return rule.ForceRule.Model, p, nil
-				}
-			}
-		}
-	}
-
-	// 2. Rule-based fallback: prefer local if configured.
 	return r.selectRuleBased(apiKeyFn)
 }
 
-// selectRuleBased is the original rule-based routing logic.
+// selectRuleBased is the rule-based pick behind Select.
 func (r *Router) selectRuleBased(apiKeyFn func(string) string) (string, llm.Provider, error) {
-	if r.cfg.PreferLocal {
-		for _, id := range r.registry.Online() {
-			r.registry.mu.RLock()
-			entry := r.registry.entries[id]
-			r.registry.mu.RUnlock()
-
-			if entry != nil && entry.Config.LatencyProfile == "local" {
-				p, err := r.registry.GetProvider(id, apiKeyFn)
-				if err == nil {
-					return id, p, nil
-				}
-			}
+	online := r.registry.Online()
+	sort.Strings(online)
+	var local, rest []string
+	for _, id := range online {
+		r.registry.mu.RLock()
+		entry := r.registry.entries[id]
+		r.registry.mu.RUnlock()
+		if entry == nil || entry.Config.Provider == "embeddings" {
+			continue
+		}
+		if r.cfg.PreferLocal && entry.Config.LatencyProfile == "local" {
+			local = append(local, id)
+		} else {
+			rest = append(rest, id)
 		}
 	}
-
-	for _, id := range r.registry.Online() {
-		p, err := r.registry.GetProvider(id, apiKeyFn)
-		if err == nil {
+	for _, id := range append(local, rest...) {
+		if p, err := r.registry.GetProvider(id, apiKeyFn); err == nil {
 			return id, p, nil
 		}
 	}
-
 	return "", nil, fmt.Errorf("no online models available")
 }
 
@@ -246,24 +195,36 @@ func (r *Router) chatModelIDFromConfig() string {
 	return roleless[0]
 }
 
-// GetSidecarModelID returns the canonical model ID for the sidecar from
-// the registry, suitable for GetProvider/GetModelConfig lookups.
+// GetSidecarModelID returns the model shard tier1/tier2 invocations run
+// on: what the classify role resolves to right now (its failover chain,
+// offline candidates skipped), the fast model the operator put on the
+// critical path. It used to be the first registry id starting
+// "sidecar/", in map order: a prefix the example config calls
+// informational ("mac/gemma" broke every tier1 shard), a random pick
+// between two such models, and no health check. With no classify
+// model (no sidecar configured) they run on the chat model, logged:
+// failing every such shard would be worse. Without a role resolver
+// (tests) the "sidecar/" prefix is still used, in id order.
 func (r *Router) GetSidecarModelID() string {
-	r.registry.mu.RLock()
-	defer r.registry.mu.RUnlock()
-	for id := range r.registry.entries {
-		if strings.HasPrefix(id, "sidecar/") {
+	if r.chatRole != nil {
+		if id, _, ok := r.chatRole.Resolve(config.RoleClassify); ok && id != "" {
 			return id
 		}
+		id := r.GetChatModelID()
+		log.Printf("[router] tier1/tier2 shard: no classify model resolves; running on the chat model %q", id)
+		return id
 	}
-	return ""
-}
-
-// selectFallback is the safe-degradation path when the sidecar
-// classifier returns low-confidence or fails entirely. With
-// FallbackModel removed, it just delegates to rule-based —
-// kept as a named function so the existing call sites stay
-// readable. CHAT-REARCH S1.2.
-func (r *Router) selectFallback(apiKeyFn func(string) string) (string, llm.Provider, error) {
-	return r.selectRuleBased(apiKeyFn)
+	r.registry.mu.RLock()
+	defer r.registry.mu.RUnlock()
+	var ids []string
+	for id := range r.registry.entries {
+		if strings.HasPrefix(id, "sidecar/") {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	if len(ids) == 0 {
+		return ""
+	}
+	return ids[0]
 }

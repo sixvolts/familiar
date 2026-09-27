@@ -90,7 +90,7 @@ func TestSidecar_SendsConfiguredModelName(t *testing.T) {
 	srv := rec.server(t)
 	res := modelrole.New(map[string][]string{TaskExtract: {"sidecar/gemma"}},
 		func(string) string { return modelrole.StatusOnline })
-	c := NewClient(config.SidecarConfig{Enabled: true}, config.RouterConfig{},
+	c := NewClient(config.SidecarConfig{Enabled: true},
 		namedEndpoints{fakeEndpoints{map[string]string{"sidecar/gemma": srv.URL}},
 			map[string]string{"sidecar/gemma": "gemma-4-26b-a4b"}}, res)
 	if _, err := c.ExtractFacts(context.Background(), []Turn{{Role: "user", Content: "My dentist is Dr. Alvarez."}}); err != nil {
@@ -109,7 +109,7 @@ func TestSidecar_RequestTimeoutApplies(t *testing.T) {
 	health := map[string]string{"fast": modelrole.StatusOnline, "big": modelrole.StatusOnline}
 	eps := map[string]string{"fast": "http://127.0.0.1:8400", "big": "http://127.0.0.1:8500"}
 
-	c := NewClient(config.SidecarConfig{Enabled: true, RequestTimeoutMs: 45000}, config.RouterConfig{},
+	c := NewClient(config.SidecarConfig{Enabled: true, RequestTimeoutMs: 45000},
 		fakeEndpoints{models: eps}, modelrole.New(chains, func(id string) string { return health[id] }))
 	if got := c.routerFor(TaskExtract).client.Timeout; got != 45*time.Second {
 		t.Errorf("extract timeout = %v, want request_timeout_ms (45s)", got)
@@ -137,7 +137,7 @@ func TestSidecar_FailoverOnSameServerSwitchesName(t *testing.T) {
 		defer mu.Unlock()
 		return health[id]
 	})
-	c := NewClient(config.SidecarConfig{Enabled: true}, config.RouterConfig{},
+	c := NewClient(config.SidecarConfig{Enabled: true},
 		fakeEndpoints{models: map[string]string{chain[0]: srv.URL, chain[1]: srv.URL}}, res)
 	turn := []Turn{{Role: "user", Content: "My dentist is Dr. Alvarez."}}
 	if _, err := c.ExtractFacts(context.Background(), turn); err != nil {

@@ -20,8 +20,6 @@ import (
 //   - SystemPrompt replaces the layered (base + tier + tool_policy)
 //     prompt. The shard's prompt is the only non-user context the LLM
 //     sees.
-//   - SkipMemoryRetrieval disables engine.AssembleContext, pgvector
-//     search, working-context zone, and relationship graph injection.
 //   - SkipSessionHydration skips the persistent-summary load. Set for
 //     ephemeral shards.
 //   - SkipCommit skips commitAndExtract entirely. Set for ephemeral
@@ -47,7 +45,6 @@ type ShardOverrides struct {
 
 	SystemPrompt string
 
-	SkipMemoryRetrieval  bool
 	SkipSessionHydration bool
 	SkipCommit           bool
 
@@ -63,17 +60,6 @@ type ShardOverrides struct {
 	// "empty book_access = all owner books" semantics); the wiki skill
 	// reads it off SessionContext.BookScope and denies anything else.
 	BookAccess []string
-
-	// ExcludeFromHot, when true, instructs the engine to bypass the
-	// hot RAM tier on every commit this invocation produces — both
-	// the pipeline's conversation fact and any facts a tool dispatch
-	// writes via the memory skill. Set by the shardapi handler when
-	// the shard's visibility is `isolated`. Closes the leak path
-	// where an isolated-shard write could be returned by top-level
-	// retrieval through the engine's hot cache before the
-	// gateway-side pgvector filter could re-hide it
-	// (FAMILIAR-SHARDS-PHASE1-FINDINGS Issue 3).
-	ExcludeFromHot bool
 
 	ModelOverride string
 	TierHint      string
@@ -298,16 +284,6 @@ func bookScopeFor(overrides *ShardOverrides) []string {
 		return nil
 	}
 	return overrides.BookAccess
-}
-
-// excludeFromHotFor mirrors scopeTagFor for the RAM-bypass flag. Used
-// by every commit site that needs to stamp ExcludeFromHot on a
-// FactProto and by runCompletion when populating skills.SessionContext.
-func excludeFromHotFor(overrides *ShardOverrides) bool {
-	if overrides == nil {
-		return false
-	}
-	return overrides.ExcludeFromHot
 }
 
 // shardModelOverride resolves overrides.ModelOverride / overrides.TierHint

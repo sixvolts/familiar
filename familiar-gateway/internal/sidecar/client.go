@@ -18,7 +18,6 @@ import (
 // "slot" abstraction with this explicit task → model mapping.
 const (
 	TaskClassify      = "classify"
-	TaskCondense      = "condense"
 	TaskExpandQueries = "expand_queries"
 	TaskExtract       = "extract"
 	TaskExtractLarge  = "extract_large" // big-model route for large documents (§research)
@@ -31,7 +30,7 @@ const (
 // allTasks is the canonical ordered task list — used for resolution,
 // startup logging, and so the log output is stable run to run.
 var allTasks = []string{
-	TaskClassify, TaskCondense, TaskExpandQueries,
+	TaskClassify, TaskExpandQueries,
 	TaskExtract, TaskExtractLarge, TaskSummarize, TaskConflict,
 	TaskRelationship, TaskEntityGroup,
 }
@@ -43,13 +42,16 @@ var allTasks = []string{
 // ceiling costs nothing on the user's path.
 const LargeExtractTimeout = 5 * time.Minute
 
-// Critical-path tasks (classify, condense, expand_queries) block
-// time-to-first-token — they run before the model can start
-// generating, so their methods syncEnter the endpoint's gate to take
-// priority over background work sharing the same model. The remaining
-// tasks are background / post-turn and acquireAsync instead. The
-// distinction is applied per-method (see Classify vs ExtractFacts),
-// not from a lookup table.
+// Critical-path tasks (classify, expand_queries) block time-to-first-
+// token — they run before the model can start generating, so their
+// methods syncEnter the endpoint's gate to take priority over
+// background work sharing the same model. Every other task is
+// background work (post-turn extraction and summarizing, titles, the
+// memory backfills) and runs through background(): one at a time per
+// endpoint, and never while a critical-path call is in flight. Only
+// extraction used to take the gate, so a post-turn batch or summary
+// could hold the slot and push the next turn's classify into its
+// timeout.
 
 // ErrNoModelConfigured is returned by a Client method whose task has
 // no model assigned (its role chain names no model). Callers treat it
@@ -69,8 +71,7 @@ var ErrNoModelConfigured = errors.New("sidecar: no model configured for this tas
 // mode, so a task follows its role's failover the moment a probe
 // condemns the primary.
 type Client struct {
-	cfg  config.SidecarConfig
-	rCfg config.RouterConfig
+	cfg config.SidecarConfig
 
 	// roles resolves a task/role name to a live model ID + health;
 	// endpoints turns a model ID into its HTTP endpoint. A nil roles
@@ -86,9 +87,6 @@ type Client struct {
 	// endpoint.
 	routers map[string]*HTTPRouter
 	gates   map[string]*slotGate
-
-	stopOnce sync.Once
-	stopCh   chan struct{}
 }
 
 // EndpointResolver turns a model ID into the HTTP endpoint of the
@@ -96,12 +94,7 @@ type Client struct {
 //
 // EndpointForModel("") returns "". A nil resolver is tolerated (every
 // lookup yields "") so tests can construct a Client without a registry.
-//
-// EndpointForRole is retained for the (now config-normalized) role tags
-// but is no longer consulted on the routing path — task→model→endpoint
-// resolution goes through the RoleResolver + EndpointForModel.
 type EndpointResolver interface {
-	EndpointForRole(role string) string
 	EndpointForModel(modelID string) string
 }
 
@@ -120,17 +113,15 @@ type RoleResolver interface {
 // [roles] (config.normalizeRoles folds the legacy [sidecar].*_model
 // keys, role= tags, and router_endpoint into them at load), so the
 // client itself holds no routing config — it resolves every task
-// through the RoleResolver on each call. Start() is a no-op kept for
-// caller symmetry; health is driven by the shared registry heartbeat.
-func NewClient(sidecarCfg config.SidecarConfig, routerCfg config.RouterConfig, endpoints EndpointResolver, roles RoleResolver) *Client {
+// through the RoleResolver on each call. Health is driven by the shared
+// registry heartbeat.
+func NewClient(sidecarCfg config.SidecarConfig, endpoints EndpointResolver, roles RoleResolver) *Client {
 	return &Client{
 		cfg:       sidecarCfg,
-		rCfg:      routerCfg,
 		roles:     roles,
 		endpoints: endpoints,
 		routers:   make(map[string]*HTTPRouter),
 		gates:     make(map[string]*slotGate),
-		stopCh:    make(chan struct{}),
 	}
 }
 
@@ -251,24 +242,6 @@ func (c *Client) LogRouting() {
 	}
 }
 
-// routerFor returns the HTTPRouter for a task's currently-resolved
-// endpoint regardless of health, or nil when the task names no model.
-// Used by callers that only need the wired router, not a readiness gate.
-func (c *Client) routerFor(task string) *HTTPRouter {
-	if c.roles == nil {
-		return nil
-	}
-	modelID, _, ok := c.roles.Resolve(task)
-	if !ok || modelID == "" {
-		return nil
-	}
-	ep := c.endpointFor(modelID)
-	if ep == "" {
-		return nil
-	}
-	return c.routerForEndpoint(ep, c.requestModelFor(modelID), task == TaskExtractLarge)
-}
-
 // TaskEndpoint returns the currently-resolved HTTP endpoint for a task,
 // or "" when the task is unconfigured. Used by callers that need a raw
 // endpoint URL outside the routed-method path — e.g. the pipeline's
@@ -287,18 +260,19 @@ func (c *Client) TaskEndpoint(task string) string {
 	return ""
 }
 
-// TaskTarget is TaskEndpoint plus the model name to send, for callers
-// that post to a task's endpoint themselves (the preamble generator).
-// Resolved on every call, so it follows the task's failover.
+// TaskTarget is the endpoint and model name to send for a task, for
+// callers that post to a task's endpoint themselves (the preamble
+// generator). Resolved on every call, so it follows the task's failover;
+// ("", "") when the task has no model or its whole chain is offline.
 func (c *Client) TaskTarget(task string) (endpoint, model string) {
-	if c == nil || c.roles == nil {
+	if c == nil {
 		return "", ""
 	}
-	modelID, _, ok := c.roles.Resolve(task)
-	if !ok || modelID == "" {
+	modelID, ep, err := c.resolveTask(task)
+	if err != nil {
 		return "", ""
 	}
-	return c.endpointFor(modelID), c.requestModelFor(modelID)
+	return ep, c.requestModelFor(modelID)
 }
 
 // taskReady resolves a task to its router and confirms the resolved
@@ -312,33 +286,6 @@ func (c *Client) taskReady(task string) (*HTTPRouter, error) {
 	return c.routerForEndpoint(ep, c.requestModelFor(modelID), task == TaskExtractLarge), nil
 }
 
-// Start is a no-op retained for caller symmetry. Health is driven by
-// the shared model registry's heartbeat (router.Registry.
-// StartHealthChecks), which probes every sidecar task model along with
-// the chat models — there is no separate sidecar health loop anymore.
-func (c *Client) Start(ctx context.Context) {}
-
-// Stop shuts down the client.
-func (c *Client) Stop() {
-	c.stopOnce.Do(func() {
-		close(c.stopCh)
-	})
-}
-
-// Available reports whether at least one sidecar task currently
-// resolves to a reachable (non-offline) model.
-func (c *Client) Available() bool {
-	if c.roles == nil {
-		return false
-	}
-	for _, task := range allTasks {
-		if _, _, err := c.resolveTask(task); err == nil {
-			return true
-		}
-	}
-	return false
-}
-
 // Summarize produces a rolling summary of a conversation using the
 // sidecar. Returns prevSummary unchanged when the summarize task is
 // unconfigured or its endpoint is down.
@@ -347,7 +294,12 @@ func (c *Client) Summarize(ctx context.Context, prevSummary string, turns []Turn
 	if err != nil {
 		return prevSummary, err
 	}
-	return r.Summarize(ctx, prevSummary, turns)
+	out := prevSummary
+	err = c.background(ctx, TaskSummarize, func() (err error) {
+		out, err = r.Summarize(ctx, prevSummary, turns)
+		return err
+	})
+	return out, err
 }
 
 // ExtractFacts asks the sidecar to extract discrete facts and
@@ -355,17 +307,7 @@ func (c *Client) Summarize(ctx context.Context, prevSummary string, turns []Turn
 // post-turn work — yields to any in-flight critical-path call that
 // shares its endpoint via the per-endpoint sync gate.
 func (c *Client) ExtractFacts(ctx context.Context, turns []Turn) (ExtractionResult, error) {
-	r, err := c.taskReady(TaskExtract)
-	if err != nil {
-		return ExtractionResult{}, err
-	}
-	if gate := c.gateForTask(TaskExtract); gate != nil {
-		if err := gate.acquireAsync(ctx); err != nil {
-			return ExtractionResult{}, err
-		}
-		defer gate.releaseAsync()
-	}
-	return r.ExtractFacts(ctx, turns)
+	return c.ExtractFactsWithContext(ctx, turns, nil)
 }
 
 // ExtractFactsWithContext is ExtractFacts with a read-only prior-turns block
@@ -376,13 +318,12 @@ func (c *Client) ExtractFactsWithContext(ctx context.Context, turns, context []T
 	if err != nil {
 		return ExtractionResult{}, err
 	}
-	if gate := c.gateForTask(TaskExtract); gate != nil {
-		if err := gate.acquireAsync(ctx); err != nil {
-			return ExtractionResult{}, err
-		}
-		defer gate.releaseAsync()
-	}
-	return r.ExtractFactsWithContext(ctx, turns, context)
+	var out ExtractionResult
+	err = c.background(ctx, TaskExtract, func() (err error) {
+		out, err = r.ExtractFactsWithContext(ctx, turns, context)
+		return err
+	})
+	return out, err
 }
 
 // ExtractFactsLarge routes extraction of a large document to the
@@ -395,13 +336,12 @@ func (c *Client) ExtractFactsLarge(ctx context.Context, turns []Turn) (Extractio
 	if err != nil {
 		return c.ExtractFacts(ctx, turns)
 	}
-	if gate := c.gateForTask(TaskExtractLarge); gate != nil {
-		if err := gate.acquireAsync(ctx); err != nil {
-			return ExtractionResult{}, err
-		}
-		defer gate.releaseAsync()
-	}
-	return r.ExtractFacts(ctx, turns)
+	var out ExtractionResult
+	err = c.background(ctx, TaskExtractLarge, func() (err error) {
+		out, err = r.ExtractFactsLarge(ctx, turns)
+		return err
+	})
+	return out, err
 }
 
 // ExtractRelationshipsFromFacts mines entity-relationship triples
@@ -411,7 +351,12 @@ func (c *Client) ExtractRelationshipsFromFacts(ctx context.Context, facts []stri
 	if err != nil {
 		return nil, err
 	}
-	return r.ExtractRelationshipsFromFacts(ctx, facts)
+	var out []ExtractedRelationship
+	err = c.background(ctx, TaskRelationship, func() (err error) {
+		out, err = r.ExtractRelationshipsFromFacts(ctx, facts)
+		return err
+	})
+	return out, err
 }
 
 // GroupEntities clusters a list of noisy entity names into alias
@@ -421,7 +366,12 @@ func (c *Client) GroupEntities(ctx context.Context, names []string) ([]EntityGro
 	if err != nil {
 		return nil, err
 	}
-	return r.GroupEntities(ctx, names)
+	var out []EntityGroup
+	err = c.background(ctx, TaskEntityGroup, func() (err error) {
+		out, err = r.GroupEntities(ctx, names)
+		return err
+	})
+	return out, err
 }
 
 // BatchClassifyAndRelate runs the post-turn conflict-resolution +
@@ -433,18 +383,12 @@ func (c *Client) BatchClassifyAndRelate(ctx context.Context, in BatchExtractInpu
 	if err != nil {
 		return BatchExtractResult{}, err
 	}
-	return r.BatchClassifyAndRelate(ctx, in)
-}
-
-// ClassifyConflict classifies the relationship between an existing
-// fact and a newly-extracted one. Callers treat an error as a signal
-// to fall back to ADD — the sleep cycle reconciles later.
-func (c *Client) ClassifyConflict(ctx context.Context, existing, incoming string) (string, error) {
-	r, err := c.taskReady(TaskConflict)
-	if err != nil {
-		return "", err
-	}
-	return r.ClassifyConflict(ctx, existing, incoming)
+	var out BatchExtractResult
+	err = c.background(ctx, TaskConflict, func() (err error) {
+		out, err = r.BatchClassifyAndRelate(ctx, in)
+		return err
+	})
+	return out, err
 }
 
 // ExpandQueries decomposes a user message into multiple targeted
@@ -462,21 +406,6 @@ func (c *Client) ExpandQueries(ctx context.Context, userMsg string) ([]string, e
 	return r.ExpandQueries(ctx, userMsg)
 }
 
-// CondenseQuery rewrites a mid-conversation user message into a
-// self-contained retrieval query. Critical-path: enters the sync
-// gate. Returns the raw message + error on any miss.
-func (c *Client) CondenseQuery(ctx context.Context, history []Turn, userMsg string) (string, error) {
-	r, err := c.taskReady(TaskCondense)
-	if err != nil {
-		return userMsg, err
-	}
-	if gate := c.gateForTask(TaskCondense); gate != nil {
-		gate.syncEnter()
-		defer gate.syncExit()
-	}
-	return r.CondenseQuery(ctx, history, userMsg)
-}
-
 // GenerateTitle asks the sidecar for a 1-3 word title for a new chat
 // from its opening exchange. Routed to the classify task — the fast
 // small model is exactly right for a tiny one-shot prompt. Returns an
@@ -487,7 +416,25 @@ func (c *Client) GenerateTitle(ctx context.Context, userMsg, assistantMsg string
 	if err != nil {
 		return "", err
 	}
-	return r.GenerateTitle(ctx, userMsg, assistantMsg)
+	var out string
+	err = c.background(ctx, TaskClassify, func() (err error) {
+		out, err = r.GenerateTitle(ctx, userMsg, assistantMsg)
+		return err
+	})
+	return out, err
+}
+
+// background runs fn as background work on task's endpoint: after any
+// critical-path call in flight there, and one background call at a time
+// (see slot_gate.go). Waiting for the gate counts against ctx.
+func (c *Client) background(ctx context.Context, task string, fn func() error) error {
+	if gate := c.gateForTask(task); gate != nil {
+		if err := gate.acquireAsync(ctx); err != nil {
+			return err
+		}
+		defer gate.releaseAsync()
+	}
+	return fn()
 }
 
 // Embedding does not route through the sidecar. It resolves through the
@@ -500,7 +447,7 @@ func (c *Client) GenerateTitle(ctx context.Context, userMsg, assistantMsg string
 
 // gateForTask returns the sync/async gate guarding a task's currently-
 // resolved endpoint, building it on first use. Critical-path tasks
-// syncEnter it; the async extract task acquireAsync it. Tasks that
+// syncEnter it; background tasks acquireAsync it (see background). Tasks that
 // resolve to the same endpoint share a gate and contend; tasks on
 // distinct endpoints never do. Returns nil when the task is
 // unconfigured or its chain is down.
@@ -517,19 +464,4 @@ func (c *Client) gateForTask(task string) *slotGate {
 		c.gates[ep] = g
 	}
 	return g
-}
-
-func slotStateString(s SlotState) string {
-	switch s {
-	case SlotReady:
-		return "ready"
-	case SlotLoading:
-		return "loading"
-	case SlotError:
-		return "error"
-	case SlotUnloading:
-		return "unloading"
-	default:
-		return "unknown"
-	}
 }

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 	"strings"
+
+	"github.com/BurntSushi/toml"
 )
 
 // Validate sanity-checks a loaded Config and reports the first problem
@@ -222,6 +224,9 @@ func (c *Config) Validate() error {
 		log.Printf("[config] note: [sidecar].retry_interval_seconds is deprecated — heartbeat cadence comes from [roles].health_interval_secs (%ds)",
 			c.Roles.IntervalOrDefault())
 	}
+	for _, knob := range c.ignored {
+		log.Printf("[config] warning: %s is set but does nothing; remove it", knob)
+	}
 
 	// Heartbeat tuning — coerce non-positive values to defaults with a
 	// warning rather than erroring; a bad interval shouldn't block boot.
@@ -355,4 +360,31 @@ func (c *Config) Validate() error {
 	// longer carries any schedules to check.
 
 	return nil
+}
+
+// ignoredKeys are config keys that are parsed (so older configs load)
+// but read by nothing; the example used to document what each did.
+var ignoredKeys = [][]string{
+	{"router", "use_sidecar_router"},
+	{"router", "fallback_router"},
+	{"router", "confidence_threshold"},
+	{"router", "enable_reasoning"},
+	{"router", "reasoning_threshold"},
+	{"router", "rules", "force"},
+	{"sidecar", "fallback_on_failure"},
+	{"sidecar", "connect_timeout_ms"},
+	{"sidecar", "socket_path"},
+	{"sidecar", "condense_model"},
+	{"roles", "condense"},
+}
+
+// ignoredKnobs names the ignoredKeys the file sets.
+func ignoredKnobs(md toml.MetaData) []string {
+	var out []string
+	for _, k := range ignoredKeys {
+		if md.IsDefined(k...) {
+			out = append(out, "["+strings.Join(k[:len(k)-1], ".")+"]."+k[len(k)-1])
+		}
+	}
+	return out
 }

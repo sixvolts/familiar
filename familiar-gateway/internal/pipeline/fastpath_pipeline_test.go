@@ -36,12 +36,12 @@ func TestClassifyRequest_TrivialFastPathSkipsClassifier(t *testing.T) {
 	}))
 	defer classSrv.Close()
 	routes := classifyOnlyRoutes{endpoint: classSrv.URL}
-	pl.sidecarClient = sidecar.NewClient(config.SidecarConfig{Enabled: true}, config.RouterConfig{}, routes, routes)
+	pl.sidecarClient = sidecar.NewClient(config.SidecarConfig{Enabled: true}, routes, routes)
 
 	sess := pl.sessions.GetOrCreate("cli", "user1")
 
 	// Trivial: must NOT touch the classifier, must get the fast-path verdict.
-	route, err := pl.classifyRequest(context.Background(), sess, "thanks", nil, nil)
+	route, err := pl.classifyRequest(context.Background(), sess, "thanks", nil)
 	if err != nil {
 		t.Fatalf("classifyRequest(trivial): %v", err)
 	}
@@ -62,7 +62,7 @@ func TestClassifyRequest_TrivialFastPathSkipsClassifier(t *testing.T) {
 	}
 
 	// Control: a real question MUST fall through and hit the classifier once.
-	if _, err := pl.classifyRequest(context.Background(), sess, "what OS does gpu-host run", nil, nil); err != nil {
+	if _, err := pl.classifyRequest(context.Background(), sess, "what OS does gpu-host run", nil); err != nil {
 		t.Fatalf("classifyRequest(control): %v", err)
 	}
 	if n := atomic.LoadInt32(&classifyHits); n != 1 {

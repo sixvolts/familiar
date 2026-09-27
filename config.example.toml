@@ -201,21 +201,17 @@ dimension = 768                       # nomic = 768; bge-large / mxbai = 1024
 # max_searches = 5
 
 # ─── Router ─────────────────────────────────────────────────────────
-# Tier selection: sidecar (tier 1-2) for cheap/chat work, backend
-# (tier 3-4) for reasoning/code. Rule-based router is the fast default;
-# sidecar-model router is more accurate but adds ~200ms per request.
+# Chat is served by [roles.chat] (see "Roles" below). The router only
+# picks a model when no chat model resolves at all: an online model
+# that can answer chat, local first when prefer_local is set.
+#
+# Parsed but ignored (each logs a warning at startup): use_sidecar_router,
+# fallback_router, confidence_threshold, enable_reasoning,
+# reasoning_threshold and [[router.rules.force]]. Force rules applied
+# only when no chat model was configured, so in practice never.
 [router]
 enabled = true
 prefer_local = true
-use_sidecar_router = false
-fallback_router = "rule_based"
-confidence_threshold = 0.6            # below this, fall through to rule-based selection
-
-# Force-routing rules: bypass the router for matching patterns.
-# [[router.rules.force]]
-# pattern = "(?i)code|debug|implement|refactor"
-# model = "gpu-host/qwen3.5-122b"
-# reason = "code_specialist"
 
 # ─── GPU Sidecar ────────────────────────────────────────────────────
 # Local models for the gateway's auxiliary tasks: classification,
@@ -233,7 +229,6 @@ confidence_threshold = 0.6            # below this, fall through to rule-based s
 # task. See the "Roles: primary/backup failover" section further down.
 [sidecar]
 enabled = false
-connect_timeout_ms = 500
 # General per-request ceiling for sidecar tasks.
 #
 # NOTE the classifier clamps this to 6s for its own call. It runs before
@@ -242,7 +237,6 @@ connect_timeout_ms = 500
 # now cheap (medium/shallow), not maximum effort. Lower this to tighten the
 # classifier's deadline; raising it will not loosen it.
 request_timeout_ms = 10000
-fallback_on_failure = true            # route to backend if sidecar dies
 
 # DEPRECATED, parsed but ignored (each logs a warning at startup):
 #   embedder_endpoint       — never read at all. Configure a
@@ -251,6 +245,9 @@ fallback_on_failure = true            # route to backend if sidecar dies
 #   retry_interval_seconds  — the sidecar no longer runs its own health
 #                             loop; every model shares the one heartbeat
 #                             at [roles].health_interval_secs.
+#   connect_timeout_ms, fallback_on_failure, socket_path — never read.
+#   condense_model / [roles.condense] — query condensing is part of the
+#                             classify call; there is no condense task.
 # embedder_endpoint = ""
 # retry_interval_seconds = 10
 
@@ -267,9 +264,9 @@ default_model = "sidecar/gemma-4-26b-a4b"
 
 # Critical path — blocks time-to-first-token. Use the fastest model.
 # If you run a second, smaller instance (say a 4B alongside a 31B),
-# declare it in [[models]] and point these three at it instead.
+# declare it in [[models]] and point these two at it instead. The
+# classify model also serves tier1/tier2 shards.
 classify_model       = "sidecar/gemma-4-26b-a4b"
-condense_model       = "sidecar/gemma-4-26b-a4b"
 expand_queries_model = "sidecar/gemma-4-26b-a4b"
 
 # Background / post-turn — runs after generation. Use a capable model.
@@ -288,9 +285,10 @@ entity_group_model = "sidecar/gemma-4-26b-a4b"
 # fine to point at the heavy backend even though it's slow.
 extract_large_model = "gpu-host/qwen3.5-122b"
 
-# router_endpoint is DEPRECATED. Pre-SIDECAR-SLOT-FIXES configs that
-# set it (and no *_model keys) still work via the legacy role path —
-# the gateway resolves task endpoints from [[models]] role tags.
+# router_endpoint is DEPRECATED. A config that sets it and declares no
+# model in the small slot gets a model "sidecar/router-endpoint" at that
+# URL, which every task without a model of its own then uses (logged at
+# startup). Prefer [[models]] plus [roles.<task>].
 # router_endpoint = ""
 
 # ─── Memory (pgvector) ──────────────────────────────────────────────
@@ -599,10 +597,9 @@ capabilities    = [
 latency_profile = "slow"
 max_concurrent  = 1
 
-# Sidecar — small/fast model for tiers 1-2 (chat, classification,
-# synthesis). Its endpoint typically matches [sidecar].router_endpoint
-# above; duplicating here lets the router treat it as a routable
-# destination with its own capability set.
+# Sidecar — small/fast model for the sidecar tasks (classification,
+# extraction, summaries) and tier1/tier2 shards, which run on whatever
+# the classify role resolves to.
 [[models]]
 id              = "sidecar/gemma-4-26b-a4b"
 provider        = "llama-server"
@@ -635,9 +632,9 @@ max_concurrent  = 1
 #
 # The roles:
 #   chat            the interactive answering model
-#   classify        \
-#   condense         | critical path — these run before the model can
-#   expand_queries  /  start generating, so keep them fast
+#   classify        \  critical path — these run before the model can
+#   expand_queries  /  start generating, so keep them fast (classify
+#                      also serves tier1/tier2 shards)
 #   extract         \
 #   extract_large    |
 #   summarize        | background / post-turn work

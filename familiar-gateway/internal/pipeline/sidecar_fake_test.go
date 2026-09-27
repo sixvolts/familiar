@@ -30,7 +30,6 @@ func (r taskRoutes) Chain(role string) []string {
 	}
 	return nil
 }
-func (r taskRoutes) EndpointForRole(string) string { return "" }
 func (r taskRoutes) EndpointForModel(id string) string {
 	return r[strings.TrimPrefix(id, "test/")]
 }
@@ -75,5 +74,5 @@ func sidecarFor(f *fakeSidecar, tasks ...string) *sidecar.Client {
 	for _, task := range tasks {
 		routes[task] = f.URL
 	}
-	return sidecar.NewClient(config.SidecarConfig{Enabled: true}, config.RouterConfig{}, routes, routes)
+	return sidecar.NewClient(config.SidecarConfig{Enabled: true}, routes, routes)
 }

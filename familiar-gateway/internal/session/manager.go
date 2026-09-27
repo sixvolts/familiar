@@ -70,6 +70,7 @@ type Session struct {
 	// it. Cleared by SetSummary.
 	summaryUnknown bool
 	nextSeq        uint64 // Seq of the next turn added
+	liveTurns      int    // turns running on this session (BeginTurn/EndTurn)
 	// explicitID is true when this session was created via
 	// GetOrCreateWithID — i.e. its ID is a stable, externally-
 	// meaningful identifier (a workspace conversation UUID, a Slack
@@ -277,6 +278,28 @@ func (s *Session) ClaimIdentity(platform, canonicalID string) bool {
 	s.platform = platform
 	s.canonicalID = canonicalID
 	return true
+}
+
+// BeginTurn records a turn starting on the session, and EndTurn its end
+// (defer it). A session with a turn running is never evicted as idle:
+// LastActive only moves when a turn commits, so a long turn on a session
+// quiet for 25 minutes was evicted mid-turn, and Stop and status (which
+// looked the session up) reported nothing running while it generated.
+func (s *Session) BeginTurn() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.liveTurns++
+	s.LastActive = time.Now()
+}
+
+// EndTurn: see BeginTurn.
+func (s *Session) EndTurn() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.liveTurns > 0 {
+		s.liveTurns--
+	}
+	s.LastActive = time.Now()
 }
 
 // IsHydrated reports whether the persistent running_summary has already
@@ -500,6 +523,11 @@ func (s *Session) GetMeta(key string) (string, bool) {
 // Manager manages active sessions.
 type Manager struct {
 	sessions sync.Map // map[string]*Session
+	// implicitMu serializes the implicit (channel, sender) path's
+	// look-up-then-create, which two concurrent first requests (a
+	// scheduled run and a manual "run now") used to race through,
+	// making two sessions whose context then split between runs.
+	implicitMu sync.Mutex
 }
 
 // NewManager creates a new session manager.
@@ -566,6 +594,8 @@ func (m *Manager) getOrCreate(channelID, senderID, explicitID string) *Session {
 	// Implicit-ID path: scan by (channel, sender). Adapters using
 	// this path get one session per (channel, sender) — the legacy
 	// behavior.
+	m.implicitMu.Lock()
+	defer m.implicitMu.Unlock()
 	var existing *Session
 	m.sessions.Range(func(_, v interface{}) bool {
 		s := v.(*Session)
@@ -600,10 +630,8 @@ func (m *Manager) getOrCreate(channelID, senderID, explicitID string) *Session {
 // eviction transparently picks up where they left off.
 //
 // Sessions mid-summarization are skipped so eviction never races a
-// compaction goroutine. An in-flight turn won't be idle (its
-// LastActive was just bumped), and even if a turn races the sweep,
-// it keeps working on its own *Session pointer — the next request
-// just rehydrates a fresh one.
+// compaction goroutine, and so are sessions with a turn running
+// (BeginTurn).
 func (m *Manager) EvictIdle(maxIdle time.Duration) int {
 	if maxIdle <= 0 {
 		return 0
@@ -614,7 +642,7 @@ func (m *Manager) EvictIdle(maxIdle time.Duration) int {
 		s := v.(*Session)
 		s.mu.Lock()
 		idle := s.LastActive.Before(cutoff)
-		busy := s.summarizing
+		busy := s.summarizing || s.liveTurns > 0
 		s.mu.Unlock()
 		if idle && !busy {
 			m.sessions.Delete(k)

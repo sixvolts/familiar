@@ -681,8 +681,11 @@ func ephemeralConversation(key string) (convID string, ok bool) {
 // is a turn under that key to act on. A registered session is checked
 // against its owner. An ephemeral shard turn runs under an unregistered
 // session, so its ownership is its conversation's; without this path
-// Stop never reached those turns and the model kept decoding. A shard
-// session may only address turns in conversations bound to its shard.
+// Stop never reached those turns and the model kept decoding. So is a
+// conversation's turn whose session is no longer registered (evicted
+// while the turn ran): Stop and status used to report nothing running.
+// A shard session may only address turns in conversations bound to its
+// shard.
 func (a *Adapter) turnOwnership(ctx context.Context, key, userID, shardID string) (owned, live bool) {
 	convKey := key
 	cid, ephemeral := ephemeralConversation(key)
@@ -695,17 +698,20 @@ func (a *Adapter) turnOwnership(ctx context.Context, key, userID, shardID string
 	if sess, ok := a.sessions.Get(key); ok {
 		return sess.UserID() == userID, true
 	}
-	if !ephemeral {
-		return true, false
-	}
 	a.mu.RLock()
 	owner := a.convOwner
 	a.mu.RUnlock()
-	if owner == nil {
-		return false, false
+	var mine bool
+	if owner != nil {
+		ok, err := owner.OwnsConversation(ctx, convKey, userID)
+		mine = err == nil && ok
 	}
-	ok, err := owner.OwnsConversation(ctx, convKey, userID)
-	if err != nil || !ok {
+	if !ephemeral {
+		// Not the caller's conversation (or not a conversation at all):
+		// a stale key with nothing to act on, as before.
+		return true, mine
+	}
+	if !mine {
 		return false, false
 	}
 	return true, true

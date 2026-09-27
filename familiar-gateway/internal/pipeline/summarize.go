@@ -146,7 +146,15 @@ func (p *Pipeline) runSummarize(sess *session.Session, overrides *ShardOverrides
 		SummaryPreview: previewString(newSummary, 200),
 	})
 
-	// Persist the rolling summary so a gateway restart doesn't lose it.
+	// Persist the rolling summary so a gateway restart doesn't lose it,
+	// unless the session was dropped meanwhile (its conversation was
+	// deleted): saving would bring the deleted chat's summary back.
+	if p.sessions != nil {
+		if cur, ok := p.sessions.Get(sess.ID); !ok || cur != sess {
+			log.Printf("[pipeline] session %s dropped during summarize; summary not saved", sess.ID)
+			return
+		}
+	}
 	if p.sessionStore != nil {
 		saveCtx, saveCancel := context.WithTimeout(ctx, 3*time.Second)
 		if err := p.sessionStore.Save(saveCtx,

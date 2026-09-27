@@ -33,7 +33,6 @@ const (
 
 // Cohere2Formatter implements ModelFormatter for Command A / Cohere2 MoE.
 type Cohere2Formatter struct {
-	toolCallCounter int // sequential tool_call_id across the conversation
 }
 
 func NewCohere2Formatter() *Cohere2Formatter { return &Cohere2Formatter{} }
@@ -204,10 +203,13 @@ func (f *Cohere2Formatter) renderToolCalls(calls []ToolCall) string {
 			args = map[string]any{}
 		}
 		paramsJSON, _ := json.Marshal(args)
+		// The call's own id, which its tool result carries too. A
+		// formatter-lifetime counter was rendered instead: never the id
+		// the result named, and different on every prompt build.
+		idJSON, _ := json.Marshal(tc.ID)
 		items = append(items, fmt.Sprintf(
-			`{"tool_call_id": "%d", "tool_name": %q, "parameters": %s}`,
-			f.toolCallCounter, tc.Name, string(paramsJSON)))
-		f.toolCallCounter++
+			`{"tool_call_id": %s, "tool_name": %q, "parameters": %s}`,
+			idJSON, tc.Name, string(paramsJSON)))
 	}
 	return "[\n    " + strings.Join(items, ",\n    ") + "\n]"
 }

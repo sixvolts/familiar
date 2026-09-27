@@ -1,10 +1,10 @@
 package admin
 
 // Workspace conversations + messages CRUD (FAMILIAR-WORKSPACE-SPEC
-// Phase 1a). Storage backs the Chat surface in the workspace; the
-// LLM completions endpoint at /v1/chat/completions stays unchanged
-// — this file is purely about persisting threads and turns so the
-// workspace can list, paginate, rename, archive, and reload them.
+// Phase 1a). Storage backs the Chat surface in the workspace; turns run
+// over the native /api/chat stream (internal/adapter/native) — this
+// file is purely about persisting threads and turns so the workspace
+// can list, paginate, rename, archive, and reload them.
 //
 // Per-role scoping mirrors the dashboard pattern (see
 // dashboardScopeFor): non-admins see their own conversations, admins
@@ -356,8 +356,17 @@ func (s *ConversationStore) Update(ctx context.Context, id, userID string, p Con
 // Delete hard-deletes a conversation owned by userID. Messages
 // cascade via the FK. Returns ErrConversationNotFound for unknown
 // id or non-owner.
+//
+// The conversation's rolling summary (the sessions row keyed by its id)
+// goes with it: it had no foreign key and stayed in Postgres after the
+// chat was deleted.
 func (s *ConversationStore) Delete(ctx context.Context, id, userID string) error {
-	res, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("conversations: delete: %w", err)
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx,
 		`DELETE FROM conversations WHERE id = $1::uuid AND user_id = $2`,
 		id, userID)
 	if err != nil {
@@ -367,7 +376,10 @@ func (s *ConversationStore) Delete(ctx context.Context, id, userID string) error
 	if n == 0 {
 		return ErrConversationNotFound
 	}
-	return nil
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE session_key = $1`, id); err != nil {
+		return fmt.Errorf("conversations: delete summary: %w", err)
+	}
+	return tx.Commit()
 }
 
 // Messages returns the message log for a conversation in
@@ -941,6 +953,14 @@ func (h *Handler) deleteConversation(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// The caller's conversation? Then its in-memory session (up to 100
+	// verbatim turns, listed on the sessions panel) goes first, so a
+	// summary being written for it isn't saved back after the delete.
+	if _, err := h.conversations.Get(r.Context(), id, userID); err == nil {
+		if d, ok := h.chatSessions.(interface{ Delete(string) }); ok {
+			d.Delete(id)
+		}
+	}
 	err := h.conversations.Delete(r.Context(), id, userID)
 	if errors.Is(err, ErrConversationNotFound) {
 		writeJSONError(w, http.StatusNotFound, "conversation not found")
@@ -954,9 +974,9 @@ func (h *Handler) deleteConversation(w http.ResponseWriter, r *http.Request) {
 }
 
 // appendConversationMessage serves POST /console/api/conversations/{id}/messages.
-// The workspace's Chat surface uses this to persist both the user
-// prompt (before calling /v1/chat/completions) and the final
-// assistant response (after the SSE stream terminates). Body shape:
+// The workspace's Chat surface uses this to persist the user prompt
+// before calling /api/chat, and the final assistant response when the
+// gateway doesn't (its done event's persists_reply). Body shape:
 //
 //	{
 //	  "role": "user" | "assistant" | "system" | "tool",

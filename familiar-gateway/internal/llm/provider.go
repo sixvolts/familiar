@@ -29,6 +29,11 @@ type Message struct {
 	// Name mirrors the tool/function name on tool-role messages. Some
 	// providers require it alongside ToolCallID.
 	Name string
+
+	// ReasoningContent is an assistant message's reasoning, echoed back
+	// inside a tool loop so a formatter that keeps the current turn's
+	// reasoning (Qwen) can show the model its own plan.
+	ReasoningContent string
 }
 
 // ToolSpec describes a single tool the model is allowed to invoke. It is

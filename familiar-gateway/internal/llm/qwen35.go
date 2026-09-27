@@ -7,6 +7,7 @@ package llm
 // See familiar-raw-completion-design.md.
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -191,25 +192,53 @@ func renderToolCall(tc ToolCall) string {
 	b.WriteString("\n<tool_call>\n<function=")
 	b.WriteString(tc.Name)
 	b.WriteString(">\n")
-	var args map[string]any
-	if len(tc.Arguments) > 0 {
-		_ = json.Unmarshal(tc.Arguments, &args)
-	}
-	for k, v := range args {
+	// In the arguments' own key order. Ranging over a decoded map
+	// rendered the parameters in a random order on every prompt build,
+	// so llama.cpp's cached prefix broke at the first tool call of the
+	// history each iteration and everything after it (page bodies) was
+	// processed again.
+	for _, kv := range orderedArgs(tc.Arguments) {
 		b.WriteString("<parameter=")
-		b.WriteString(k)
+		b.WriteString(kv.key)
 		b.WriteString(">\n")
-		switch val := v.(type) {
-		case string:
-			b.WriteString(val)
-		default:
-			out, _ := json.Marshal(val)
-			b.WriteString(string(out))
+		var s string
+		if json.Unmarshal(kv.val, &s) == nil {
+			b.WriteString(s)
+		} else {
+			b.Write(kv.val)
 		}
 		b.WriteString("\n</parameter>\n")
 	}
 	b.WriteString("</function>\n</tool_call>\n")
 	return b.String()
+}
+
+type argKV struct {
+	key string
+	val json.RawMessage
+}
+
+// orderedArgs lists a JSON object's members in document order (nil for
+// anything that isn't an object).
+func orderedArgs(raw json.RawMessage) []argKV {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return nil
+	}
+	var out []argKV
+	for dec.More() {
+		k, err := dec.Token()
+		if err != nil {
+			return out
+		}
+		key, _ := k.(string)
+		var v json.RawMessage
+		if err := dec.Decode(&v); err != nil {
+			return out
+		}
+		out = append(out, argKV{key: key, val: v})
+	}
+	return out
 }
 
 // ParseResponse implements ModelFormatter. The /completion endpoint
@@ -325,25 +354,40 @@ func parseQwenToolCall(block string) (ToolCall, bool) {
 	name := strings.TrimSpace(fn[1])
 	inner := fn[2]
 
-	args := make(map[string]any)
+	// The arguments object keeps the parameters in the order the model
+	// wrote them, so re-rendering the call (renderToolCall) reproduces
+	// the model's text and llama.cpp's cached prefix still matches.
+	var obj bytes.Buffer
+	obj.WriteByte('{')
+	seen := map[string]bool{}
 	for _, p := range qwenParamRe.FindAllStringSubmatch(inner, -1) {
 		key := strings.TrimSpace(p[1])
 		val := strings.TrimSpace(p[2])
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
 		// Try to decode as JSON first (bool, number, array, object).
 		// Fall back to the raw string when that fails — the model
 		// often emits unquoted strings even for stringly-typed
 		// parameters.
+		var enc []byte
 		var parsed any
 		if err := json.Unmarshal([]byte(val), &parsed); err == nil {
-			args[key] = parsed
+			enc, _ = json.Marshal(parsed)
 		} else {
-			args[key] = val
+			enc, _ = json.Marshal(val)
 		}
+		if obj.Len() > 1 {
+			obj.WriteByte(',')
+		}
+		k, _ := json.Marshal(key)
+		obj.Write(k)
+		obj.WriteByte(':')
+		obj.Write(enc)
 	}
-	raw, err := json.Marshal(args)
-	if err != nil {
-		return ToolCall{}, false
-	}
+	obj.WriteByte('}')
+	raw := json.RawMessage(obj.Bytes())
 	return ToolCall{
 		ID:        toolCallID(name, raw),
 		Name:      name,

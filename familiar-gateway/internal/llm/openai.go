@@ -47,8 +47,12 @@ func NewOpenAIProvider(name, endpoint, apiKey string) *OpenAIProvider {
 		name:     name,
 		endpoint: strings.TrimRight(endpoint, "/"),
 		apiKey:   apiKey,
+		// No Client.Timeout: it bounds the whole request, body included,
+		// and cut every completion streaming past 600s with an error that
+		// discarded what the user had already seen (the turn allows 30
+		// minutes). The caller's context bounds each request (the
+		// pipeline's turnHardCap); HealthCheck sets its own.
 		client: &http.Client{
-			Timeout: 600 * time.Second,
 			// Fresh connection per request. llama.cpp closes the socket
 			// after a stream completes, so a pooled keep-alive connection
 			// goes stale; the next tool-loop iteration then writes to a
@@ -160,6 +164,11 @@ type openAIDeltaToolCall struct {
 }
 
 type openAIStreamChunk struct {
+	// Error is an in-band error some servers (vLLM) send as a data
+	// chunk after the 200.
+	Error *struct {
+		Message string `json:"message"`
+	} `json:"error,omitempty"`
 	ID      string `json:"id"`
 	Object  string `json:"object"`
 	Created int64  `json:"created"`
@@ -239,6 +248,13 @@ func buildOpenAIMessages(msgs []Message) []openAIMessage {
 		if om.Role == "assistant" && om.Content == "" && len(om.ToolCalls) == 0 {
 			om.Content = "..."
 		}
+		// content is omitempty, and llama-server rejects a tool message
+		// with neither content nor tool_calls: an empty tool result (a
+		// search with no hits, a script that printed nothing) failed the
+		// next request and the turn.
+		if om.Role == "tool" && om.Content == "" {
+			om.Content = "(no output)"
+		}
 		out = append(out, om)
 	}
 	return out
@@ -256,13 +272,15 @@ func stripToolMessages(msgs []openAIMessage) []openAIMessage {
 			continue
 		}
 		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
-			// Keep the assistant turn but without tool calls — just
-			// preserve any content it had.
+			// Keep the assistant turn's prose without its tool calls; a
+			// call with no prose goes. It used to become a "..." stub,
+			// sent as an assistant message right before the real reply
+			// (strict-alternation templates refuse two in a row).
+			if m.Content == "" || m.Content == "..." {
+				continue
+			}
 			cleaned := m
 			cleaned.ToolCalls = nil
-			if cleaned.Content == "" {
-				cleaned.Content = "..."
-			}
 			out = append(out, cleaned)
 			continue
 		}
@@ -404,10 +422,7 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req CompletionRequest) (*
 			// arguments arrives as a JSON-encoded string; pass the raw
 			// bytes through as a RawMessage so the skill layer can
 			// unmarshal it directly into typed args.
-			args := json.RawMessage(tc.Function.Arguments)
-			if len(args) == 0 {
-				args = json.RawMessage("{}")
-			}
+			args := toolArgs(tc.Function.Arguments)
 			toolCalls = append(toolCalls, ToolCall{
 				ID:        tc.ID,
 				Name:      tc.Function.Name,
@@ -494,6 +509,11 @@ func (p *OpenAIProvider) CompleteStream(ctx context.Context, req CompletionReque
 		toolOrder    []int
 	)
 
+	// sawDone records that the stream ended properly: [DONE], or a
+	// finish_reason. A stream that just stops (a backend that died after
+	// its 200) returned whatever it had as a success, so a blank reply
+	// was committed instead of failing over to the next model.
+	sawDone := false
 	scanner := bufio.NewScanner(resp.Body)
 	// Bump the buffer — default 64 KB is tight if a model emits a
 	// large tool_calls fragment or a big argument blob in one chunk.
@@ -501,12 +521,18 @@ func (p *OpenAIProvider) CompleteStream(ctx context.Context, req CompletionReque
 	for scanner.Scan() {
 		line := scanner.Text()
 
+		// llama.cpp reports a failure after the 200 as an SSE line
+		// "error: {...}".
+		if strings.HasPrefix(line, "error: ") || strings.HasPrefix(line, "error:") {
+			return nil, fmt.Errorf("openai stream: server error: %s", truncateForLog(strings.TrimSpace(strings.TrimPrefix(line, "error:"))))
+		}
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
 
 		data := strings.TrimPrefix(line, "data: ")
 		if data == "[DONE]" {
+			sawDone = true
 			break
 		}
 		if data == "" {
@@ -516,6 +542,9 @@ func (p *OpenAIProvider) CompleteStream(ctx context.Context, req CompletionReque
 		var chunk openAIStreamChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			continue
+		}
+		if chunk.Error != nil {
+			return nil, fmt.Errorf("openai stream: server error: %s", truncateForLog(chunk.Error.Message))
 		}
 
 		if modelID == "" {
@@ -579,6 +608,8 @@ func (p *OpenAIProvider) CompleteStream(ctx context.Context, req CompletionReque
 		finishReason = "stopped"
 	} else if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("reading stream: %w", err)
+	} else if !sawDone && finishReason == "" {
+		return nil, fmt.Errorf("openai stream: ended without [DONE] or a finish_reason (%d chars received): %w", fullContent.Len(), io.ErrUnexpectedEOF)
 	}
 
 	var toolCalls []ToolCall
@@ -589,14 +620,10 @@ func (p *OpenAIProvider) CompleteStream(ctx context.Context, req CompletionReque
 			// skip anything without a function name.
 			continue
 		}
-		args := acc.args.String()
-		if args == "" {
-			args = "{}"
-		}
 		toolCalls = append(toolCalls, ToolCall{
 			ID:        acc.id,
 			Name:      acc.name,
-			Arguments: json.RawMessage(args),
+			Arguments: toolArgs(acc.args.String()),
 		})
 	}
 
@@ -611,6 +638,23 @@ func (p *OpenAIProvider) CompleteStream(ctx context.Context, req CompletionReque
 	}
 	// No post-hoc reasoning split (see Complete).
 	return result, nil
+}
+
+// toolArgs turns a tool call's arguments string into a RawMessage that
+// is valid JSON. A backend can pass through a truncated or malformed
+// string; kept raw, it failed to marshal when the turn was saved, and
+// the whole assistant turn's tool calls were dropped, leaving its tool
+// results orphaned in every later prompt. Invalid text is kept as a
+// JSON string (the dispatch still fails, as it should).
+func toolArgs(s string) json.RawMessage {
+	if strings.TrimSpace(s) == "" {
+		return json.RawMessage("{}")
+	}
+	if json.Valid([]byte(s)) {
+		return json.RawMessage(s)
+	}
+	quoted, _ := json.Marshal(s)
+	return quoted
 }
 
 // HealthCheck verifies the endpoint is reachable.

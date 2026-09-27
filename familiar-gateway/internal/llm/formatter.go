@@ -64,11 +64,12 @@ func MessagesToFormatterTurns(msgs []Message) []FormatterTurn {
 	out := make([]FormatterTurn, 0, len(msgs))
 	for _, m := range msgs {
 		t := FormatterTurn{
-			Role:       m.Role,
-			Content:    m.Content,
-			ToolCalls:  m.ToolCalls,
-			ToolCallID: m.ToolCallID,
-			Name:       m.Name,
+			Role:             m.Role,
+			Content:          m.Content,
+			ReasoningContent: m.ReasoningContent,
+			ToolCalls:        m.ToolCalls,
+			ToolCallID:       m.ToolCallID,
+			Name:             m.Name,
 		}
 		out = append(out, t)
 	}

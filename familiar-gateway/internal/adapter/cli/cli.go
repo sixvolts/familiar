@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/chzyer/readline"
@@ -53,10 +54,7 @@ func (a *CLIAdapter) Run(ctx context.Context) error {
 		historyFile = home + "/.familiar/cli_history"
 	}
 
-	// Ensure history directory exists.
-	if dir := historyFile[:strings.LastIndex(historyFile, "/")]; dir != "" {
-		_ = os.MkdirAll(dir, 0700)
-	}
+	ensureHistoryDir(historyFile)
 
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:          prompt,
@@ -250,4 +248,12 @@ func (a *CLIAdapter) getBriefing(ctx context.Context) {
 		}
 	}
 	fmt.Println("================")
+}
+
+// ensureHistoryDir creates the history file's directory. A bare file
+// name has none; slicing at LastIndex("/") = -1 panicked at startup.
+func ensureHistoryDir(historyFile string) {
+	if dir := filepath.Dir(historyFile); dir != "." {
+		_ = os.MkdirAll(dir, 0700)
+	}
 }

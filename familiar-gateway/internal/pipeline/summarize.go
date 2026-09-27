@@ -88,7 +88,7 @@ func (p *Pipeline) maybeSummarize(sess *session.Session, overrides *ShardOverrid
 	if !sess.TryBeginSummarize() {
 		return // another goroutine is already summarizing this session
 	}
-	go p.runSummarize(sess, overrides)
+	p.goBackground(func() { p.runSummarize(sess, overrides) })
 }
 
 // runSummarize does the async summarization + fact extraction for a session.
@@ -264,7 +264,33 @@ func (p *Pipeline) kickoffPostTurnExtract(sess *session.Session, userMsg, respon
 	if strings.TrimSpace(userMsg) == "" && strings.TrimSpace(responseText) == "" {
 		return
 	}
-	go p.runPostTurnExtract(sess, userMsg, responseText, prior, retrievedRels, overrides)
+	p.goBackground(func() { p.runPostTurnExtract(sess, userMsg, responseText, prior, retrievedRels, overrides) })
+}
+
+// goBackground runs post-turn work (summaries, fact extraction) on its
+// own goroutine, counted so a shutdown can wait for it (Drain).
+func (p *Pipeline) goBackground(fn func()) {
+	p.background.Add(1)
+	go func() {
+		defer p.background.Add(-1)
+		fn()
+	}()
+}
+
+// Drain waits up to timeout for post-turn work still running and
+// reports whether it all finished. Shutdown calls it before closing the
+// database: that work runs detached from any request, and the process
+// used to exit under it, so a turn completed just before a restart had
+// its facts never extracted.
+func (p *Pipeline) Drain(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for p.background.Load() > 0 {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	return true
 }
 
 // runPostTurnExtract executes the per-turn memory write pipeline:

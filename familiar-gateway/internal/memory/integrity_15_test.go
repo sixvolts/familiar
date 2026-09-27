@@ -6,7 +6,9 @@ package memory
 
 import (
 	"context"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/familiar/gateway/internal/db"
 	"github.com/familiar/gateway/internal/testutil"
@@ -225,5 +227,66 @@ func TestDashboardQueries_ExcludeConversationChunks(t *testing.T) {
 	points, err := s.GrowthSparkline(ctx, u, 1)
 	if err != nil || len(points) != 1 || points[0].FactCount != 1 {
 		t.Errorf("GrowthSparkline = %+v, %v; want 1 fact today", points, err)
+	}
+}
+
+// A row embedded with another dimension (the embedding model changed)
+// is skipped by dense search instead of failing it: pgvector refuses to
+// compare the two, and one such row turned off memory for every turn.
+func TestDenseSearch_SkipsOtherDimensions(t *testing.T) {
+	s := setupMemoryStore(t)
+	ctx := context.Background()
+	u := "dims-user"
+	insertFor(t, s, u, "same dimension fact", "", axisVec(7))
+	insertFor(t, s, u, "old model fact", "", []float32{1, 0, 0})
+	if res, err := s.Search(ctx, axisVec(7), 5, 0.1, u); err != nil || len(res) != 1 {
+		t.Errorf("Search = %d results, %v", len(res), err)
+	}
+	if res, err := s.HybridSearch(ctx, "fact", axisVec(7), 5, 0.1, u); err != nil || len(res) == 0 {
+		t.Errorf("HybridSearch = %d results, %v", len(res), err)
+	}
+	if res, err := s.NearestLiveFacts(ctx, axisVec(7), u, "", 5); err != nil || len(res) != 1 {
+		t.Errorf("NearestLiveFacts = %d results, %v", len(res), err)
+	}
+	if res, err := s.SearchInScope(ctx, axisVec(7), 5, 0.1, u, ""); err != nil {
+		t.Errorf("SearchInScope: %v (%d results)", err, len(res))
+	}
+}
+
+// Each user's turns find that user's entities: the vocabulary was the
+// first admin's graph for everyone. It loads on first use (FindIn
+// doesn't wait) and matches whole words.
+func TestEntityVocab_PerUserWords(t *testing.T) {
+	s := relStoreForTest(t)
+	ctx := context.Background()
+	if err := s.UpsertRelationships(ctx, []Relationship{
+		{Subject: "alice-nas", Predicate: "stores", Object: "photos", UserID: "vocab-alice"},
+		{Subject: "bob-nas", Predicate: "backs_up", Object: "laptop", UserID: "vocab-bob"},
+		{Subject: "art", Predicate: "hangs_in", Object: "hall", UserID: "vocab-bob"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	v := NewEntityVocab(s, time.Hour)
+	v.Start(ctx)
+	find := func(user, text string) []string {
+		var got []string
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			got = v.FindIn(user, text)
+			if v.Size(user) > 0 {
+				return v.FindIn(user, text)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		return got
+	}
+	if got := find("vocab-bob", "is the bob-nas full? the art hangs"); strings.Join(got, ",") != "bob-nas,art" {
+		t.Errorf("bob finds %v, want bob-nas and art", got)
+	}
+	if got := find("vocab-alice", "is the bob-nas full? alice-nas is"); strings.Join(got, ",") != "alice-nas" {
+		t.Errorf("alice finds %v, want only her alice-nas", got)
+	}
+	if got := v.FindIn("vocab-bob", "we start the laptop backup"); strings.Join(got, ",") != "laptop" {
+		t.Errorf("word matching: %v, want laptop only (not art in start)", got)
 	}
 }

@@ -74,6 +74,18 @@ func NewPgVectorStore(pool *db.Pool) (*PgVectorStore, error) {
 	return &PgVectorStore{db: pool}, nil
 }
 
+// vecDist is the cosine distance from column col to the query vector
+// $1, or NULL for a row embedded with another dimension (after the
+// embedding model changed). pgvector refuses to compare vectors of
+// different dimensions and fails the whole query, so one such row
+// turned off long-term memory for every turn. Filtering on
+// vector_dims beside the distance isn't enough (Postgres may evaluate
+// either first); the CASE decides before the distance is computed.
+// The re-embed sweep re-embeds such rows.
+func vecDist(col string) string {
+	return `(CASE WHEN vector_dims(` + col + `) = vector_dims($1::vector) THEN ` + col + ` <=> $1::vector END)`
+}
+
 // recallVisible is the recall predicate for a memories or relationships
 // row aliased a, for the user bound at parameter u:
 //   - a wiki row (scope_tag "book:{id}") is visible to the book's current
@@ -133,14 +145,14 @@ func (s *PgVectorStore) Search(ctx context.Context, vector []float32, limit int,
 	// "global only", which is the safe default when the caller hasn't
 	// resolved a canonical identity yet.
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT m.id::text, content, scope, 1 - (embedding <=> $1::vector) AS similarity, created_at, embedding::text
+		`SELECT m.id::text, content, scope, 1 - (`+vecDist("embedding")+`) AS similarity, created_at, embedding::text
 		 FROM memories m
 		 WHERE embedding IS NOT NULL
-		   AND 1 - (embedding <=> $1::vector) > $2
+		   AND 1 - (`+vecDist("embedding")+`) > $2
 		   AND source_type != 'conversation'
 		   AND NOT EXISTS (SELECT 1 FROM memories s WHERE s.supersedes = m.id)
 		   AND `+recallVisible("m", "$4")+`
-		 ORDER BY embedding <=> $1::vector
+		 ORDER BY `+vecDist("embedding")+`
 		 LIMIT $3`,
 		vecStr, threshold, limit, userID)
 	if err != nil {
@@ -219,14 +231,14 @@ func (s *PgVectorStore) HybridSearch(ctx context.Context, queryText string, vect
 	rows, err := s.db.QueryContext(ctx, `
 		WITH dense AS (
 		    SELECT m.id,
-		           row_number() OVER (ORDER BY m.embedding <=> $1::vector) AS rnk
+		           row_number() OVER (ORDER BY `+vecDist("m.embedding")+`) AS rnk
 		      FROM memories m
 		     WHERE m.embedding IS NOT NULL
-		       AND 1 - (m.embedding <=> $1::vector) > $2
+		       AND 1 - (`+vecDist("m.embedding")+`) > $2
 		       AND m.source_type != 'conversation'
 		       AND NOT EXISTS (SELECT 1 FROM memories sup WHERE sup.supersedes = m.id)
 		       AND `+recallVisible("m", "$3")+`
-		     ORDER BY m.embedding <=> $1::vector
+		     ORDER BY `+vecDist("m.embedding")+`
 		     LIMIT $4
 		),
 		sparse AS (
@@ -257,7 +269,7 @@ func (s *PgVectorStore) HybridSearch(ctx context.Context, queryText string, vect
 		       -- would break hybrid retrieval for every lexically-matching
 		       -- query. Cosine is undefined here anyway; the RRF fused
 		       -- score still ranks it.
-		       COALESCE(1 - (m.embedding <=> $1::vector), 0) AS similarity,
+		       COALESCE(1 - (`+vecDist("m.embedding")+`), 0) AS similarity,
 		       f.rrf,
 		       m.created_at, m.embedding::text
 		  FROM fused f
@@ -398,9 +410,10 @@ func (s *PgVectorStore) NearestLiveFacts(ctx context.Context, vector []float32, 
 	}
 
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT m.id::text, m.content, 1 - (m.embedding <=> $1::vector) AS similarity
+		`SELECT m.id::text, m.content, 1 - (`+vecDist("m.embedding")+`) AS similarity
 		 FROM memories m
 		 WHERE m.embedding IS NOT NULL
+		   AND `+vecDist("m.embedding")+` IS NOT NULL
 		   AND m.source_type NOT IN ('conversation', 'wiki_page')
 		   AND NOT EXISTS (SELECT 1 FROM memories s WHERE s.supersedes = m.id)
 		   AND (m.user_id IS NULL OR m.user_id = $2)
@@ -415,7 +428,7 @@ func (s *PgVectorStore) NearestLiveFacts(ctx context.Context, vector []float32, 
 		              WHERE sh.scope_tag = m.scope_tag
 		                AND sh.owner_id = m.user_id
 		                AND sh.visibility = 'isolated')))
-		 ORDER BY m.embedding <=> $1::vector
+		 ORDER BY `+vecDist("m.embedding")+`
 		 LIMIT $4`,
 		vecStr, userID, scopeParam, limit)
 	if err != nil {

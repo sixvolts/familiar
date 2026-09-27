@@ -333,15 +333,15 @@ func (s *PgVectorStore) SearchInScope(ctx context.Context, vector []float32, lim
 		return nil, nil
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT m.id::text, m.content, m.scope, 1 - (m.embedding <=> $1::vector) AS similarity, m.created_at
+		`SELECT m.id::text, m.content, m.scope, 1 - (`+vecDist("m.embedding")+`) AS similarity, m.created_at
 		 FROM memories m
 		 WHERE m.embedding IS NOT NULL
-		   AND 1 - (m.embedding <=> $1::vector) > $2
+		   AND 1 - (`+vecDist("m.embedding")+`) > $2
 		   AND m.source_type != 'conversation'
 		   AND NOT EXISTS (SELECT 1 FROM memories s WHERE s.supersedes = m.id)
 		   AND m.user_id = $4
 		   AND m.scope_tag = $5
-		 ORDER BY m.embedding <=> $1::vector
+		 ORDER BY `+vecDist("m.embedding")+`
 		 LIMIT $3`,
 		vectorToString(vector), threshold, limit, userID, scopeTag)
 	if err != nil {

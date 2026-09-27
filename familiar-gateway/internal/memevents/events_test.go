@@ -106,3 +106,25 @@ func TestEventPayloadRoundtrip(t *testing.T) {
 		t.Fatalf("payload mismatch: %+v", p)
 	}
 }
+
+// A session's replay ring goes once the session is idle: one was kept
+// per session ever seen, for the life of the process, with fact text.
+func TestBus_IdleRingsAreDropped(t *testing.T) {
+	oldIdle, oldEvery := ringIdle, ringSweepEvery
+	ringIdle, ringSweepEvery = 50*time.Millisecond, 0
+	t.Cleanup(func() { ringIdle, ringSweepEvery = oldIdle, oldEvery })
+
+	b := NewBus(8, nil)
+	b.Emit("idle", KindFactExtracted, map[string]string{"content": "private fact"})
+	time.Sleep(120 * time.Millisecond)
+	b.Emit("active", KindFactExtracted, map[string]string{"content": "x"})
+	b.Emit("fresh", KindFactExtracted, map[string]string{"content": "y"})
+	if got := b.Replay("idle", 0); got != nil {
+		t.Errorf("the idle session's ring survived: %d events", len(got))
+	}
+	for _, id := range []string{"active", "fresh"} {
+		if got := b.Replay(id, 0); len(got) != 1 {
+			t.Errorf("%s: %d events, want 1", id, len(got))
+		}
+	}
+}

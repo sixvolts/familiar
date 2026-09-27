@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 // seedBook creates a book with these members and returns its id.
@@ -91,6 +92,11 @@ func TestRecall_WikiFactsFollowBookMembership(t *testing.T) {
 		} else {
 			out["traverse"] = len(res) > 0
 		}
+		vocab := NewEntityVocab(rels, time.Hour)
+		if err := vocab.Refresh(ctx, user); err != nil {
+			t.Fatalf("vocab: %v", err)
+		}
+		out["vocab"] = len(vocab.FindIn(user, "where is the sourdough starter")) > 0
 		return out
 	}
 	all := func(m map[string]bool, want bool) string {

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/familiar/gateway/internal/db"
 	"github.com/familiar/gateway/internal/safego"
@@ -298,11 +300,13 @@ func (s *PgRelationshipStore) ListDistinctEntities(ctx context.Context, userID s
 			) t
 			GROUP BY ent`)
 	} else {
+		// What the user's recall can see (recallVisible): their own and
+		// global triples, their books' triples, no isolated shard's.
 		rows, err = s.db.QueryContext(ctx, `
 			SELECT ent, COUNT(*) FROM (
-				SELECT subject AS ent FROM relationships WHERE user_id IS NULL OR user_id = $1
+				SELECT r.subject AS ent FROM relationships r WHERE `+recallVisible("r", "$1")+`
 				UNION ALL
-				SELECT object  AS ent FROM relationships WHERE user_id IS NULL OR user_id = $1
+				SELECT r.object  AS ent FROM relationships r WHERE `+recallVisible("r", "$1")+`
 			) t
 			GROUP BY ent`, userID)
 	}
@@ -327,61 +331,71 @@ func (s *PgRelationshipStore) ListDistinctEntities(ctx context.Context, userID s
 	return out, rows.Err()
 }
 
-// EntityVocab is an in-memory cache of every distinct entity name
-// (subject or object) present in the relationship graph for a given
-// user scope. The pipeline uses it to spot entity mentions inside
-// retrieved memory contents without a database round-trip per memory
-// — FindIn walks the cached vocabulary and returns the names that
-// appear as substrings of the supplied text.
+// EntityVocab caches, per user, every distinct entity name (subject
+// or object) in the relationship graph that user's recall can see. The
+// pipeline uses it to spot entity mentions inside retrieved memory
+// contents without a database round-trip per memory: FindIn returns
+// the names that appear as words in the supplied text.
 //
-// The vocab is refreshed in a background goroutine on a fixed
-// interval plus on demand via Refresh. Reads are lock-held for the
-// minimum time needed to copy the current name slice; callers should
-// treat the returned entity list as read-only.
+// It was one vocabulary, built from the first admin's graph: every
+// other user's entities were never found, so their turns got no
+// multi-hop graph context.
+//
+// A user's vocabulary loads in the background the first time it's
+// asked for (FindIn doesn't wait: it finds nothing until the load
+// lands, as before) and reloads, again in the background, once it's
+// older than the refresh interval. At most maxVocabUsers are kept; the
+// least recently used goes first.
 type EntityVocab struct {
 	store    *PgRelationshipStore
-	userID   string
 	interval time.Duration
 
-	mu     sync.RWMutex
-	names  []string // sorted by length DESC so FindIn matches long names first
-	loaded bool
+	mu    sync.Mutex
+	ctx   context.Context // for background loads; Start's
+	users map[string]*userVocab
 
 	stopOnce sync.Once
 	stopCh   chan struct{}
 }
 
-// NewEntityVocab builds a vocab bound to a store and a user scope.
-// Call Start to begin the background refresher. interval may be zero,
-// in which case a sensible default (5 minutes) is applied.
-func NewEntityVocab(store *PgRelationshipStore, userID string, interval time.Duration) *EntityVocab {
+type userVocab struct {
+	names    []string // sorted by length DESC so FindIn matches long names first
+	loadedAt time.Time
+	usedAt   time.Time
+	loading  bool
+}
+
+const maxVocabUsers = 256
+
+// NewEntityVocab builds a vocab over a store. interval (how long a
+// user's vocabulary is used before it reloads) may be zero, in which
+// case a sensible default (5 minutes) is applied.
+func NewEntityVocab(store *PgRelationshipStore, interval time.Duration) *EntityVocab {
 	if interval <= 0 {
 		interval = 5 * time.Minute
 	}
 	return &EntityVocab{
 		store:    store,
-		userID:   userID,
 		interval: interval,
+		ctx:      context.Background(),
+		users:    map[string]*userVocab{},
 		stopCh:   make(chan struct{}),
 	}
 }
 
-// Start performs an initial load and then launches a goroutine that
-// refreshes the vocab on the configured interval. Safe to call once.
-// A failed initial load does not prevent the background loop from
-// running — the next tick will try again.
+// Start sets the context background loads run under. Loads are lazy,
+// per user, so there is nothing to load up front.
 func (v *EntityVocab) Start(ctx context.Context) {
 	if v == nil || v.store == nil {
 		return
 	}
-	if err := v.Refresh(ctx); err != nil {
-		log.Printf("[entity-vocab] initial load failed (continuing): %v", err)
-	}
-	go v.refreshLoop(ctx)
+	v.mu.Lock()
+	v.ctx = ctx
+	v.mu.Unlock()
 }
 
-// Stop signals the background refresher to exit. Safe to call
-// multiple times from different goroutines.
+// Stop ends background loading: a vocabulary asked for afterwards
+// isn't loaded. Safe to call more than once.
 func (v *EntityVocab) Stop() {
 	if v == nil {
 		return
@@ -389,15 +403,13 @@ func (v *EntityVocab) Stop() {
 	v.stopOnce.Do(func() { close(v.stopCh) })
 }
 
-// Refresh reloads the vocab from the store. Callers can invoke this
-// synchronously after a known write (e.g., at the end of the
-// backfill run) to pick up new entities without waiting for the next
-// tick.
-func (v *EntityVocab) Refresh(ctx context.Context) error {
+// Refresh reloads one user's vocabulary synchronously (tests, or after
+// a known write).
+func (v *EntityVocab) Refresh(ctx context.Context, userID string) error {
 	if v == nil || v.store == nil {
 		return nil
 	}
-	ents, err := v.store.ListDistinctEntities(ctx, v.userID)
+	ents, err := v.store.ListDistinctEntities(ctx, userID)
 	if err != nil {
 		return err
 	}
@@ -420,75 +432,113 @@ func (v *EntityVocab) Refresh(ctx context.Context) error {
 	})
 
 	v.mu.Lock()
-	v.names = names
-	v.loaded = true
-	v.mu.Unlock()
+	defer v.mu.Unlock()
+	u := v.entryLocked(userID)
+	u.names = names
+	u.loadedAt = time.Now()
+	u.loading = false
 	return nil
 }
 
-// FindIn scans the haystack for every cached entity name and returns
-// the set of matches, in descending-length order so the caller sees
-// the most specific names first. Returns nil if the vocab has never
-// loaded. Matching is case-insensitive; the haystack is lowered once
-// up front and each name is already lowercased at Refresh time.
-func (v *EntityVocab) FindIn(haystack string) []string {
-	if v == nil {
+// entryLocked returns userID's cache entry, making room if needed.
+func (v *EntityVocab) entryLocked(userID string) *userVocab {
+	u, ok := v.users[userID]
+	if !ok {
+		if len(v.users) >= maxVocabUsers {
+			oldest := ""
+			for id, e := range v.users {
+				if oldest == "" || e.usedAt.Before(v.users[oldest].usedAt) {
+					oldest = id
+				}
+			}
+			delete(v.users, oldest)
+		}
+		u = &userVocab{}
+		v.users[userID] = u
+	}
+	u.usedAt = time.Now()
+	return u
+}
+
+// FindIn returns the user's entity names that appear as words in the
+// haystack, longest first, from what's cached now; a missing or stale
+// vocabulary is (re)loaded in the background. Matching is
+// case-insensitive, on word boundaries: "art" isn't in "start".
+func (v *EntityVocab) FindIn(userID, haystack string) []string {
+	if v == nil || v.store == nil {
 		return nil
 	}
-	v.mu.RLock()
-	names := v.names
-	loaded := v.loaded
-	v.mu.RUnlock()
-	if !loaded || len(names) == 0 || haystack == "" {
+	v.mu.Lock()
+	u := v.entryLocked(userID)
+	names := u.names
+	if !u.loading && time.Since(u.loadedAt) >= v.interval {
+		select {
+		case <-v.stopCh:
+		default:
+			u.loading = true
+			go v.load(v.ctx, userID)
+		}
+	}
+	v.mu.Unlock()
+	if len(names) == 0 || haystack == "" {
 		return nil
 	}
 	lower := strings.ToLower(haystack)
-	seen := make(map[string]struct{}, 8)
 	var out []string
 	for _, n := range names {
-		if _, ok := seen[n]; ok {
-			continue
-		}
-		if strings.Contains(lower, n) {
-			seen[n] = struct{}{}
+		if containsWord(lower, n) {
 			out = append(out, n)
 		}
 	}
 	return out
 }
 
-// Size reports the number of cached entity names. Useful for admin
-// status dumps and test assertions.
-func (v *EntityVocab) Size() int {
+func (v *EntityVocab) load(ctx context.Context, userID string) {
+	safego.Do("entity-vocab load", func() {
+		loadCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		if err := v.Refresh(loadCtx, userID); err != nil {
+			log.Printf("[entity-vocab] load failed (continuing): %v", err)
+			v.mu.Lock()
+			if u, ok := v.users[userID]; ok {
+				u.loading = false
+				u.loadedAt = time.Now() // retry after an interval, not every turn
+			}
+			v.mu.Unlock()
+		}
+	})
+}
+
+// containsWord reports whether word occurs in s with no letter, digit
+// or underscore directly before or after it.
+func containsWord(s, word string) bool {
+	isWord := func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' }
+	for from := 0; ; {
+		i := strings.Index(s[from:], word)
+		if i < 0 {
+			return false
+		}
+		i += from
+		before, _ := utf8.DecodeLastRuneInString(s[:i])
+		after, _ := utf8.DecodeRuneInString(s[i+len(word):])
+		if (i == 0 || !isWord(before)) && (i+len(word) == len(s) || !isWord(after)) {
+			return true
+		}
+		from = i + 1
+	}
+}
+
+// Size reports how many entity names are cached for the user.
+func (v *EntityVocab) Size(userID string) int {
 	if v == nil {
 		return 0
 	}
-	v.mu.RLock()
-	defer v.mu.RUnlock()
-	return len(v.names)
-}
-
-func (v *EntityVocab) refreshLoop(ctx context.Context) {
-	ticker := time.NewTicker(v.interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-v.stopCh:
-			return
-		case <-ticker.C:
-			// Per-tick recovery so one bad refresh doesn't retire the
-			// cache's only updater.
-			safego.Do("entity-vocab refresh", func() {
-				refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-				defer cancel()
-				if err := v.Refresh(refreshCtx); err != nil {
-					log.Printf("[entity-vocab] refresh failed (continuing): %v", err)
-				}
-			})
-		}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if u, ok := v.users[userID]; ok {
+		return len(u.names)
 	}
+	return 0
 }
 
 // FormatLines renders a slice of relationships grouped by predicate.

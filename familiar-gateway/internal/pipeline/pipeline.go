@@ -2339,27 +2339,28 @@ func (p *Pipeline) runToolLoop(
 				})
 				continue
 			}
-			// web_search per-turn budget enforcement. webSearchDisabled
-			// means the classifier explicitly chose SearchNone — block
-			// every call. Otherwise a positive budget short-circuits
-			// once exhausted; budget 0 means "no limit" (legacy behavior
-			// when the tier has no MaxWebSearches set).
-			if tc.Name == "web_search" && webSearchDisabled {
-				log.Printf("[pipeline] web_search disabled by classifier (tier=%s)", complexity)
+			// Web search per-turn budget enforcement, for every tool that
+			// makes a Brave request (braveTools). webSearchDisabled means
+			// the classifier explicitly chose SearchNone — block every
+			// call. Otherwise a positive budget short-circuits once
+			// exhausted; budget 0 means "no limit" (legacy behavior when
+			// the tier has no MaxWebSearches set).
+			if braveTools[tc.Name] && webSearchDisabled {
+				log.Printf("[pipeline] %s disabled by classifier (tier=%s)", tc.Name, complexity)
 				messages = append(messages, llm.Message{
 					Role:       "tool",
-					Content:    "web_search is not available for this turn. Synthesize an answer from what you already have.",
+					Content:    tc.Name + " is not available for this turn. Synthesize an answer from what you already have.",
 					ToolCallID: tc.ID,
 					Name:       tc.Name,
 				})
 				continue
 			}
-			if tc.Name == "web_search" && webSearchBudget > 0 && webSearchesUsed >= webSearchBudget {
-				log.Printf("[pipeline] web_search budget exhausted (tier=%s, used=%d, max=%d)",
-					complexity, webSearchesUsed, webSearchBudget)
+			if braveTools[tc.Name] && webSearchBudget > 0 && webSearchesUsed >= webSearchBudget {
+				log.Printf("[pipeline] web search budget exhausted at %s (tier=%s, used=%d, max=%d)",
+					tc.Name, complexity, webSearchesUsed, webSearchBudget)
 				messages = append(messages, llm.Message{
 					Role:       "tool",
-					Content:    fmt.Sprintf("web_search budget exhausted for this turn (%d/%d used at tier %s). Synthesize an answer from what you already have.", webSearchesUsed, webSearchBudget, complexity),
+					Content:    fmt.Sprintf("web search budget exhausted for this turn (%d/%d used at tier %s). Synthesize an answer from what you already have.", webSearchesUsed, webSearchBudget, complexity),
 					ToolCallID: tc.ID,
 					Name:       tc.Name,
 				})
@@ -2379,7 +2380,7 @@ func (p *Pipeline) runToolLoop(
 				})
 				continue
 			}
-			if tc.Name == "web_search" {
+			if braveTools[tc.Name] {
 				webSearchesUsed++
 			}
 			if tc.Name == "fetch_page" && pagesFetched != nil {

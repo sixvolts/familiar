@@ -792,3 +792,95 @@ func TestShard_PersistentSeesSummaryAndBudgetedHistory(t *testing.T) {
 		t.Errorf("history = %d messages opening on %s, want a budgeted cut (20 < n < 60) opening on a user turn", history, msgs[1].Role)
 	}
 }
+
+// namedStub is a stubSkill registered under its own skill name, so
+// several tool stubs can share one registry.
+type namedStub struct {
+	*stubSkill
+	name string
+}
+
+func (n *namedStub) Name() string { return n.name }
+
+func braveStubs(t *testing.T) (*skills.Registry, map[string]*stubSkill) {
+	t.Helper()
+	reg := skills.NewRegistry()
+	stubs := map[string]*stubSkill{}
+	for _, tool := range []string{"web_search", "brave_page_read", "search_news"} {
+		st := &stubSkill{toolName: tool, reply: "1. Result — example.com"}
+		stubs[tool] = st
+		if err := reg.Register(&namedStub{st, "skill-" + tool}); err != nil {
+			t.Fatalf("register %s: %v", tool, err)
+		}
+	}
+	return reg, stubs
+}
+
+// brave_page_read and search_news make Brave requests like web_search
+// but were neither blocked on a no-search turn nor counted: a shard
+// stamped SearchNone could call them freely, and a budgeted turn could
+// exceed its budget through them.
+func TestShard_AllBraveToolsShareTheSearchBudget(t *testing.T) {
+	calls := func(ids ...string) testutil.ScriptedResponse {
+		var tcs []testutil.ScriptedToolCall
+		for _, id := range ids {
+			tcs = append(tcs, testutil.ScriptedToolCall{ID: "call_" + id, Name: id, Arguments: map[string]any{"q": "x"}})
+		}
+		return testutil.ScriptedResponse{ToolCalls: tcs}
+	}
+	all := []string{"web_search", "brave_page_read", "search_news"}
+
+	t.Run("no search", func(t *testing.T) {
+		mock := testutil.NewMockLLM(t)
+		mock.Enqueue(calls("brave_page_read", "search_news"))
+		mock.Enqueue(testutil.ScriptedResponse{Content: "done"})
+		reg, stubs := braveStubs(t)
+		pl := makePipelineWithMockLLM(&mockEngine{}, mock, reg)
+		sess := pl.sessions.GetOrCreate("shards", "brave-off")
+		if _, _, err := pl.HandleShard(context.Background(), sess, "look it up", &ShardOverrides{
+			ShardID: "no-search", SkipSessionHydration: true, SkipCommit: true,
+			ModelOverride: "mock-model", ToolAllowlist: all,
+		}); err != nil {
+			t.Fatalf("HandleShard: %v", err)
+		}
+		for _, tool := range []string{"brave_page_read", "search_news"} {
+			if stubs[tool].execCalls != 0 {
+				t.Errorf("%s ran %d times on a SearchNone turn", tool, stubs[tool].execCalls)
+			}
+		}
+		mock.AssertAllConsumed()
+	})
+
+	t.Run("budget", func(t *testing.T) {
+		mock := testutil.NewMockLLM(t)
+		mock.Enqueue(calls("web_search"))
+		mock.Enqueue(calls("brave_page_read"))
+		mock.Enqueue(calls("search_news"))
+		mock.Enqueue(testutil.ScriptedResponse{Content: "done"})
+		reg, stubs := braveStubs(t)
+		pl := makePipelineWithMockLLM(&mockEngine{}, mock, reg)
+		sess := pl.sessions.GetOrCreate("shards", "brave-budget")
+		if _, _, err := pl.HandleShard(context.Background(), sess, "look it up", &ShardOverrides{
+			ShardID: "budgeted", SkipSessionHydration: true, SkipCommit: true,
+			ModelOverride: "mock-model", ToolAllowlist: all, SearchBudget: 2,
+		}); err != nil {
+			t.Fatalf("HandleShard: %v", err)
+		}
+		ran := stubs["web_search"].execCalls + stubs["brave_page_read"].execCalls + stubs["search_news"].execCalls
+		if ran != 2 || stubs["search_news"].execCalls != 0 {
+			t.Errorf("ran web_search=%d brave_page_read=%d search_news=%d, want the first two only (budget 2)",
+				stubs["web_search"].execCalls, stubs["brave_page_read"].execCalls, stubs["search_news"].execCalls)
+		}
+		mock.AssertAllConsumed()
+	})
+
+	// A stored shard that allowlists only search_news gets the grant (it
+	// would otherwise be refused on every turn now).
+	ov := OverridesForShard(&shards.Shard{
+		ID: "news", Persistence: shards.PersistencePersistent, Visibility: shards.VisibilityIsolated,
+		ToolAllowlist: []string{"search_news"},
+	})
+	if ov.SearchBudget <= 0 {
+		t.Errorf("SearchBudget = %d for a shard allowlisting search_news", ov.SearchBudget)
+	}
+}

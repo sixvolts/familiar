@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/familiar/gateway/internal/config"
 )
@@ -207,5 +208,35 @@ func TestTTLCacheExpiry(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	if _, ok := c.get("k"); ok {
 		t.Error("expected cache expiry")
+	}
+}
+
+// Feeds are fetched in parallel; they shared one gofeed.Parser, whose
+// client and translators are filled in on first use, so concurrent
+// fetches raced on those writes (this test reports it under -race).
+func TestGetNews_ParallelFeedsDontShareAParser(t *testing.T) {
+	var urls []string
+	for i := 0; i < 4; i++ {
+		srv := newFeedServer(t, sampleFeed)
+		defer srv.Close()
+		urls = append(urls, srv.URL)
+	}
+	s := New(config.NewsConfig{Feeds: map[string][]string{"ai": urls[:2], "security": urls[2:]}}, nil)
+	res, err := s.Execute(context.Background(), "get_news", json.RawMessage(`{"topics":["ai","security"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Error != "" || !strings.Contains(res.Content, "[security]") {
+		t.Fatalf("error=%q content=%q", res.Error, res.Content)
+	}
+}
+
+// The cap cuts on a rune boundary (a byte cut split multi-byte text).
+func TestTrimSummary_KeepsUTF8Valid(t *testing.T) {
+	for n := 270; n < 300; n++ {
+		got := trimSummary(strings.Repeat("a", n%3) + strings.Repeat("日本語🙂", 100))
+		if !utf8.ValidString(got) || !strings.HasSuffix(got, "...") {
+			t.Fatalf("trimSummary produced %q", got)
+		}
 	}
 }

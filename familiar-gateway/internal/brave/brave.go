@@ -1,7 +1,6 @@
-// Package brave wraps the Brave Web Search API. It is the single shared
-// HTTP client used by both pre-execution retrieval (internal/prefetch) and
-// the LLM-driven search/news skills (internal/skills). Keeping this client
-// in its own package avoids an import cycle between prefetch and skills.
+// Package brave wraps the Brave Web Search API: the shared client the
+// search and news skills (internal/skills/search, internal/skills/news)
+// call.
 package brave
 
 import (
@@ -12,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 )
@@ -49,12 +49,20 @@ const defaultContextURL = "https://api.search.brave.com/res/v1/llm/context"
 // Snippets are longer passages than SearchResult.ExtraSnippets — this
 // endpoint is built for grounding, so it returns several paragraphs per
 // source rather than SERP-sized fragments. Deduplicated on the way in:
-// Brave sometimes repeats a passage across grounding categories.
+// Brave sometimes repeats a passage, and a page, across grounding
+// categories.
 type ContextSource struct {
 	Title    string
 	URL      string
 	Snippets []string
 }
+
+// searchTimeout and contextTimeout bound Search and Context (vars so
+// tests can shorten them).
+var (
+	searchTimeout  = 5 * time.Second
+	contextTimeout = 20 * time.Second
+)
 
 // Client calls the Brave Search API.
 type Client struct {
@@ -63,6 +71,10 @@ type Client struct {
 	baseURL    string
 	contextURL string
 	client     *http.Client
+	// contextClient serves Context, which returns page bodies and is
+	// slower than Search. A caller's longer context deadline can't
+	// extend an http.Client's Timeout, so it needs its own.
+	contextClient *http.Client
 }
 
 // New creates a Brave Search client.
@@ -75,14 +87,12 @@ func New(apiKey string, maxResults int) *Client {
 		maxResults = 10
 	}
 	return &Client{
-		apiKey:     apiKey,
-		maxResults: maxResults,
-		baseURL:    defaultBaseURL,
-		contextURL: defaultContextURL,
-		// The context endpoint returns page bodies rather than snippets, so
-		// it is slower than Search; it gets its own longer deadline at the
-		// call site rather than widening this shared 5s timeout.
-		client: &http.Client{Timeout: 5 * time.Second},
+		apiKey:        apiKey,
+		maxResults:    maxResults,
+		baseURL:       defaultBaseURL,
+		contextURL:    defaultContextURL,
+		client:        &http.Client{Timeout: searchTimeout},
+		contextClient: &http.Client{Timeout: contextTimeout},
 	}
 }
 
@@ -93,8 +103,8 @@ func (b *Client) SetBaseURL(u string) { b.baseURL = u }
 // SetContextURL overrides the LLM-context endpoint, for tests.
 func (b *Client) SetContextURL(u string) { b.contextURL = u }
 
-// Search queries the Brave Web Search API and returns results.
-// Returns empty results on error — tool results are optional context enrichment.
+// Search queries the Brave Web Search API and returns results, or the
+// error (the calling tool reports it to the model).
 //
 // extra_snippets=true asks Brave to include 2-4 longer passages per
 // result alongside the default one-line description. Available on
@@ -194,9 +204,8 @@ func truncateBytes(b []byte, max int) string {
 // untouched; an unrecognised value is Brave's problem to reject rather
 // than something to silently drop.
 //
-// Unlike Search, this returns the error rather than swallowing it: a
-// caller asking for page content has no useful degraded mode, whereas
-// Search's results are optional context enrichment.
+// It has its own 20s client timeout (Search's is 5s); the tool call's
+// context bounds it too.
 func (b *Client) Context(ctx context.Context, query string, count int, freshness string) ([]ContextSource, error) {
 	if query == "" {
 		return nil, fmt.Errorf("brave: empty query")
@@ -223,7 +232,7 @@ func (b *Client) Context(ctx context.Context, query string, count int, freshness
 	req.Header.Set("X-Subscription-Token", b.apiKey)
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := b.client.Do(req)
+	resp, err := b.contextClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("brave context: %w", err)
 	}
@@ -261,27 +270,48 @@ func (b *Client) Context(ctx context.Context, query string, count int, freshness
 		return nil, fmt.Errorf("brave context: decode: %w", err)
 	}
 
+	// Categories in a fixed order — "generic" (the ranked pages) first,
+	// then the rest by name — so one response always yields the same
+	// sources in the same order. Map order is random: which sources
+	// survived the count cut, and their numbering, changed from call to
+	// call, and ranked pages could lose to map entries. A page listed in
+	// several categories is one source with its snippets merged.
+	keys := make([]string, 0, len(parsed.Grounding))
+	for k := range parsed.Grounding {
+		if k != "generic" {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	if _, ok := parsed.Grounding["generic"]; ok {
+		keys = append([]string{"generic"}, keys...)
+	}
 	var out []ContextSource
-	for _, cat := range parsed.Grounding {
-		for _, it := range cat {
-			seen := make(map[string]struct{}, len(it.Snippets))
-			var sn []string
+	byURL := map[string]int{}
+	var seen []map[string]struct{}
+	for _, k := range keys {
+		for _, it := range parsed.Grounding[k] {
+			u := strings.TrimSpace(it.URL)
+			i, ok := byURL[u]
+			if !ok || u == "" {
+				out = append(out, ContextSource{Title: strings.TrimSpace(it.Title), URL: u})
+				seen = append(seen, map[string]struct{}{})
+				i = len(out) - 1
+				if u != "" {
+					byURL[u] = i
+				}
+			}
 			for _, s := range it.Snippets {
 				s = strings.TrimSpace(s)
 				if s == "" {
 					continue
 				}
-				if _, dup := seen[s]; dup {
+				if _, dup := seen[i][s]; dup {
 					continue
 				}
-				seen[s] = struct{}{}
-				sn = append(sn, s)
+				seen[i][s] = struct{}{}
+				out[i].Snippets = append(out[i].Snippets, s)
 			}
-			out = append(out, ContextSource{
-				Title:    strings.TrimSpace(it.Title),
-				URL:      strings.TrimSpace(it.URL),
-				Snippets: sn,
-			})
 		}
 	}
 	if len(out) > count {

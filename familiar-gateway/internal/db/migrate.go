@@ -651,8 +651,8 @@ CREATE INDEX IF NOT EXISTS idx_rel_scope_tag
 		// already filters deleted_at IS NULL. Convert to a
 		// partial unique index so the constraint only applies to
 		// live rows; soft-deleted pages no longer block slug
-		// reuse, and the retention cron's eventual hard-purge is
-		// a no-op against this index.
+		// reuse, and hard-deleting them (the opt-in purge) is a
+		// no-op against this index.
 		name: "wiki_pages_partial_slug_unique",
 		ddl: `
 ALTER TABLE wiki_pages DROP CONSTRAINT IF EXISTS wiki_pages_book_id_slug_key;
@@ -1221,8 +1221,9 @@ CREATE INDEX IF NOT EXISTS idx_conversations_folder
 		// attached to wiki/notes pages. Bytes live on the filesystem
 		// ([media] dir); the row is the queryable index + authz
 		// anchor (page → book → membership). ON DELETE CASCADE rows
-		// die with their page; the store's orphan sweep reaps the
-		// files afterward.
+		// die with their page when it is hard-deleted (the opt-in
+		// purge; deletes are soft); the store's orphan sweep reaps
+		// the files afterward.
 		name: "page_media",
 		ddl: `
 CREATE TABLE IF NOT EXISTS page_media (

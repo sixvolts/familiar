@@ -73,15 +73,17 @@ test("upload, serve, thumbnail, and authz", async ({ stack, browser, request }) 
     expect(meta.height).toBe(600);
     expect(meta.url).toContain("/console/api/media/");
 
-    // Serve: original is the PNG, thumb is a 400px JPEG.
+    // Serve: the original PNG. No thumbnail is made (nothing shows one,
+    // and making it decoded the whole image); ?thumb=1 serves the
+    // original.
     const orig = await request.get(`${stack.workspaceURL}${meta.url}`, { headers: authed(owner) });
     expect(orig.status()).toBe(200);
     expect(orig.headers()["content-type"]).toBe("image/png");
     expect((await orig.body()).length).toBe(png.length);
-    const thumb = await request.get(`${stack.workspaceURL}${meta.thumb_url}`, { headers: authed(owner) });
+    expect(meta.thumb_url).toBeUndefined();
+    const thumb = await request.get(`${stack.workspaceURL}${meta.url}?thumb=1`, { headers: authed(owner) });
     expect(thumb.status()).toBe(200);
-    expect(thumb.headers()["content-type"]).toBe("image/jpeg");
-    expect((await thumb.body()).length).toBeLessThan(png.length);
+    expect(thumb.headers()["content-type"]).toBe("image/png");
 
     // Authz: a non-member reads 404 (no id probing), and can't
     // upload into someone else's page either. (For the intruder,

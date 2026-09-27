@@ -8,9 +8,11 @@ package media
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
+	"image/jpeg"
 	"image/png"
 	"os"
 	"path/filepath"
@@ -109,25 +111,26 @@ func TestSaveImage_RoundTripAndThumb(t *testing.T) {
 		t.Errorf("small image grew a thumbnail: %s", small.ThumbKey)
 	}
 
-	// Large image: thumbnail generated, openable as jpeg.
+	// Large image: no thumbnail either (nothing shows one, and making it
+	// decoded the whole image); ?thumb=1 serves the original.
 	big, err := s.SaveImage(ctx, page, "media-u1", "big.png", testPNG(t, 900, 600))
 	if err != nil {
 		t.Fatalf("SaveImage big: %v", err)
 	}
-	if big.ThumbKey == "" {
-		t.Fatal("big image has no thumbnail")
+	if big.ThumbKey != "" {
+		t.Errorf("big image grew a thumbnail: %s", big.ThumbKey)
 	}
 	f, ct, err := s.Open(big, true)
 	if err != nil {
 		t.Fatalf("Open thumb: %v", err)
 	}
 	defer f.Close()
-	if ct != "image/jpeg" {
-		t.Errorf("thumb content type = %s", ct)
+	if ct != "image/png" {
+		t.Errorf("thumb content type = %s, want the original's", ct)
 	}
 	cfg, _, err := image.DecodeConfig(f)
-	if err != nil || cfg.Width != 400 {
-		t.Errorf("thumb decode: %v, width=%d (want 400)", err, cfg.Width)
+	if err != nil || cfg.Width != 900 {
+		t.Errorf("thumb decode: %v, width=%d (want the original 900)", err, cfg.Width)
 	}
 
 	// Get joins the book for authz.
@@ -137,6 +140,35 @@ func TestSaveImage_RoundTripAndThumb(t *testing.T) {
 	}
 	if got.BookID == "" {
 		t.Error("Get did not join book id")
+	}
+}
+
+// Every accepted format still sniffs: dropping the thumbnail encoder
+// must leave the decoders registered.
+func TestSaveImage_JPEGStillSniffs(t *testing.T) {
+	s := storeForTest(t)
+	ctx := context.Background()
+	page := seedPage(t, s, "media-u1")
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 16, 9)), nil); err != nil {
+		t.Fatal(err)
+	}
+	m, err := s.SaveImage(ctx, page, "media-u1", "photo.jpg", buf.Bytes())
+	if err != nil {
+		t.Fatalf("SaveImage jpeg: %v", err)
+	}
+	if m.ContentType != "image/jpeg" || m.Width != 16 {
+		t.Errorf("jpeg meta = %s %dx%d", m.ContentType, m.Width, m.Height)
+	}
+}
+
+// A malformed id is not found, not a 500 carrying the driver's error.
+func TestGet_MalformedIDIsNotFound(t *testing.T) {
+	s := storeForTest(t)
+	for _, id := range []string{"not-a-uuid", "", "../etc/passwd"} {
+		if _, err := s.Get(context.Background(), id); !errors.Is(err, ErrNotFound) {
+			t.Errorf("Get(%q) = %v, want ErrNotFound", id, err)
+		}
 	}
 }
 

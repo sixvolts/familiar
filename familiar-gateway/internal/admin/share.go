@@ -1,7 +1,7 @@
 package admin
 
-// Public-link sharing for wiki/note pages — see SECURITY-SHARING.md
-// for the threat model and the rationale behind each defense.
+// Public-link sharing for wiki/note pages: the threat model is this
+// header and the comments on each defense below.
 //
 // Hardening highlights:
 //
@@ -9,13 +9,16 @@ package admin
 //     not passed through) and the result is run through bluemonday
 //     before reaching the client. The public page ships no script;
 //     there is no DOM-side parser to confuse.
-//   • Bluemonday strips disallowed schemes (javascript:, file:, …),
-//     forces every link to nofollow + noopener + noreferrer +
-//     target="_blank", and limits image and link URLs to https /
-//     mailto.
+//   • Bluemonday keeps only http, https, mailto and tel URLs
+//     (javascript:, data:, file: … are stripped), adds
+//     rel="nofollow noreferrer" to every link, and target="_blank"
+//     to fully-qualified ones; see shareSanitizer.
 //   • A strict Content-Security-Policy header (default-src 'none'
 //     plus narrow allow-list) and no-store cache headers stop
-//     leftover routes from being abused.
+//     leftover routes from being abused. Images are served only when
+//     the page as rendered now shows them (publicShareMedia).
+//   • A share serves only while its creator can still write the book
+//     (LookupSharedPage).
 //   • Referrer-Policy: no-referrer keeps the share key out of the
 //     Referer header when visitors click outbound links — the key
 //     IS the credential, so any leak would compromise access.
@@ -40,6 +43,7 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -563,10 +567,10 @@ func (h *Handler) publicShare(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sharer := h.resolveSharerName(r.Context(), sp.SharedBy)
+	rendered, _ := h.renderSharedPage(r.Context(), sp, key)
 	vm := shareViewModel{
-		Title: sp.Title,
-		RenderedHTML: rewriteShareMedia(renderShareMarkdown(
-			h.substituteMermaidRenders(r.Context(), sp.Content, sp.PageID, key)), key),
+		Title:        sp.Title,
+		RenderedHTML: rendered,
 		SharerName:   sharer,
 		UpdatedAt:    sp.UpdatedAt,
 		UpdatedLocal: sp.UpdatedAt.UTC().Format("Jan 2, 2006 · 3:04 PM UTC"),
@@ -580,11 +584,68 @@ func (h *Handler) publicShare(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// mermaidFenceRE matches ```mermaid fences for the share-render
-// substitution. The same hash convention lives client-side in
-// mermaid-blocks.js (syncShareRenders): sha256 of the TRIMMED fence
-// body, first 12 hex chars, filename "mermaid-<hash>.png".
-var mermaidFenceRE = regexp.MustCompile("(?s)```mermaid[^\n]*\n(.*?)```")
+// renderSharedPage is the public HTML of a shared page and the media
+// ids it shows: diagrams swapped for their PNGs, markdown rendered and
+// sanitized, media links pointed at the share. publicShareMedia serves
+// only ids in that set.
+func (h *Handler) renderSharedPage(ctx context.Context, sp *SharedPage, key string) (template.HTML, map[string]bool) {
+	return rewriteShareMedia(renderShareMarkdown(
+		h.substituteMermaidRenders(ctx, sp.Content, sp.PageID)), key)
+}
+
+// shareFence is one mermaid code block: content[start:end] is the
+// block with its fence lines, body the text between them.
+type shareFence struct {
+	start, end int
+	body       string
+}
+
+var fenceLineRE = regexp.MustCompile("^ {0,3}(`{3,}|~{3,})(.*)$")
+
+// mermaidFences finds the mermaid code blocks in markdown as the
+// editor's parser does: ``` or ~~~ fences of any length, the language
+// matched without case, nothing inside another code block, an
+// unclosed fence running to the end. It is mermaidFences in
+// mermaid-blocks.js, which uploads a PNG per block it finds; the two
+// must agree (TestMermaidFences uses the browser test's fixture). A
+// regex for "```mermaid" missed ~~~ and ```Mermaid blocks, and
+// matched mermaid examples inside a ````markdown block.
+func mermaidFences(md string) []shareFence {
+	type openFence struct {
+		ch               byte
+		n                int
+		mermaid          bool
+		start, bodyStart int
+	}
+	var out []shareFence
+	var open *openFence
+	pos := 0
+	for _, line := range strings.Split(md, "\n") {
+		lineEnd := pos + len(line)
+		m := fenceLineRE.FindStringSubmatch(line)
+		if open == nil {
+			// A backtick fence's info string may not contain a backtick.
+			if m != nil && !(m[1][0] == '`' && strings.Contains(m[2], "`")) {
+				lang := ""
+				if f := strings.Fields(m[2]); len(f) > 0 {
+					lang = strings.ToLower(f[0])
+				}
+				open = &openFence{ch: m[1][0], n: len(m[1]), mermaid: lang == "mermaid",
+					start: pos, bodyStart: min(lineEnd+1, len(md))}
+			}
+		} else if m != nil && m[1][0] == open.ch && len(m[1]) >= open.n && strings.TrimSpace(m[2]) == "" {
+			if open.mermaid {
+				out = append(out, shareFence{start: open.start, end: lineEnd, body: md[open.bodyStart:pos]})
+			}
+			open = nil
+		}
+		pos = lineEnd + 1
+	}
+	if open != nil && open.mermaid {
+		out = append(out, shareFence{start: open.start, end: len(md), body: md[open.bodyStart:]})
+	}
+	return out
+}
 
 // MermaidRenderHash is the shared content-addressing scheme for
 // pre-rendered diagram PNGs.
@@ -598,47 +659,71 @@ func MermaidRenderHash(fenceBody string) string {
 // share-toggle — the share page ships no script, so diagrams must
 // arrive as bitmaps). Fences with no matching render stay as code
 // blocks: stale beats blank, and a brand-new fence the owner hasn't
-// saved through the workspace yet still shows its source.
-func (h *Handler) substituteMermaidRenders(ctx context.Context, content, pageID, key string) string {
-	if h.media == nil || !strings.Contains(content, "```mermaid") {
+// saved through the workspace yet still shows its source. The image
+// is an in-app media link, which rewriteShareMedia points at the
+// share like any other.
+func (h *Handler) substituteMermaidRenders(ctx context.Context, content, pageID string) string {
+	if h.media == nil {
 		return content
 	}
-	return mermaidFenceRE.ReplaceAllStringFunc(content, func(match string) string {
-		body := mermaidFenceRE.FindStringSubmatch(match)[1]
+	fences := mermaidFences(content)
+	if len(fences) == 0 {
+		return content
+	}
+	var b strings.Builder
+	last := 0
+	for _, f := range fences {
 		m, err := h.media.FindByPageAndFilename(ctx, pageID,
-			"mermaid-"+MermaidRenderHash(body)+".png")
+			"mermaid-"+MermaidRenderHash(f.body)+".png")
 		if err != nil {
-			return match // no render — leave the fence
+			continue // no render — leave the fence
 		}
-		return "![diagram](/p/" + key + "/media/" + m.ID + ")"
-	})
+		b.WriteString(content[last:f.start])
+		b.WriteString("![diagram](/console/api/media/" + m.ID + ")")
+		last = f.end
+	}
+	b.WriteString(content[last:])
+	return b.String()
 }
 
 // rewriteShareMedia retargets in-app media URLs at the share-scoped
 // anonymous proxy (/p/{key}/media/{id}) and applies #w=NN fragment
-// widths (MEDIA-DIAGRAMS image sizing) as inline styles. Runs AFTER
-// bluemonday: everything written here is server-derived — the share
-// key and a clamped integer — never user input.
-func rewriteShareMedia(in template.HTML, key string) template.HTML {
+// widths (MEDIA-DIAGRAMS image sizing) as inline styles, returning the
+// media ids it retargeted. Runs AFTER bluemonday: everything written
+// here is server-derived — the share key, a media id matched as a
+// uuid, and a clamped integer — never user input.
+//
+// A media link may be absolute: an image copied in the editor carries
+// the app's origin (https://<app-host>/console/api/media/<id>), which
+// anonymous viewers can't load. Any http(s) URL with the media path is
+// retargeted (serving checks the id belongs to the shared book), and
+// #w= sizing applies to every image, as it does in the editor.
+func rewriteShareMedia(in template.HTML, key string) (template.HTML, map[string]bool) {
+	refs := map[string]bool{}
 	s := string(in)
-	if !strings.Contains(s, "/console/api/media/") {
-		return in
+	if !strings.Contains(s, "<img") {
+		return in, refs
 	}
 	doc, err := xhtml.Parse(strings.NewReader(s))
 	if err != nil {
-		return in
+		return in, refs
 	}
 	var walk func(n *xhtml.Node)
 	walk = func(n *xhtml.Node) {
 		if n.Type == xhtml.ElementNode && n.Data == "img" {
 			for i, a := range n.Attr {
-				if a.Key != "src" || !strings.HasPrefix(a.Val, "/console/api/media/") {
+				if a.Key != "src" {
 					continue
 				}
-				rest := strings.TrimPrefix(a.Val, "/console/api/media/")
-				id, frag, _ := strings.Cut(rest, "#")
-				n.Attr[i].Val = "/p/" + key + "/media/" + id
-				if w, ok := strings.CutPrefix(frag, "w="); ok {
+				u, err := url.Parse(a.Val)
+				if err != nil {
+					continue
+				}
+				if id, ok := shareMediaID(u); ok {
+					refs[id] = true
+					n.Attr[i].Val = "/p/" + key + "/media/" + id
+				}
+				if w, ok := strings.CutPrefix(u.Fragment, "w="); ok {
 					if pct, err := strconv.Atoi(w); err == nil && pct >= 10 && pct < 100 {
 						n.Attr = append(n.Attr, xhtml.Attribute{
 							Key: "style",
@@ -646,6 +731,7 @@ func rewriteShareMedia(in template.HTML, key string) template.HTML {
 						})
 					}
 				}
+				break
 			}
 		}
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
@@ -668,15 +754,31 @@ func rewriteShareMedia(in template.HTML, key string) template.HTML {
 	}
 	findBody(doc)
 	if body == nil {
-		return in
+		return in, map[string]bool{}
 	}
 	var buf bytes.Buffer
 	for c := body.FirstChild; c != nil; c = c.NextSibling {
 		if err := xhtml.Render(&buf, c); err != nil {
-			return in
+			return in, map[string]bool{}
 		}
 	}
-	return template.HTML(buf.String())
+	return template.HTML(buf.String()), refs
+}
+
+var mediaIDRE = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// shareMediaID is the media id an image URL points at, if it is an
+// in-app media link: /console/api/media/<uuid>, relative or on any
+// http(s) origin.
+func shareMediaID(u *url.URL) (string, bool) {
+	if u.Scheme != "" && u.Scheme != "http" && u.Scheme != "https" {
+		return "", false
+	}
+	id, ok := strings.CutPrefix(u.Path, "/console/api/media/")
+	if !ok || !mediaIDRE.MatchString(id) {
+		return "", false
+	}
+	return strings.ToLower(id), true
 }
 
 // publicShareMedia serves GET /p/{key}/media/{id} — anonymous image
@@ -699,8 +801,17 @@ func (h *Handler) publicShareMedia(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	m, err := h.media.Get(r.Context(), r.PathValue("id"))
-	if err != nil || m.PageID != sp.PageID {
+	// Only an image the page shows now. Checking just that the media
+	// row belonged to the page kept an image deleted from the page (an
+	// ID photo pasted by mistake) public for as long as the share was
+	// on. An image copied from another page of the same book shows too.
+	id := strings.ToLower(r.PathValue("id"))
+	if _, refs := h.renderSharedPage(r.Context(), sp, key); !refs[id] {
+		http.NotFound(w, r)
+		return
+	}
+	m, err := h.media.Get(r.Context(), id)
+	if err != nil || (m.PageID != sp.PageID && m.BookID != sp.BookID) {
 		http.NotFound(w, r)
 		return
 	}
@@ -717,10 +828,11 @@ func (h *Handler) publicShareMedia(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", ct)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	// Public + cacheable: the share key in the URL is the gate, and
-	// revoking a share also changes nothing about already-cached
-	// bytes — same trade the share page itself makes.
-	w.Header().Set("Cache-Control", "public, max-age=86400")
+	// Not stored, like the share page: a public cache kept serving an
+	// image for a day after the share was turned off or the image
+	// removed.
+	w.Header().Set("Cache-Control", "private, no-store, max-age=0")
+	w.Header().Set("Referrer-Policy", "no-referrer")
 	http.ServeContent(w, r, m.Filename, info.ModTime(), f)
 }
 

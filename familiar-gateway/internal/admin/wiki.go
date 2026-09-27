@@ -48,6 +48,7 @@ import (
 	"github.com/familiar/gateway/internal/db"
 	"github.com/familiar/gateway/internal/safego"
 	"github.com/familiar/gateway/internal/textmerge"
+	"github.com/lib/pq"
 )
 
 // ──────────────────────────────────────────────────────────────────
@@ -84,8 +85,8 @@ type BookSummary struct {
 }
 
 // BookMember is one row in book_members. The owner is the user who
-// created the book (auto-added on Create); roles are owner/editor/
-// viewer with viewer reserved for Phase 2 RBAC.
+// created the book (auto-added on Create); roles are owner, writer
+// and reader.
 type BookMember struct {
 	BookID   string    `json:"book_id"`
 	UserID   string    `json:"user_id"`
@@ -157,6 +158,17 @@ type WikiRevision struct {
 	ID        string    `json:"id"`
 	PageID    string    `json:"page_id"`
 	Content   string    `json:"content"`
+	EditedBy  string    `json:"edited_by"`
+	CreatedAt time.Time `json:"created_at"`
+	Summary   string    `json:"summary,omitempty"`
+}
+
+// WikiRevisionSummary is a revision in a history listing: no content
+// (fetch one revision for that), its size in characters instead.
+type WikiRevisionSummary struct {
+	ID        string    `json:"id"`
+	PageID    string    `json:"page_id"`
+	Size      int       `json:"size"`
 	EditedBy  string    `json:"edited_by"`
 	CreatedAt time.Time `json:"created_at"`
 	Summary   string    `json:"summary,omitempty"`
@@ -359,8 +371,17 @@ func (s *WikiStore) uniqueBookSlug(ctx context.Context, base string) (string, er
 	return "", fmt.Errorf("books: couldn't find unique slug after 10 tries")
 }
 
+// isUniqueViolation reports a Postgres unique_violation (23505): a
+// slug uniquePageSlug found free was taken before the write landed.
+func isUniqueViolation(err error) bool {
+	var pqErr *pq.Error
+	return errors.As(err, &pqErr) && pqErr.Code == "23505"
+}
+
 // uniquePageSlug picks a slug that isn't already taken WITHIN the
-// given book. On collision, appends a short random hex suffix.
+// given book. On collision, appends a short random hex suffix. The
+// check and the write aren't atomic: writers retry on
+// isUniqueViolation.
 func (s *WikiStore) uniquePageSlug(ctx context.Context, bookID, base string) (string, error) {
 	candidate := base
 	for i := 0; i < 10; i++ {
@@ -507,16 +528,17 @@ func (s *WikiStore) CreateBook(ctx context.Context, userID, name, description, r
 	if requestedSlug == "" {
 		base = slugify(name)
 	}
-	if base == "personal" || strings.HasPrefix(base, "personal:") || strings.HasPrefix(base, "personal-") {
-		return nil, fmt.Errorf("books: create: 'personal' slug (and 'personal:' prefix) is reserved")
+	// The bare slug "personal" is the routes' alias for the caller's own
+	// personal book, so a book called "Personal" gets another. Personal
+	// books themselves are "personal:{userID}", a form slugify can't
+	// produce (':' becomes '-'), so other names starting "Personal"
+	// ("Personal Finance") are ordinary books; they were refused.
+	if base == "personal" {
+		base = "personal-book"
 	}
 	// The per-user research evidence book uses slug "research:{userID}"
-	// (colon), minted only by EnsureResearchBook via insertBookTx.
-	// CreateBook always slugifies, and slugify maps ':' → '-', so a
-	// user-requested slug can never produce the colon form — it can't
-	// collide with, or be hidden as, a system research book. No
-	// reservation needed here (unlike 'personal', whose bare/dash forms
-	// are also special).
+	// (colon), minted only by EnsureResearchBook via insertBookTx; for
+	// the same reason no user slug can collide with it.
 	slug, err := s.uniqueBookSlug(ctx, base)
 	if err != nil {
 		return nil, err
@@ -740,8 +762,8 @@ func (s *WikiStore) UpdateBook(ctx context.Context, slug, userID string, isAdmin
 // with an unverified bookID would let any member modify another
 // book's roster.
 
-// MemberRole returns the caller's role on a book ("owner", "editor",
-// "viewer") or "" if the caller isn't a member. Used both for auth
+// MemberRole returns the caller's role on a book ("owner", "writer",
+// "reader") or "" if the caller isn't a member. Used both for auth
 // scoping AND to decorate listings with the caller's role.
 func (s *WikiStore) MemberRole(ctx context.Context, bookID, userID string) (string, error) {
 	var role string
@@ -780,33 +802,65 @@ func (s *WikiStore) ListMembers(ctx context.Context, bookID string) ([]BookMembe
 	return out, rows.Err()
 }
 
-// AddMember idempotently inserts a member at the given role. ON
-// CONFLICT updates the role so calling AddMember again can be used
-// to flip an existing member's role.
-// AddMember idempotently sets a member's role on a book. Used both
-// for first-time invites AND for role changes (the PATCH role
-// handler routes through here). Three rules enforced at the store
-// level so handlers don't have to reason about edge cases:
+// ErrMemberNotFound is a role change for someone who isn't a member.
+var ErrMemberNotFound = errors.New("books: not a member")
+
+// lockBookRoster serializes membership changes on a book for the rest
+// of the transaction. The last-owner guard read the owner count and
+// wrote in separate statements: two owners demoting each other at once
+// both saw two owners, and the book was left with none.
+func lockBookRoster(ctx context.Context, tx *sql.Tx, bookID string) error {
+	if _, err := tx.ExecContext(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext('wiki-roster:' || $1))`, bookID); err != nil {
+		return fmt.Errorf("books: lock roster: %w", err)
+	}
+	return nil
+}
+
+// AddMember sets a member's role on a book, adding them if they aren't
+// one; role defaults to writer. Rules enforced at the store level so
+// handlers don't have to reason about edge cases:
 //  1. Role must be one of owner / writer / reader.
 //  2. Demotion away from "owner" is blocked when the target is
 //     currently the only owner — the book would be left with no
 //     manage path. Caller must promote someone else to owner
 //     first.
-//  3. Promotion from non-member straight to writer is fine; the
-//     "demote-the-last-owner" check only fires on existing owners.
 func (s *WikiStore) AddMember(ctx context.Context, actorUserID, bookID, targetUserID, role string) (*BookMember, error) {
 	if role == "" {
 		role = "writer"
 	}
+	return s.setMemberRole(ctx, actorUserID, bookID, targetUserID, role, false)
+}
+
+// ChangeMemberRole changes an existing member's role (the PATCH role
+// handler). Routed through AddMember, an empty role reset the member
+// to writer (a reader sending {} was promoted) and a non-member was
+// added. Same rules as AddMember.
+func (s *WikiStore) ChangeMemberRole(ctx context.Context, actorUserID, bookID, targetUserID, role string) (*BookMember, error) {
+	if role == "" {
+		return nil, fmt.Errorf("books: role required")
+	}
+	return s.setMemberRole(ctx, actorUserID, bookID, targetUserID, role, true)
+}
+
+func (s *WikiStore) setMemberRole(ctx context.Context, actorUserID, bookID, targetUserID, role string, mustExist bool) (*BookMember, error) {
 	if role != "owner" && role != "writer" && role != "reader" {
 		return nil, fmt.Errorf("books: invalid role %q", role)
 	}
-	// Look up the prior role first — needed for the demote-the-last-
-	// owner guard AND so the audit log can record old→new on a
-	// role change versus a fresh add.
+	tx, err := s.db.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("books: begin: %w", err)
+	}
+	defer tx.Rollback()
+	if err := lockBookRoster(ctx, tx, bookID); err != nil {
+		return nil, err
+	}
+	// The prior role: needed for the demote-the-last-owner guard AND
+	// so the audit log can record old→new on a role change versus a
+	// fresh add.
 	var currentRole sql.NullString
 	var ownerCount int
-	if err := s.db.QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, `
 		SELECT
 			(SELECT role FROM book_members
 			   WHERE book_id = $1::uuid AND user_id = $2),
@@ -815,10 +869,13 @@ func (s *WikiStore) AddMember(ctx context.Context, actorUserID, bookID, targetUs
 	`, bookID, targetUserID).Scan(&currentRole, &ownerCount); err != nil {
 		return nil, fmt.Errorf("books: role lookup: %w", err)
 	}
+	if mustExist && !currentRole.Valid {
+		return nil, ErrMemberNotFound
+	}
 	if role != "owner" && currentRole.Valid && currentRole.String == "owner" && ownerCount <= 1 {
 		return nil, fmt.Errorf("books: cannot demote the last owner")
 	}
-	row := s.db.QueryRowContext(ctx, `
+	row := tx.QueryRowContext(ctx, `
 		INSERT INTO book_members (book_id, user_id, role)
 		VALUES ($1::uuid, $2, $3)
 		ON CONFLICT (book_id, user_id) DO UPDATE SET role = EXCLUDED.role
@@ -827,6 +884,9 @@ func (s *WikiStore) AddMember(ctx context.Context, actorUserID, bookID, targetUs
 	var m BookMember
 	if err := row.Scan(&m.BookID, &m.UserID, &m.Role, &m.JoinedAt); err != nil {
 		return nil, fmt.Errorf("books: add member: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("books: commit: %w", err)
 	}
 	// Audit: distinguish a fresh add from a role change so the
 	// log reads naturally.
@@ -844,10 +904,19 @@ func (s *WikiStore) AddMember(ctx context.Context, actorUserID, bookID, targetUs
 // owner outright — caller must demote the owner to writer first
 // (via PATCH role) and then remove. This keeps "last owner"
 // protection from being a one-off special case and gives an
-// auditable two-step demotion path.
+// auditable two-step demotion path. Public shares the member created
+// stop serving (LookupSharedPage checks the creator can still write).
 func (s *WikiStore) RemoveMember(ctx context.Context, actorUserID, bookID, targetUserID string) error {
+	tx, err := s.db.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("books: begin: %w", err)
+	}
+	defer tx.Rollback()
+	if err := lockBookRoster(ctx, tx, bookID); err != nil {
+		return err
+	}
 	var targetRole string
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT role FROM book_members
 		 WHERE book_id = $1::uuid AND user_id = $2`,
 		bookID, targetUserID).Scan(&targetRole)
@@ -860,11 +929,13 @@ func (s *WikiStore) RemoveMember(ctx context.Context, actorUserID, bookID, targe
 	if targetRole == "owner" {
 		return fmt.Errorf("books: cannot remove an owner directly; demote to writer first")
 	}
-	_, err = s.db.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM book_members WHERE book_id = $1::uuid AND user_id = $2`,
-		bookID, targetUserID)
-	if err != nil {
+		bookID, targetUserID); err != nil {
 		return fmt.Errorf("books: remove member: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("books: commit: %w", err)
 	}
 	s.recordAudit(ctx, bookID, actorUserID, "member_removed", targetUserID, targetRole, "")
 	return nil
@@ -1203,6 +1274,18 @@ func (s *WikiStore) CreatePage(ctx context.Context, bookID, userID, title, conte
 	if requestedSlug == "" {
 		base = slugify(title)
 	}
+	// Two creates of one title both find the slug free; the loser
+	// retries with a suffix instead of failing with a duplicate key.
+	for attempt := 0; ; attempt++ {
+		p, err := s.createPageOnce(ctx, bookID, userID, title, content, base)
+		if err != nil && isUniqueViolation(err) && attempt < 3 {
+			continue
+		}
+		return p, err
+	}
+}
+
+func (s *WikiStore) createPageOnce(ctx context.Context, bookID, userID, title, content, base string) (*WikiPage, error) {
 	slug, err := s.uniquePageSlug(ctx, bookID, base)
 	if err != nil {
 		return nil, err
@@ -1258,6 +1341,7 @@ func (s *WikiStore) CreatePage(ctx context.Context, bookID, userID, title, conte
 	if err := s.ReplacePageLinks(ctx, p.ID, bookID, ParseLinks(content)); err != nil {
 		fmt.Printf("[wiki] link index failed (page=%s book=%s): %v\n", p.ID, bookID, err)
 	}
+	s.resolveDanglingLinks(ctx, bookID, p.ID, p.Slug, p.Title)
 	s.fireSavedAfterIndex(ctx, &p, bookID, userID)
 	return &p, nil
 }
@@ -1325,6 +1409,18 @@ type PagePatch struct {
 // (caller must have verified bookID membership AND that userID has
 // write capability).
 func (s *WikiStore) UpdatePage(ctx context.Context, bookID, pageSlug, userID string, p PagePatch) (*WikiPage, error) {
+	cur, err := s.GetPage(ctx, bookID, pageSlug)
+	if err != nil {
+		return nil, err
+	}
+	return s.UpdatePageByID(ctx, bookID, cur.ID, userID, p)
+}
+
+// UpdatePageByID is UpdatePage for a page already identified. Every
+// attempt re-reads the page by id: re-resolving the slug each time
+// (with GetPage's title fallback) let a rename landing between
+// attempts send the write to a different page whose title matched.
+func (s *WikiStore) UpdatePageByID(ctx context.Context, bookID, pageID, userID string, p PagePatch) (*WikiPage, error) {
 	// A content-only save carrying a precondition is the merge-eligible
 	// case: if the base moved under us we can three-way merge the body
 	// instead of rejecting. Title/slug edits aren't line-mergeable, so a
@@ -1340,7 +1436,7 @@ func (s *WikiStore) UpdatePage(ctx context.Context, bookID, pageSlug, userID str
 	// as stale so the caller can fall back to a manual choice.
 	const maxAttempts = 4
 	for attempt := 0; ; attempt++ {
-		out, retry, err := s.updatePageOnce(ctx, bookID, pageSlug, userID, p, mergeEligible)
+		out, retry, err := s.updatePageOnce(ctx, bookID, pageID, userID, p, mergeEligible)
 		if err == nil {
 			return out, nil
 		}
@@ -1355,8 +1451,8 @@ func (s *WikiStore) UpdatePage(ctx context.Context, bookID, pageSlug, userID str
 // an atomic CAS lost to a concurrent writer AND the edit is merge-eligible
 // (so re-reading and re-merging is worthwhile); the caller loops. All other
 // errors are terminal.
-func (s *WikiStore) updatePageOnce(ctx context.Context, bookID, pageSlug, userID string, p PagePatch, mergeEligible bool) (_ *WikiPage, retry bool, _ error) {
-	cur, err := s.GetPage(ctx, bookID, pageSlug)
+func (s *WikiStore) updatePageOnce(ctx context.Context, bookID, pageID, userID string, p PagePatch, mergeEligible bool) (_ *WikiPage, retry bool, _ error) {
+	cur, err := s.GetPageByID(ctx, bookID, pageID)
 	if err != nil {
 		return nil, false, err
 	}
@@ -1503,6 +1599,11 @@ func (s *WikiStore) updatePageOnce(ctx context.Context, bookID, pageSlug, userID
 			// otherwise surface as stale.
 			return nil, mergeEligible, ErrPageStale
 		}
+		if newSlug != cur.Slug && isUniqueViolation(err) {
+			// A concurrent create or rename took the slug between
+			// uniquePageSlug's check and this write; pick another.
+			return nil, true, fmt.Errorf("wiki: update: %w", err)
+		}
 		return nil, false, fmt.Errorf("wiki: update: %w", err)
 	}
 
@@ -1540,6 +1641,9 @@ func (s *WikiStore) updatePageOnce(ctx context.Context, bookID, pageSlug, userID
 			fmt.Printf("[wiki] link index failed (page=%s book=%s): %v\n", out.ID, bookID, err)
 		}
 	}
+	if out.Slug != cur.Slug || out.Title != cur.Title {
+		s.resolveDanglingLinks(ctx, bookID, out.ID, out.Slug, out.Title)
+	}
 	// Fire the saved hook on every successful update — even title-
 	// only edits matter for the hook (sidecar wants the title in
 	// context for fact extraction even if the body didn't move).
@@ -1555,19 +1659,21 @@ func microEqual(a, b time.Time) bool {
 	return a.Truncate(time.Microsecond).Equal(b.Truncate(time.Microsecond))
 }
 
-// revisionContentAt returns the content of the revision whose created_at
-// matches `at` at microsecond precision, and whether one was found. A
-// page's updated_at and the revision written in that same transaction share
-// one transaction_timestamp, so a past updated_at (an If-Match value)
-// uniquely identifies the base revision a client edited from — the anchor
-// for a server-side three-way merge. Returns ("", false) when no such
-// revision exists (base predates history, or was pruned).
+// revisionContentAt returns the page's content as of version `at` (an
+// If-Match value), the anchor for a server-side three-way merge, and
+// whether it's known. Every content change writes a revision stamped
+// with the same transaction timestamp as the page's updated_at, so the
+// content at `at` is the latest revision at or before it. Requiring a
+// revision AT `at` failed for versions made by a rename or a move,
+// which bump updated_at without changing content: a save based on one
+// could never merge (a spurious conflict). Returns ("", false) when no
+// revision is that old (the base predates history).
 func (s *WikiStore) revisionContentAt(ctx context.Context, pageID string, at time.Time) (string, bool) {
 	var content string
 	err := s.db.DB.QueryRowContext(ctx, `
 		SELECT content FROM wiki_revisions
 		 WHERE page_id = $1::uuid
-		   AND date_trunc('microseconds', created_at) = date_trunc('microseconds', $2::timestamptz)
+		   AND date_trunc('microseconds', created_at) <= date_trunc('microseconds', $2::timestamptz)
 		 ORDER BY created_at DESC
 		 LIMIT 1`, pageID, at.UTC()).Scan(&content)
 	if err != nil {
@@ -1663,8 +1769,11 @@ var ErrInvalidParent = errors.New("wiki: invalid parent")
 //     the loop on itself. Checked with a recursive CTE up the new
 //     parent's ancestor chain; if it hits pageID we reject.
 //
-// All checks + the UPDATE run in a single transaction so a parallel
-// move can't slip in between validation and write.
+// All checks + the UPDATE run in a single transaction under the
+// book's tree lock (lockBookTree). The transaction alone didn't
+// isolate them: two moves update different rows, so moving A under B
+// and B under A at once each passed the cycle check and together made
+// a loop that hid both subtrees.
 //
 // See PRECONDITION above (caller must have verified bookID
 // membership AND that userID has write capability).
@@ -1680,6 +1789,9 @@ func (s *WikiStore) MovePage(ctx context.Context, bookID, pageID, newParentID st
 		return nil, fmt.Errorf("wiki: move: begin: %w", err)
 	}
 	defer tx.Rollback()
+	if err := lockBookTree(ctx, tx, bookID); err != nil {
+		return nil, err
+	}
 
 	// Pin the page we're moving — also acts as our existence +
 	// book-scoping + live-status check.
@@ -1800,25 +1912,79 @@ func (s *WikiStore) MovePage(ctx context.Context, bookID, pageID, newParentID st
 	return &out, nil
 }
 
-// DeletePage soft-deletes a page. The retention cron is responsible
-// for hard-purging. Phase 1d's stale-fact cleanup hangs off this
-// same path. See PRECONDITION above (caller must have verified
+// lockBookTree serializes changes to a book's page hierarchy (moves,
+// and deletes re-parenting children) for the rest of the transaction.
+// An advisory lock rather than a row lock on books: page saves update
+// the books row too, and taking it here first would invert their lock
+// order.
+func lockBookTree(ctx context.Context, tx *sql.Tx, bookID string) error {
+	if _, err := tx.ExecContext(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext('wiki-tree:' || $1))`, bookID); err != nil {
+		return fmt.Errorf("wiki: lock page tree: %w", err)
+	}
+	return nil
+}
+
+// DeletePage soft-deletes the live page with this exact slug; see
+// DeletePageByID. See PRECONDITION above (caller must have verified
 // bookID membership AND write capability).
 func (s *WikiStore) DeletePage(ctx context.Context, bookID, pageSlug string) error {
-	// RETURNING so we can hand the page id to the deletion hook
-	// without a second round-trip. ErrPageNotFound on no rows.
 	var pageID string
 	err := s.db.QueryRowContext(ctx, `
-		UPDATE wiki_pages
-		   SET deleted_at = NOW(), updated_at = NOW()
-		 WHERE book_id = $1::uuid AND slug = $2 AND deleted_at IS NULL
-		 RETURNING id::text`,
+		SELECT id::text FROM wiki_pages
+		 WHERE book_id = $1::uuid AND slug = $2 AND deleted_at IS NULL`,
 		bookID, pageSlug).Scan(&pageID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrPageNotFound
 	}
 	if err != nil {
 		return fmt.Errorf("wiki: delete: %w", err)
+	}
+	return s.DeletePageByID(ctx, bookID, pageID)
+}
+
+// DeletePageByID soft-deletes a page. Nothing purges it later unless
+// the operator enables PurgeDeletedPages. Its live children move up to
+// its parent: left pointing at a deleted parent, they vanished from
+// the sidebar trees (reachable only by search). Links to it become
+// broken links. Wiki knowledge cleanup hangs off the deletion hook.
+// Same PRECONDITION as DeletePage.
+func (s *WikiStore) DeletePageByID(ctx context.Context, bookID, pageID string) error {
+	tx, err := s.db.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("wiki: delete: begin: %w", err)
+	}
+	defer tx.Rollback()
+	if err := lockBookTree(ctx, tx, bookID); err != nil {
+		return err
+	}
+	var pageSlug string
+	var parentID sql.NullString
+	err = tx.QueryRowContext(ctx, `
+		UPDATE wiki_pages
+		   SET deleted_at = NOW(), updated_at = NOW()
+		 WHERE id = $1::uuid AND book_id = $2::uuid AND deleted_at IS NULL
+		 RETURNING slug, parent_id::text`,
+		pageID, bookID).Scan(&pageSlug, &parentID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrPageNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("wiki: delete: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE wiki_pages SET parent_id = $2::uuid
+		 WHERE parent_id = $1::uuid AND deleted_at IS NULL`,
+		pageID, parentID); err != nil {
+		return fmt.Errorf("wiki: delete: re-parent children: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE wiki_page_links SET target_page_id = NULL
+		 WHERE target_page_id = $1::uuid`, pageID); err != nil {
+		return fmt.Errorf("wiki: delete: unlink: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("wiki: delete: commit: %w", err)
 	}
 	if s.pageDeleted != nil {
 		bookSlug, slugErr := s.bookSlugByID(ctx, bookID)
@@ -1829,6 +1995,43 @@ func (s *WikiStore) DeletePage(ctx context.Context, bookID, pageSlug string) err
 		}
 	}
 	return nil
+}
+
+// PurgeDeletedPages hard-deletes pages soft-deleted more than
+// olderThan ago, and with them (by cascade) their revisions, shares,
+// pins and image rows; the media orphan sweep then removes the image
+// files. Without it nothing ever removed a deleted page: every
+// revision and every image of a deleted note stayed in the database
+// and on disk. Opt-in ([media] purge_deleted_after_days): the pages
+// can't be restored from the app, but an operator can still recover
+// them from the database until this runs. Children still pointing at
+// a purged page (deleted before deletes re-parented them) move to the
+// top level. Returns the number of pages purged.
+func (s *WikiStore) PurgeDeletedPages(ctx context.Context, olderThan time.Duration) (int, error) {
+	if olderThan <= 0 {
+		return 0, nil
+	}
+	tx, err := s.db.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("wiki: purge: begin: %w", err)
+	}
+	defer tx.Rollback()
+	cutoff := `deleted_at IS NOT NULL AND deleted_at < NOW() - make_interval(secs => $1)`
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE wiki_pages SET parent_id = NULL
+		 WHERE parent_id IN (SELECT id FROM wiki_pages WHERE `+cutoff+`)`,
+		olderThan.Seconds()); err != nil {
+		return 0, fmt.Errorf("wiki: purge: detach children: %w", err)
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM wiki_pages WHERE `+cutoff, olderThan.Seconds())
+	if err != nil {
+		return 0, fmt.Errorf("wiki: purge: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("wiki: purge: commit: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }
 
 // SweepResearchEvidence soft-deletes evidence pages in the hidden
@@ -1929,8 +2132,12 @@ type Backlink struct {
 var wikiLinkRe = regexp.MustCompile(`\[\[([^\]]+)\]\]`)
 
 // ParseLinks extracts every [[]] occurrence from the markdown body
-// and normalizes targets to lowercase. Pure function — no DB. Four
-// link forms are supported per the architecture doc:
+// and normalizes targets to slugs the way the editor does (wikilink.js
+// parseTarget + slugify), so [[French Toast]] indexes as
+// "french-toast". It lowercased only, and "french toast" matched no
+// slug: title-style links, the common form, were all stored broken.
+// Pure function — no DB. Four link forms are supported per the
+// architecture doc:
 //
 //	[[slug]]                 — same-book link
 //	[[slug|Display]]         — same-book link with display text
@@ -1969,18 +2176,33 @@ func ParseLinks(body string) []ParsedLink {
 		} else {
 			target = inner
 		}
+		// [[https://…]] is an external link in the editor, not a page.
+		if lt := strings.ToLower(target); strings.HasPrefix(lt, "http://") || strings.HasPrefix(lt, "https://") {
+			continue
+		}
 		var book, page string
-		if slash := strings.Index(target, "/"); slash >= 0 {
+		// The editor accepts / and \ as the book/page separator.
+		slash := strings.Index(target, "/")
+		if slash < 0 {
+			slash = strings.Index(target, "\\")
+		}
+		if slash >= 0 {
 			book = strings.TrimSpace(target[:slash])
 			page = strings.TrimSpace(target[slash+1:])
 		} else {
 			page = target
 		}
-		book = strings.ToLower(book)
-		page = strings.ToLower(page)
 		if page == "" {
 			continue
 		}
+		// System book slugs ("personal:{user}", "research:{user}") have
+		// a colon slugify can't produce; they're used as written.
+		if strings.Contains(book, ":") {
+			book = strings.ToLower(book)
+		} else if book != "" {
+			book = slugify(book)
+		}
+		page = slugify(page)
 		k := key{book, page}
 		if _, ok := seen[k]; !ok {
 			order = append(order, k)
@@ -2041,15 +2263,12 @@ func (s *WikiStore) ReplacePageLinks(ctx context.Context, sourcePageID, sourceBo
 
 		var targetPageID sql.NullString
 		if targetBookID.Valid {
-			var id string
-			err := tx.QueryRowContext(ctx,
-				`SELECT id::text FROM wiki_pages
-				 WHERE book_id = $1::uuid AND slug = $2 AND deleted_at IS NULL`,
-				targetBookID.String, l.TargetPageSlug).Scan(&id)
-			if err == nil {
+			id, err := resolveLinkTarget(ctx, tx, targetBookID.String, l.TargetPageSlug)
+			if err != nil {
+				return err
+			}
+			if id != "" {
 				targetPageID = sql.NullString{String: id, Valid: true}
-			} else if !errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("wiki: links resolve page: %w", err)
 			}
 		}
 
@@ -2075,6 +2294,65 @@ func (s *WikiStore) ReplacePageLinks(ctx context.Context, sourcePageID, sourceBo
 		return fmt.Errorf("wiki: links commit: %w", err)
 	}
 	return nil
+}
+
+// resolveLinkTarget finds the live page a link slug names in a book:
+// by slug, else by slugified title, as GetPage does (a page created as
+// "untitled-4" and renamed "French Toast" is [[French Toast]]). ""
+// when there is none (a broken link).
+func resolveLinkTarget(ctx context.Context, tx *sql.Tx, bookID, slug string) (string, error) {
+	var id string
+	err := tx.QueryRowContext(ctx,
+		`SELECT id::text FROM wiki_pages
+		 WHERE book_id = $1::uuid AND slug = $2 AND deleted_at IS NULL`,
+		bookID, slug).Scan(&id)
+	if err == nil {
+		return id, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("wiki: links resolve page: %w", err)
+	}
+	rows, err := tx.QueryContext(ctx,
+		`SELECT id::text, title FROM wiki_pages
+		 WHERE book_id = $1::uuid AND deleted_at IS NULL
+		 ORDER BY created_at, id`, bookID)
+	if err != nil {
+		return "", fmt.Errorf("wiki: links resolve title: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var pid, title string
+		if err := rows.Scan(&pid, &title); err != nil {
+			return "", fmt.Errorf("wiki: links resolve title: %w", err)
+		}
+		if slugify(title) == slug {
+			return pid, nil
+		}
+	}
+	return "", rows.Err()
+}
+
+// resolveDanglingLinks points broken links at a page that now answers
+// to them: a page just created, or renamed. Without it a link written
+// before its target existed stayed broken (no backlink, no links_to
+// triple) until its source page was saved again.
+func (s *WikiStore) resolveDanglingLinks(ctx context.Context, bookID, pageID, slug, title string) {
+	names := []string{slug}
+	if ts := slugify(title); ts != slug {
+		names = append(names, ts)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE wiki_page_links l
+		   SET target_page_id = $1::uuid
+		  FROM wiki_pages src
+		 WHERE l.target_page_id IS NULL
+		   AND src.id = l.source_page_id
+		   AND l.target_page_slug = ANY($2)
+		   AND ((l.target_book_slug IS NULL AND src.book_id = $3::uuid)
+		        OR l.target_book_slug = (SELECT slug FROM books WHERE id = $3::uuid))`,
+		pageID, pq.Array(names), bookID); err != nil {
+		fmt.Printf("[wiki] resolve dangling links failed (page=%s): %v\n", pageID, err)
+	}
 }
 
 // ListPageLinks returns the outbound links of a page, joining to
@@ -2200,22 +2478,32 @@ func (s *WikiStore) ListBacklinks(ctx context.Context, targetPageID string, view
 // would otherwise leak across books if called with an unverified
 // pageID.
 
-// ListRevisions returns the change history for a page, newest first.
+// ListRevisions returns up to limit revisions of a page older than
+// `before` (all when nil), newest first, without their content.
+// Autosave writes a revision per typing pause, so an hour's editing
+// is thousands: the unpaginated list with every snapshot's content
+// was tens of MB in one response.
 // See PRECONDITION above.
-func (s *WikiStore) ListRevisions(ctx context.Context, pageID string) ([]WikiRevision, error) {
+func (s *WikiStore) ListRevisions(ctx context.Context, pageID string, before *time.Time, limit int) ([]WikiRevisionSummary, error) {
+	var beforeArg any
+	if before != nil {
+		beforeArg = before.UTC()
+	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id::text, page_id::text, content, edited_by, created_at, COALESCE(summary, '')
+		SELECT id::text, page_id::text, char_length(content), edited_by, created_at, COALESCE(summary, '')
 		  FROM wiki_revisions
 		 WHERE page_id = $1::uuid
-		 ORDER BY created_at DESC`, pageID)
+		   AND ($2::timestamptz IS NULL OR created_at < $2::timestamptz)
+		 ORDER BY created_at DESC, id DESC
+		 LIMIT $3`, pageID, beforeArg, limit)
 	if err != nil {
 		return nil, fmt.Errorf("wiki: revisions: %w", err)
 	}
 	defer rows.Close()
-	out := make([]WikiRevision, 0)
+	out := make([]WikiRevisionSummary, 0)
 	for rows.Next() {
-		var r WikiRevision
-		if err := rows.Scan(&r.ID, &r.PageID, &r.Content, &r.EditedBy,
+		var r WikiRevisionSummary
+		if err := rows.Scan(&r.ID, &r.PageID, &r.Size, &r.EditedBy,
 			&r.CreatedAt, &r.Summary); err != nil {
 			return nil, fmt.Errorf("wiki: revision scan: %w", err)
 		}
@@ -2303,6 +2591,7 @@ type PageShare struct {
 // name). Page is excluded when soft-deleted or the book is archived.
 type SharedPage struct {
 	PageID     string
+	BookID     string
 	Title      string
 	Content    string
 	UpdatedAt  time.Time
@@ -2332,7 +2621,9 @@ func (s *WikiStore) GetPageShare(ctx context.Context, pageID string) (*PageShare
 // EnablePageShare upserts a public share row for a page. Idempotent:
 // when a share already exists the existing row is returned unchanged
 // (the share key is stable, so callers' copied links don't break on
-// a re-toggle).
+// a re-toggle). Two enables at once (a double click) both found no
+// share and the second insert failed on the one-public-share index;
+// it now yields to the first and returns its row.
 func (s *WikiStore) EnablePageShare(ctx context.Context, pageID, userID string) (*PageShare, error) {
 	if existing, err := s.GetPageShare(ctx, pageID); err != nil {
 		return nil, err
@@ -2347,9 +2638,20 @@ func (s *WikiStore) EnablePageShare(ctx context.Context, pageID, userID string) 
 	err = s.db.QueryRowContext(ctx, `
 		INSERT INTO wiki_page_shares (share_key, page_id, visibility, created_by)
 		VALUES ($1, $2::uuid, 'public', $3)
+		ON CONFLICT (page_id) WHERE visibility = 'public' DO NOTHING
 		RETURNING share_key, page_id::text, visibility, created_by, created_at`,
 		key, pageID, userID,
 	).Scan(&p.ShareKey, &p.PageID, &p.Visibility, &p.CreatedBy, &p.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		existing, gerr := s.GetPageShare(ctx, pageID)
+		if gerr != nil {
+			return nil, gerr
+		}
+		if existing == nil {
+			return nil, fmt.Errorf("wiki: enable share: raced a disable; try again")
+		}
+		return existing, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("wiki: enable share: %w", err)
 	}
@@ -2370,12 +2672,15 @@ func (s *WikiStore) DisablePageShare(ctx context.Context, pageID string) error {
 
 // LookupSharedPage resolves a public share key to the live page it
 // points at. Returns ErrPageNotFound when the key is unknown, the
-// page is soft-deleted, or the page's book is archived — the same
-// signal so a probe can't tell the three apart.
+// page is soft-deleted, the page's book is archived, or whoever
+// created the share can no longer write the book (removed, demoted to
+// reader; admins excepted) — the same signal so a probe can't tell
+// them apart. A removed writer's shares kept serving the live page,
+// later edits included, to anyone holding the URL.
 func (s *WikiStore) LookupSharedPage(ctx context.Context, shareKey string) (*SharedPage, error) {
 	var sp SharedPage
 	err := s.db.QueryRowContext(ctx, `
-		SELECT wp.id::text, wp.title, wp.content, wp.updated_at,
+		SELECT wp.id::text, wp.book_id::text, wp.title, wp.content, wp.updated_at,
 		       sh.created_by, sh.visibility
 		  FROM wiki_page_shares sh
 		  JOIN wiki_pages       wp ON wp.id = sh.page_id
@@ -2383,9 +2688,14 @@ func (s *WikiStore) LookupSharedPage(ctx context.Context, shareKey string) (*Sha
 		 WHERE sh.share_key = $1
 		   AND sh.visibility = 'public'
 		   AND wp.deleted_at IS NULL
-		   AND b.archived_at IS NULL`,
+		   AND b.archived_at IS NULL
+		   AND (EXISTS (SELECT 1 FROM book_members bm
+		                 WHERE bm.book_id = b.id AND bm.user_id = sh.created_by
+		                   AND bm.role IN ('owner', 'writer'))
+		        OR EXISTS (SELECT 1 FROM users u
+		                    WHERE u.id = sh.created_by AND u.role = 'admin'))`,
 		shareKey,
-	).Scan(&sp.PageID, &sp.Title, &sp.Content, &sp.UpdatedAt, &sp.SharedBy, &sp.Visibility)
+	).Scan(&sp.PageID, &sp.BookID, &sp.Title, &sp.Content, &sp.UpdatedAt, &sp.SharedBy, &sp.Visibility)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrPageNotFound
 	}
@@ -2814,7 +3124,11 @@ func (h *Handler) patchBookMember(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid body: "+err.Error())
 		return
 	}
-	m, err := h.wiki.AddMember(r.Context(), userID, b.ID, targetID, body.Role)
+	m, err := h.wiki.ChangeMemberRole(r.Context(), userID, b.ID, targetID, body.Role)
+	if errors.Is(err, ErrMemberNotFound) {
+		writeJSONError(w, http.StatusNotFound, "not a member of this book")
+		return
+	}
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
@@ -3178,12 +3492,36 @@ func (h *Handler) listBookPageRevisions(w http.ResponseWriter, r *http.Request) 
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	rows, err := h.wiki.ListRevisions(r.Context(), p.ID)
+	// ?limit= (default 50, max 200) and ?before=<created_at of the last
+	// item seen>; next_before is set when there may be more.
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			writeJSONError(w, http.StatusBadRequest, "invalid limit")
+			return
+		}
+		limit = min(n, 200)
+	}
+	var before *time.Time
+	if v := r.URL.Query().Get("before"); v != "" {
+		t, err := time.Parse(time.RFC3339Nano, v)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid before: "+err.Error())
+			return
+		}
+		before = &t
+	}
+	rows, err := h.wiki.ListRevisions(r.Context(), p.ID, before, limit)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": rows})
+	resp := map[string]any{"items": rows}
+	if len(rows) == limit {
+		resp["next_before"] = rows[len(rows)-1].CreatedAt.Format(time.RFC3339Nano)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (h *Handler) getBookPageRevision(w http.ResponseWriter, r *http.Request) {
@@ -3342,13 +3680,13 @@ func (h *Handler) patchBookPageByID(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusPreconditionRequired, "If-Match (the page's loaded updated_at) is required for content edits")
 			return
 		}
-		updated, err = h.wiki.UpdatePage(h.pageActorCtx(r), b.ID, cur.Slug, userID, patch)
+		updated, err = h.wiki.UpdatePageByID(h.pageActorCtx(r), b.ID, cur.ID, userID, patch)
 		if errors.Is(err, ErrPageNotFound) {
 			writeJSONError(w, http.StatusNotFound, "page not found")
 			return
 		}
 		if errors.Is(err, ErrPageStale) {
-			if cur2, gerr := h.wiki.GetPage(r.Context(), b.ID, cur.Slug); gerr == nil {
+			if cur2, gerr := h.wiki.GetPageByID(r.Context(), b.ID, cur.ID); gerr == nil {
 				writeJSON(w, http.StatusConflict, map[string]any{
 					"error":   "stale",
 					"message": "page was updated by another writer; reload before saving",
@@ -3377,6 +3715,9 @@ func (h *Handler) patchBookPageByID(w http.ResponseWriter, r *http.Request) {
 	}
 	updated.Pinned = pinned
 	if share, err := h.wiki.GetPageShare(r.Context(), updated.ID); err == nil && share != nil {
+		// With public_url, as the GETs send it: the notes client adopts
+		// this share, and without the URL "Copy public link" did nothing.
+		share.PublicURL = h.publicShareURL(share.ShareKey)
 		updated.Share = share
 	}
 	writeJSON(w, http.StatusOK, updated)
@@ -3403,7 +3744,10 @@ func (h *Handler) deleteBookPageByID(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if err := h.wiki.DeletePage(h.pageActorCtx(r), b.ID, cur.Slug); err != nil {
+	if err := h.wiki.DeletePageByID(h.pageActorCtx(r), b.ID, cur.ID); errors.Is(err, ErrPageNotFound) {
+		writeJSONError(w, http.StatusNotFound, "page not found")
+		return
+	} else if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

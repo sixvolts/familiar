@@ -9,6 +9,7 @@ package admin
 import (
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 
@@ -49,7 +50,17 @@ func (h *Handler) uploadPageMedia(w http.ResponseWriter, r *http.Request) {
 	}
 
 	limit := h.media.MaxBytes()
+	tooLarge := "file exceeds the " + strconv.FormatInt(limit>>20, 10) + "MB limit"
+	// Cap the body before parsing: ParseMultipartForm's size bounds only
+	// its memory use, and it spooled any larger file part to a temp file
+	// (a 20GB body filled the disk before the 413 below).
+	r.Body = http.MaxBytesReader(w, r.Body, limit+(1<<20))
 	if err := r.ParseMultipartForm(limit + (1 << 20)); err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, tooLarge)
+			return
+		}
 		writeJSONError(w, http.StatusBadRequest, "invalid upload: "+err.Error())
 		return
 	}
@@ -65,8 +76,7 @@ func (h *Handler) uploadPageMedia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if int64(len(data)) > limit {
-		writeJSONError(w, http.StatusRequestEntityTooLarge,
-			"file exceeds the "+strconv.FormatInt(limit>>20, 10)+"MB limit")
+		writeJSONError(w, http.StatusRequestEntityTooLarge, tooLarge)
 		return
 	}
 
@@ -76,20 +86,21 @@ func (h *Handler) uploadPageMedia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("[media] save: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "couldn't save the image")
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"id":        m.ID,
-		"url":       "/console/api/media/" + m.ID,
-		"thumb_url": "/console/api/media/" + m.ID + "?thumb=1",
-		"width":     m.Width,
-		"height":    m.Height,
-		"alt_text":  m.AltText,
+		"id":       m.ID,
+		"url":      "/console/api/media/" + m.ID,
+		"width":    m.Width,
+		"height":   m.Height,
+		"alt_text": m.AltText,
 	})
 }
 
-// serveMedia serves GET /console/api/media/{id} (+?thumb=1). Any
+// serveMedia serves GET /console/api/media/{id} (?thumb=1 serves an
+// old upload's thumbnail if it has one, else the original). Any
 // member of the owning book may read; non-members get the same 404
 // a wrong id gets, so media ids can't be probed.
 func (h *Handler) serveMedia(w http.ResponseWriter, r *http.Request) {
@@ -107,7 +118,8 @@ func (h *Handler) serveMedia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("[media] get: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	// A shard session's user id is its owner, so the membership check
@@ -184,7 +196,8 @@ func (h *Handler) deleteMedia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("[media] get: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	// A shard session's user id is its owner, so the membership check
@@ -202,7 +215,8 @@ func (h *Handler) deleteMedia(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := h.media.Delete(r.Context(), m.ID); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("[media] delete: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

@@ -149,7 +149,7 @@ func docSecurityHeaders(w http.ResponseWriter) {
 			"frame-ancestors 'none'; img-src 'self' data: blob:; "+
 			"font-src 'self' data:; style-src 'self' 'unsafe-inline'; "+
 			"script-src 'self' 'unsafe-eval'; worker-src 'self' blob:; "+
-			"connect-src 'self'")
+			"connect-src 'self'; form-action 'self'")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "same-origin")

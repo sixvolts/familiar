@@ -7,12 +7,16 @@ package fetch
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -94,10 +98,9 @@ func blockNonPublicDial(_, address string, _ syscall.RawConn) error {
 }
 
 // SafeTransport returns an *http.Transport that refuses to connect to
-// non-public addresses (loopback, RFC1918, link-local incl. the cloud
-// metadata endpoint, …). Reuse it for any code path that fetches a
-// caller-supplied URL (e.g. the admin skill-package importer) so those
-// share the same SSRF protection as the fetch_page tool.
+// non-public addresses (see isBlockedIP). Reuse it for any code path
+// that fetches a caller-supplied URL (e.g. the skill-package importer)
+// so those share the same SSRF protection as the fetch_page tool.
 func SafeTransport() *http.Transport {
 	dialer := &net.Dialer{
 		Timeout:   10 * time.Second,
@@ -107,23 +110,66 @@ func SafeTransport() *http.Transport {
 	return &http.Transport{DialContext: dialer.DialContext}
 }
 
-// isBlockedIP reports whether an IP is in a range fetch_page must not
-// reach: loopback, RFC1918 private (10/8, 172.16/12, 192.168/16) and
-// IPv6 ULA (fc00::/7), link-local (incl. the 169.254.169.254 cloud
-// metadata endpoint), unspecified (0.0.0.0/::), and multicast.
+// blockedPrefixes are the ranges a fetch of a caller-supplied URL must
+// not reach: loopback, private and link-local (the 169.254.169.254 cloud
+// metadata endpoint included), carrier-grade NAT, and the reserved,
+// documentation, benchmark, multicast and broadcast ranges, in IPv4 and
+// IPv6 (NAT64 too, which reaches IPv4 through a gateway).
 //
-// Carrier-grade NAT (100.64.0.0/10) is intentionally NOT blocked —
-// this deployment runs on a Tailscale fabric in that range and the
-// operator's own internal fetches rely on it. If the tool is ever
-// exposed to fully untrusted tenants, add a config allowlist and
-// block CGNAT here too.
+// CGNAT (100.64.0.0/10) used to be allowed because Tailscale lives
+// there. That made the host's own tailnet address a way around the
+// loopback block (its unauthenticated model server, its gateway) and
+// put every tailnet service in reach of a prompt-injected fetch_page,
+// with the error messages working as a port scanner. Tailnet hosts
+// that should be fetchable are listed by the operator instead:
+// [tools.fetch] allow_cidrs (SetAllowedCIDRs).
+var blockedPrefixes = func() []netip.Prefix {
+	var out []netip.Prefix
+	for _, c := range []string{
+		"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+		"169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24",
+		"192.88.99.0/24", "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24",
+		"203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4",
+		"::/128", "::1/128", "64:ff9b::/96", "64:ff9b:1::/48", "100::/64",
+		"2001:db8::/32", "fc00::/7", "fe80::/10", "ff00::/8",
+	} {
+		out = append(out, netip.MustParsePrefix(c))
+	}
+	return out
+}()
+
+// allowed holds the operator's exceptions ([tools.fetch] allow_cidrs).
+var allowed atomic.Pointer[[]netip.Prefix]
+
+// SetAllowedCIDRs sets the ranges fetches may reach even though they
+// are non-public, e.g. a tailnet host that should be fetchable. Called
+// once at boot; it applies to fetch_page and the skill importer alike.
+func SetAllowedCIDRs(prefixes []netip.Prefix) {
+	cp := append([]netip.Prefix(nil), prefixes...)
+	allowed.Store(&cp)
+}
+
+// isBlockedIP reports whether an IP is in a range a fetch must not
+// reach (blockedPrefixes) and isn't one the operator allowed.
 func isBlockedIP(ip net.IP) bool {
-	return ip.IsLoopback() ||
-		ip.IsPrivate() ||
-		ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() ||
-		ip.IsUnspecified() ||
-		ip.IsMulticast()
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return true
+	}
+	addr = addr.Unmap() // ::ffff:10.0.0.1 is 10.0.0.1
+	if a := allowed.Load(); a != nil {
+		for _, p := range *a {
+			if p.Contains(addr) {
+				return false
+			}
+		}
+	}
+	for _, p := range blockedPrefixes {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
 }
 
 var fetchPageParams = json.RawMessage(`{
@@ -179,7 +225,7 @@ func (s *Skill) Execute(ctx context.Context, toolName string, params json.RawMes
 	title, body, err := s.fetchAndExtract(ctx, args.URL)
 	if err != nil {
 		log.Printf("[fetch] error url=%q err=%v", args.URL, err)
-		return skills.ToolResult{Error: fmt.Sprintf("fetch failed: %v", err)}, nil
+		return skills.ToolResult{Error: "fetch failed: " + publicError(err)}, nil
 	}
 
 	content := formatPage(args.URL, title, body)
@@ -189,6 +235,20 @@ func (s *Skill) Execute(ctx context.Context, toolName string, params json.RawMes
 		Content: content,
 		Tokens:  len(content) / 4,
 	}, nil
+}
+
+// publicError is what the model (and so whoever steers it) learns about
+// a failed fetch. Connection-level detail (refused, reset, timed out,
+// blocked) is logged but not returned: distinct messages let a caller
+// map which hosts and ports answer. An HTTP status or content-type
+// error from a server that did answer is kept; it's useful and says
+// nothing about the network.
+func publicError(err error) string {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return "could not retrieve the page"
+	}
+	return err.Error()
 }
 
 // fetchAndExtract does the HTTP GET and goquery content extraction.

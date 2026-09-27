@@ -1663,6 +1663,22 @@ CREATE TABLE IF NOT EXISTS wiki_reindex_progress (
     last_error TEXT
 );`,
 	},
+	{
+		// When each user registered their first passkey. First-run
+		// bootstrap (an unauthenticated passkey registration for the
+		// admin) is open only until some user has one, and stays closed
+		// after that even if every credential is later deleted. It used
+		// to reopen whenever the credentials table was empty, which an
+		// admin could cause by removing their only passkey, handing the
+		// admin account to whoever registered next. Backfilled from
+		// existing credentials, so an upgraded instance stays closed.
+		name: "users_first_passkey",
+		ddl: `
+ALTER TABLE users ADD COLUMN IF NOT EXISTS first_passkey_at TIMESTAMPTZ;
+UPDATE users u SET first_passkey_at = NOW()
+ WHERE u.first_passkey_at IS NULL
+   AND EXISTS (SELECT 1 FROM webauthn_credentials c WHERE c.user_id = u.id);`,
+	},
 }
 
 // migrateLockKey is the pg_advisory_lock key that serializes Migrate

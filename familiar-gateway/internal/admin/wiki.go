@@ -1275,7 +1275,9 @@ func (s *WikiStore) fireSavedAfterIndex(ctx context.Context, page *WikiPage, boo
 		fmt.Printf("[wiki] page-saved hook skipped (book slug lookup failed): %v\n", err)
 		return
 	}
-	links, err := s.ListPageLinks(ctx, page.ID)
+	// The writer's view: a link into a book the writer can't read stays
+	// unresolved in the hook too (it feeds the knowledge graph).
+	links, err := s.ListPageLinks(ctx, page.ID, LinkViewer{UserID: userID})
 	if err != nil {
 		fmt.Printf("[wiki] page-saved hook skipped (list links failed): %v\n", err)
 		return
@@ -2081,19 +2083,45 @@ func (s *WikiStore) ReplacePageLinks(ctx context.Context, sourcePageID, sourceBo
 //
 // PRECONDITION: caller has verified read access on the SOURCE
 // book via the page's bookID. This method does not re-check.
-func (s *WikiStore) ListPageLinks(ctx context.Context, sourcePageID string) ([]PageLink, error) {
+// LinkViewer is who a link listing is for. A link into a book the
+// viewer can't read is listed unresolved (no target id or title), and
+// a backlink from such a book isn't listed.
+type LinkViewer struct {
+	UserID  string
+	IsAdmin bool // admins read every book
+	// CanAccessBook narrows further for a shard session's book envelope;
+	// nil allows every book the viewer is a member of.
+	CanAccessBook func(bookID string) bool
+}
+
+func (v LinkViewer) canAccess(bookID string) bool {
+	return v.CanAccessBook == nil || v.CanAccessBook(bookID)
+}
+
+func (s *WikiStore) ListPageLinks(ctx context.Context, sourcePageID string, viewer LinkViewer) ([]PageLink, error) {
+	// A link resolves only into the source page's own book or a book the
+	// viewer can read. Resolution used to ignore the viewer entirely:
+	// writing [[personal:<someone>/journal]] into your own page and
+	// listing its links told you whether that page exists and its exact
+	// title, for any page in any book.
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT l.source_page_id::text,
 		       COALESCE(l.target_book_slug, ''),
 		       l.target_page_slug,
 		       l.target_page_id::text,
 		       COALESCE(wp.title, ''),
-		       COALESCE(l.display_text, '')
+		       COALESCE(l.display_text, ''),
+		       COALESCE(wp.book_id::text, ''),
+		       (wp.id IS NOT NULL AND (
+		            $2 OR wp.book_id = src.book_id
+		            OR EXISTS (SELECT 1 FROM book_members bm
+		                        WHERE bm.book_id = wp.book_id AND bm.user_id = $3)))
 		  FROM wiki_page_links l
+		  JOIN wiki_pages src ON src.id = l.source_page_id
 		  LEFT JOIN wiki_pages wp ON wp.id = l.target_page_id
 		   AND wp.deleted_at IS NULL
 		 WHERE l.source_page_id = $1::uuid
-		 ORDER BY l.target_page_slug`, sourcePageID)
+		 ORDER BY l.target_page_slug`, sourcePageID, viewer.IsAdmin, viewer.UserID)
 	if err != nil {
 		return nil, fmt.Errorf("wiki: list links: %w", err)
 	}
@@ -2102,44 +2130,47 @@ func (s *WikiStore) ListPageLinks(ctx context.Context, sourcePageID string) ([]P
 	for rows.Next() {
 		var pl PageLink
 		var targetID sql.NullString
+		var targetBook string
+		var visible bool
 		if err := rows.Scan(&pl.SourcePageID, &pl.TargetBookSlug,
 			&pl.TargetPageSlug, &targetID, &pl.TargetPageTitle, &pl.DisplayText,
+			&targetBook, &visible,
 		); err != nil {
 			return nil, fmt.Errorf("wiki: link scan: %w", err)
 		}
-		if targetID.Valid {
+		if visible && targetID.Valid && viewer.canAccess(targetBook) {
 			pl.TargetPageID = &targetID.String
+		} else {
+			pl.TargetPageTitle = ""
 		}
 		out = append(out, pl)
 	}
 	return out, rows.Err()
 }
 
-// ListBacklinks returns every page that links INTO targetPageID,
-// with source page + book metadata for rendering. Used by the
-// page-view "Linked from" section.
+// ListBacklinks returns the pages that link INTO targetPageID and live
+// in books the viewer can read, with source page + book metadata for
+// the page-view "Linked from" section.
 //
-// PRECONDITION: caller has verified read access on the TARGET
-// page's book. This method does not re-check — and notably, the
-// returned source pages may live in books the caller is NOT a
-// member of (cross-book inbound link). That's intentional per the
-// architecture doc: backlinks reveal that a page is referenced
-// elsewhere; whether the caller can navigate to that source is a
-// separate read check the handler / frontend performs. We surface
-// only the source book/page slug + title here, no body content,
-// so a non-member of the source book learns only that an inbound
-// link exists. Phase 3 may swap to "locked link" rendering.
-func (s *WikiStore) ListBacklinks(ctx context.Context, targetPageID string) ([]Backlink, error) {
+// PRECONDITION: caller has verified read access on the TARGET page's
+// book. A source page in a book the viewer can't read is left out:
+// these used to be listed with their title and book name, so a private
+// note that linked into a shared book showed its title to everyone in
+// that book.
+func (s *WikiStore) ListBacklinks(ctx context.Context, targetPageID string, viewer LinkViewer) ([]Backlink, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT wp.id::text, wp.slug, wp.title,
 		       b.slug, b.name,
-		       COALESCE(l.display_text, '')
+		       COALESCE(l.display_text, ''),
+		       b.id::text
 		  FROM wiki_page_links l
 		  JOIN wiki_pages wp ON wp.id = l.source_page_id
 		   AND wp.deleted_at IS NULL
 		  JOIN books b ON b.id = wp.book_id
 		 WHERE l.target_page_id = $1::uuid
-		 ORDER BY b.name, wp.title`, targetPageID)
+		   AND ($2 OR EXISTS (SELECT 1 FROM book_members bm
+		                       WHERE bm.book_id = b.id AND bm.user_id = $3))
+		 ORDER BY b.name, wp.title`, targetPageID, viewer.IsAdmin, viewer.UserID)
 	if err != nil {
 		return nil, fmt.Errorf("wiki: backlinks: %w", err)
 	}
@@ -2147,12 +2178,15 @@ func (s *WikiStore) ListBacklinks(ctx context.Context, targetPageID string) ([]B
 	out := make([]Backlink, 0)
 	for rows.Next() {
 		var bl Backlink
+		var bookID string
 		if err := rows.Scan(&bl.SourcePageID, &bl.SourcePageSlug, &bl.SourcePageTitle,
-			&bl.SourceBookSlug, &bl.SourceBookName, &bl.DisplayText,
+			&bl.SourceBookSlug, &bl.SourceBookName, &bl.DisplayText, &bookID,
 		); err != nil {
 			return nil, fmt.Errorf("wiki: backlink scan: %w", err)
 		}
-		out = append(out, bl)
+		if viewer.canAccess(bookID) {
+			out = append(out, bl)
+		}
 	}
 	return out, rows.Err()
 }
@@ -2410,6 +2444,29 @@ func (h *Handler) pageActorCtx(r *http.Request) context.Context {
 func (h *Handler) ensureWiki(w http.ResponseWriter) bool {
 	if h.wiki == nil {
 		writeJSONError(w, http.StatusServiceUnavailable, "books not configured on this deploy")
+		return false
+	}
+	return true
+}
+
+// maxPageBodyBytes caps a page write's request body. Pages are text:
+// long research write-ups run to tens of KB, and media uploads have
+// their own endpoints and limits. There was no cap at all, so any user
+// could post a body of any size (and feed it to the merge).
+const maxPageBodyBytes = 4 << 20
+
+// decodePageBody decodes a page write's JSON body under
+// maxPageBodyBytes, writing the error response itself on failure.
+func decodePageBody(w http.ResponseWriter, r *http.Request, v any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxPageBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			writeJSONError(w, http.StatusRequestEntityTooLarge,
+				fmt.Sprintf("page is too large (limit %d MB)", maxPageBodyBytes>>20))
+			return false
+		}
+		writeJSONError(w, http.StatusBadRequest, "invalid body: "+err.Error())
 		return false
 	}
 	return true
@@ -2833,8 +2890,7 @@ func (h *Handler) createBookPage(w http.ResponseWriter, r *http.Request) {
 		Content string `json:"content"`
 		Slug    string `json:"slug"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+	if !decodePageBody(w, r, &body) {
 		return
 	}
 	if body.Title == "" {
@@ -2900,8 +2956,7 @@ func (h *Handler) patchBookPage(w http.ResponseWriter, r *http.Request) {
 		Slug    *string `json:"slug,omitempty"`
 		Summary *string `json:"summary,omitempty"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+	if !decodePageBody(w, r, &body) {
 		return
 	}
 	patch := PagePatch{
@@ -3003,12 +3058,18 @@ func (h *Handler) listBookPageLinks(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	links, err := h.wiki.ListPageLinks(r.Context(), p.ID)
+	links, err := h.wiki.ListPageLinks(r.Context(), p.ID, h.linkViewer(r))
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": links})
+}
+
+// linkViewer is the requesting principal as link listings see it.
+func (h *Handler) linkViewer(r *http.Request) LinkViewer {
+	au, _ := AuthUserFrom(r.Context())
+	return LinkViewer{UserID: adminUserScope(r, au), IsAdmin: au.IsAdmin(), CanAccessBook: au.CanAccessBook}
 }
 
 // listBookPageBacklinks serves GET .../pages/{page_slug}/backlinks
@@ -3033,7 +3094,7 @@ func (h *Handler) listBookPageBacklinks(w http.ResponseWriter, r *http.Request) 
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	links, err := h.wiki.ListBacklinks(r.Context(), p.ID)
+	links, err := h.wiki.ListBacklinks(r.Context(), p.ID, h.linkViewer(r))
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -3063,7 +3124,7 @@ func (h *Handler) listBookPageLinksByID(w http.ResponseWriter, r *http.Request) 
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	links, err := h.wiki.ListPageLinks(r.Context(), p.ID)
+	links, err := h.wiki.ListPageLinks(r.Context(), p.ID, h.linkViewer(r))
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -3089,7 +3150,7 @@ func (h *Handler) listBookPageBacklinksByID(w http.ResponseWriter, r *http.Reque
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	links, err := h.wiki.ListBacklinks(r.Context(), p.ID)
+	links, err := h.wiki.ListBacklinks(r.Context(), p.ID, h.linkViewer(r))
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -3255,8 +3316,7 @@ func (h *Handler) patchBookPageByID(w http.ResponseWriter, r *http.Request) {
 		Summary *string `json:"summary,omitempty"`
 		Pinned  *bool   `json:"pinned,omitempty"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+	if !decodePageBody(w, r, &body) {
 		return
 	}
 	hasContentEdit := body.Title != nil || body.Content != nil || body.Slug != nil || body.Summary != nil
@@ -3369,8 +3429,7 @@ func (h *Handler) appendBookPageByID(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Text string `json:"text"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+	if !decodePageBody(w, r, &body) {
 		return
 	}
 	if strings.TrimSpace(body.Text) == "" {

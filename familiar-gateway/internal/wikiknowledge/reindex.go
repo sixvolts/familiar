@@ -230,11 +230,12 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 }
 
 // PgReindexStore is the Postgres ReindexStore. Links loads a page's
-// outbound links (admin.WikiStore.ListPageLinks), so the link triples
-// match what a save would write.
+// outbound links as the given user sees them (admin.WikiStore.
+// ListPageLinks), so the link triples match what that user's save
+// would write.
 type PgReindexStore struct {
 	DB    *db.Pool
-	Links func(ctx context.Context, pageID string) ([]admin.PageLink, error)
+	Links func(ctx context.Context, pageID, userID string) ([]admin.PageLink, error)
 }
 
 func (s *PgReindexStore) Lock(ctx context.Context) (func(), bool, error) {
@@ -311,7 +312,7 @@ func (s *PgReindexStore) LoadPage(ctx context.Context, pageID string) (SaveEvent
 		return SaveEvent{}, false, err
 	}
 	if s.Links != nil {
-		links, err := s.Links(ctx, pageID)
+		links, err := s.Links(ctx, pageID, evt.UserID)
 		if err != nil {
 			return SaveEvent{}, false, fmt.Errorf("links: %w", err)
 		}

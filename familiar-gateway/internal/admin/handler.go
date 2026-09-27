@@ -110,6 +110,7 @@ type Handler struct {
 	researchRuns       *ResearchRunStore       // optional; wired via AttachResearchRuns (§6.7 progress card)
 	researchCanceller  func(runID string) bool // optional; cuts an active run's workers on user "stop"
 	push               *push.Store             // optional; wired via AttachPush (Web Push)
+	pushPolicy         push.EndpointPolicy     // which subscription endpoints are accepted
 	pushVAPIDPublicKey string                  // VAPID public key handed to subscribing clients
 	maintenance        *maintenance.Controller // optional; wired via AttachMaintenance
 
@@ -699,14 +700,21 @@ func (h *Handler) authenticatedSession(r *http.Request) (*AdminSession, bool) {
 // When count==0 the UI shows the "set up your key" flow without
 // requiring prior auth; otherwise registration is gated behind login.
 func (h *Handler) registerStatus(w http.ResponseWriter, r *http.Request) {
-	n, err := h.credentials.Count(r.Context())
+	open, err := h.credentials.BootstrapOpen(r.Context())
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// Unauthenticated, so it says only whether first-run setup is open
+	// (0 keeps the clients' existing check working), not how many
+	// passkeys exist; the exact count told a watcher when it hit zero.
+	registered := 1
+	if open {
+		registered = 0
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"credentials_registered": n,
-		"requires_auth":          n > 0,
+		"credentials_registered": registered,
+		"requires_auth":          !open,
 	})
 }
 
@@ -749,14 +757,16 @@ func (h *Handler) registerBegin(w http.ResponseWriter, r *http.Request) {
 	}
 	body.Email = strings.TrimSpace(body.Email)
 
-	count, err := h.credentials.Count(r.Context())
+	bootstrap, err := h.credentials.BootstrapOpen(r.Context())
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	var userID, displayName string
-	if count == 0 {
+	kind := PendingKindRegister
+	if bootstrap {
+		kind = PendingKindFirstRun
 		// First-run bootstrap.
 		//
 		// OWNER-MIGRATION: the bootstrap canonical_id is now driven by
@@ -867,7 +877,7 @@ func (h *Handler) registerBegin(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	h.pending.put(token, *sessionData, PendingKindRegister, userID)
+	h.pending.put(token, *sessionData, kind, userID)
 	h.setPendingCookie(w, token)
 
 	writeJSON(w, http.StatusOK, creation)
@@ -891,7 +901,7 @@ func (h *Handler) registerFinish(w http.ResponseWriter, r *http.Request) {
 	// complete the ceremony here (which doesn't consume the token)
 	// instead of through /enroll/finish, replaying the token until
 	// its natural TTL expires.
-	if entry.kind != PendingKindRegister {
+	if entry.kind != PendingKindRegister && entry.kind != PendingKindFirstRun {
 		writeJSONError(w, http.StatusBadRequest, "pending ceremony is not a registration")
 		return
 	}
@@ -940,7 +950,25 @@ func (h *Handler) registerFinish(w http.ResponseWriter, r *http.Request) {
 		label = "Security key"
 	}
 	displayName := fmt.Sprintf("%s — %s (%s)", label, entry.userID, time.Now().Format("2006-01-02"))
+	// A first-run ceremony (begun with no session) completes only if
+	// bootstrap is still open now. It was checked only at begin, so a
+	// ceremony started in the open window could still be finished for
+	// the pending TTL after the real admin had registered.
+	if entry.kind == PendingKindFirstRun {
+		claimed, err := h.credentials.ClaimBootstrap(r.Context(), entry.userID)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if !claimed {
+			writeJSONError(w, http.StatusConflict, "first-run setup is already complete; sign in instead")
+			return
+		}
+	}
 	if err := h.credentials.Insert(r.Context(), entry.userID, displayName, cred); err != nil {
+		if entry.kind == PendingKindFirstRun {
+			_ = h.credentials.ReleaseBootstrap(r.Context(), entry.userID)
+		}
 		writeJSONError(w, http.StatusInternalServerError, "store credential: "+err.Error())
 		return
 	}

@@ -62,7 +62,8 @@
                 css.rel = 'stylesheet';
                 css.href = MD_CDN.hljsCSS;
                 document.head.appendChild(css);
-                await Promise.all([loadScript(MD_CDN.marked), loadScript(MD_CDN.dompurify)]);
+                // DOMPurify normally comes from the shell (mobile.html).
+                await Promise.all([loadScript(MD_CDN.marked), window.DOMPurify ? null : loadScript(MD_CDN.dompurify)]);
                 await loadScript(MD_CDN.hljsJS);
                 if (window.marked && window.marked.use) {
                     // NOT gated on window.hljs: the vendored highlight core is
@@ -93,7 +94,7 @@
                 }
                 return function (md) {
                     var html = window.marked.parse(md || '');
-                    return window.DOMPurify.sanitize(html, { ADD_ATTR: ['class'] });
+                    return window.familiarSanitize.markdown(html);
                 };
             } catch (e) {
                 console.warn('mobile chat: markdown deps failed, falling back to plain text', e);
@@ -1453,6 +1454,8 @@ var reader = resp.body.getReader();
                 usageStatistics: false,
                 hideModeSwitch: false,
                 toolbarItems: [],
+                // Not the DOMPurify 2.3.3 bundled into TOAST UI.
+                customHTMLSanitizer: window.familiarSanitize ? window.familiarSanitize.editor : undefined,
                 widgetRules: window.familiarWikiLink
                     ? [window.familiarWikiLink.makeWidgetRule(mobileNotesNavigate)]
                     : [],
@@ -2057,6 +2060,8 @@ var reader = resp.body.getReader();
                 usageStatistics: false,
                 hideModeSwitch: false,
                 toolbarItems: [],
+                // Not the DOMPurify 2.3.3 bundled into TOAST UI.
+                customHTMLSanitizer: window.familiarSanitize ? window.familiarSanitize.editor : undefined,
                 widgetRules: window.familiarWikiLink
                     ? [window.familiarWikiLink.makeWidgetRule(mobileWikiNavigate)]
                     : [],

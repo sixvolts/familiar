@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
@@ -70,6 +71,10 @@ type PushConfig struct {
 	// Subject is the VAPID "sub" — a mailto: or https: URL. Defaults to
 	// a placeholder mailto when blank.
 	Subject string `toml:"subject"`
+	// AllowedEndpointHosts are exact hosts a push subscription may point
+	// at besides the browsers' push services (FCM, Mozilla, Apple, WNS),
+	// e.g. a self-hosted push service.
+	AllowedEndpointHosts []string `toml:"allowed_endpoint_hosts"`
 }
 
 // Enabled reports whether Web Push is configured (both VAPID keys set).
@@ -403,6 +408,30 @@ type NewsConfig struct {
 type ToolsConfig struct {
 	Brave         BraveConfig         `toml:"brave"`
 	PirateWeather PirateWeatherConfig `toml:"pirate_weather"`
+	Fetch         FetchConfig         `toml:"fetch"`
+}
+
+// FetchConfig controls fetches of caller-supplied URLs (the fetch_page
+// tool and skill imports by URL).
+type FetchConfig struct {
+	// AllowCIDRs are non-public ranges those fetches may still reach,
+	// e.g. "100.101.102.103/32" for one tailnet host. Everything
+	// loopback, private, CGNAT (Tailscale) or reserved is refused
+	// otherwise. Validated at load.
+	AllowCIDRs []string `toml:"allow_cidrs"`
+}
+
+// AllowedFetchPrefixes parses [tools.fetch] allow_cidrs.
+func (c *Config) AllowedFetchPrefixes() ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for _, raw := range c.Tools.Fetch.AllowCIDRs {
+		p, err := netip.ParsePrefix(strings.TrimSpace(raw))
+		if err != nil {
+			return nil, fmt.Errorf("tools.fetch.allow_cidrs: %q is not a CIDR (e.g. 100.101.102.103/32): %w", raw, err)
+		}
+		out = append(out, p.Masked())
+	}
+	return out, nil
 }
 
 // PirateWeatherConfig controls the Pirate Weather API integration.

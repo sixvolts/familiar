@@ -44,13 +44,29 @@ func (s *Store) Upsert(ctx context.Context, userID string, sub Subscription, use
 			user_id    = EXCLUDED.user_id,
 			p256dh     = EXCLUDED.p256dh,
 			auth       = EXCLUDED.auth,
-			user_agent = EXCLUDED.user_agent`,
+			user_agent = EXCLUDED.user_agent,
+			created_at = NOW()`,
 		userID, sub.Endpoint, sub.P256dh, sub.Auth, ua)
 	if err != nil {
 		return fmt.Errorf("push: upsert: %w", err)
 	}
+	// Keep a user's most recent subscriptions only. Every one gets a
+	// POST per notification, and the count was unbounded.
+	if _, err := s.pool.ExecContext(ctx, `
+		DELETE FROM push_subscriptions
+		 WHERE user_id = $1
+		   AND endpoint NOT IN (SELECT endpoint FROM push_subscriptions
+		                         WHERE user_id = $1
+		                         ORDER BY created_at DESC, endpoint LIMIT $2)`,
+		userID, MaxSubscriptionsPerUser); err != nil {
+		return fmt.Errorf("push: trim subscriptions: %w", err)
+	}
 	return nil
 }
+
+// MaxSubscriptionsPerUser bounds a user's stored push subscriptions
+// (one per browser/device); registering past it drops the oldest.
+const MaxSubscriptionsPerUser = 10
 
 // DeleteByEndpoint removes a subscription. With a non-empty userID it
 // scopes the delete to that owner (the unsubscribe endpoint); with ""

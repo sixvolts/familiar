@@ -206,6 +206,10 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if _, err := c.AllowedFetchPrefixes(); err != nil {
+		return err
+	}
+
 	// Deprecated keys that are parsed but ignored. Warn so an operator
 	// relying on them learns why nothing is happening.
 	if c.Sidecar.EmbedderEndpoint != "" {

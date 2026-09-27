@@ -160,7 +160,7 @@ func TestPgReindexStore_LoadPage(t *testing.T) {
 	id := w.page(book, "biopsy", time.Hour, false)
 	w.exec(`UPDATE wiki_pages SET updated_by = 'editor', content = 'The biopsy is on Monday.' WHERE id = $1::uuid`, id)
 	target := "t-1"
-	s.Links = func(_ context.Context, pageID string) ([]admin.PageLink, error) {
+	s.Links = func(_ context.Context, pageID, _ string) ([]admin.PageLink, error) {
 		return []admin.PageLink{{SourcePageID: pageID, TargetPageSlug: "clinic", TargetPageID: &target}}, nil
 	}
 	evt, ok, err := s.LoadPage(context.Background(), id)

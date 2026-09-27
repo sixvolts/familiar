@@ -41,8 +41,11 @@ func Merge(base, mine, theirs string) (string, bool) {
 	// Stable anchors: base line indices that survive UNCHANGED in both
 	// mine and theirs (matched by the base↔mine and base↔theirs LCS).
 	// Between consecutive anchors lies one changed region per side.
-	mMatch := matchMap(b, m) // base idx -> mine idx
-	tMatch := matchMap(b, t) // base idx -> theirs idx
+	mMatch, okM := matchMap(b, m) // base idx -> mine idx
+	tMatch, okT := matchMap(b, t) // base idx -> theirs idx
+	if !okM || !okT {
+		return "", true // too much changed to diff: treat as a conflict
+	}
 
 	var out []string
 	prevB, prevM, prevT := 0, 0, 0
@@ -98,35 +101,82 @@ func Merge(base, mine, theirs string) (string, bool) {
 // matchMap runs an LCS over (base, other) and returns base-index ->
 // other-index for every line in the longest common subsequence. Those
 // are the base lines that appear, in order, unchanged in `other`.
-func matchMap(base, other []string) map[int]int {
-	pairs := lcs(base, other)
+func matchMap(base, other []string) (map[int]int, bool) {
+	pairs, ok := lcs(base, other)
+	if !ok {
+		return nil, false
+	}
 	out := make(map[int]int, len(pairs))
 	for _, p := range pairs {
 		out[p[0]] = p[1]
 	}
-	return out
+	return out, true
 }
 
 // lcs returns the index pairs (i in a, j in b) of one longest common
 // subsequence of the two line slices, in increasing order. O(n*m) —
 // fine for wiki pages (tens to low hundreds of lines).
-func lcs(a, b []string) [][2]int {
+// maxLCSCells caps the dynamic-programming table the LCS may build
+// (rows x columns of the region left after trimming the common prefix
+// and suffix). The table is O(n*m) memory: a stale save of a page of
+// tens of thousands of short lines asked for gigabytes, and one request
+// could get the gateway killed for everyone. Past the cap the merge
+// gives up, and the save is refused as stale like any other conflict.
+// 4M int32 cells is 16MB; two tables per merge.
+const maxLCSCells = 4_000_000
+
+// lcs returns the index pairs of a longest common subsequence of a and
+// b, and false when the differing region is too large to diff (see
+// maxLCSCells). A common prefix and suffix are always part of some
+// LCS, so they are matched directly and only the region between them
+// goes through the table: an edit anywhere in a large page costs the
+// size of the changed region, not the page.
+func lcs(a, b []string) ([][2]int, bool) {
+	p := 0
+	for p < len(a) && p < len(b) && a[p] == b[p] {
+		p++
+	}
+	q := 0
+	for q < len(a)-p && q < len(b)-p && a[len(a)-1-q] == b[len(b)-1-q] {
+		q++
+	}
+	mid, ok := lcsTable(a[p:len(a)-q], b[p:len(b)-q])
+	if !ok {
+		return nil, false
+	}
+	pairs := make([][2]int, 0, p+len(mid)+q)
+	for i := 0; i < p; i++ {
+		pairs = append(pairs, [2]int{i, i})
+	}
+	for _, pr := range mid {
+		pairs = append(pairs, [2]int{pr[0] + p, pr[1] + p})
+	}
+	for i := 0; i < q; i++ {
+		pairs = append(pairs, [2]int{len(a) - q + i, len(b) - q + i})
+	}
+	return pairs, true
+}
+
+// lcsTable is the classic O(n*m) LCS over a and b.
+func lcsTable(a, b []string) ([][2]int, bool) {
 	n, m := len(a), len(b)
 	if n == 0 || m == 0 {
-		return nil
+		return nil, true
 	}
-	dp := make([][]int, n+1)
-	for i := range dp {
-		dp[i] = make([]int, m+1)
+	if int64(n+1)*int64(m+1) > maxLCSCells {
+		return nil, false
 	}
+	w := m + 1
+	dp := make([]int32, (n+1)*w)
 	for i := n - 1; i >= 0; i-- {
 		for j := m - 1; j >= 0; j-- {
-			if a[i] == b[j] {
-				dp[i][j] = dp[i+1][j+1] + 1
-			} else if dp[i+1][j] >= dp[i][j+1] {
-				dp[i][j] = dp[i+1][j]
-			} else {
-				dp[i][j] = dp[i][j+1]
+			switch {
+			case a[i] == b[j]:
+				dp[i*w+j] = dp[(i+1)*w+j+1] + 1
+			case dp[(i+1)*w+j] >= dp[i*w+j+1]:
+				dp[i*w+j] = dp[(i+1)*w+j]
+			default:
+				dp[i*w+j] = dp[i*w+j+1]
 			}
 		}
 	}
@@ -138,13 +188,13 @@ func lcs(a, b []string) [][2]int {
 			pairs = append(pairs, [2]int{i, j})
 			i++
 			j++
-		case dp[i+1][j] >= dp[i][j+1]:
+		case dp[(i+1)*w+j] >= dp[i*w+j+1]:
 			i++
 		default:
 			j++
 		}
 	}
-	return pairs
+	return pairs, true
 }
 
 func equal(a, b []string) bool {

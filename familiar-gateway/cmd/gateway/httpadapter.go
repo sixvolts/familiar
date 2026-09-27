@@ -346,8 +346,10 @@ func runHTTPAdapter(ctx context.Context, d httpAdapterDeps, adminHOut **admin.Ha
 						rx := &wikiknowledge.Reindexer{
 							Pipeline: kp,
 							Store: &wikiknowledge.PgReindexStore{
-								DB:    sharedPool,
-								Links: wikiStore.ListPageLinks,
+								DB: sharedPool,
+								Links: func(ctx context.Context, pageID, userID string) ([]admin.PageLink, error) {
+									return wikiStore.ListPageLinks(ctx, pageID, admin.LinkViewer{UserID: userID})
+								},
 							},
 						}
 						safego.Go("wiki knowledge re-index", func() {
@@ -526,7 +528,7 @@ func runHTTPAdapter(ctx context.Context, d httpAdapterDeps, adminHOut **admin.Ha
 					// Off unless [push] VAPID keys are configured.
 					if cfg.Push.Enabled() {
 						pushStore = push.NewStore(sharedPool)
-						adminH.AttachPush(pushStore, cfg.Push.VAPIDPublicKey)
+						adminH.AttachPush(pushStore, cfg.Push.VAPIDPublicKey, push.EndpointPolicy{ExtraHosts: cfg.Push.AllowedEndpointHosts})
 						log.Printf("[push] enabled (VAPID configured); subscribe endpoints live")
 					} else {
 						log.Printf("[push] disabled — set [push] vapid keys to enable (generate with --gen-vapid)")
@@ -603,8 +605,23 @@ func runHTTPAdapter(ctx context.Context, d httpAdapterDeps, adminHOut **admin.Ha
 					}
 					if cfg.Adapter.Slack.BotToken != "" {
 						if slackSender, sErr := slackadapter.NewSender(cfg.Adapter.Slack.BotToken, cfg.Adapter.Slack.APIBaseURL); sErr == nil {
-							deliverers["slack"] = func(ctx context.Context, _, _ string, t actions.Target, _, text string) error {
-								return slackSender.SendProactive(ctx, t.ChannelID, text)
+							allowedChannels := cfg.Adapter.Slack.Channels
+							deliverers["slack"] = func(ctx context.Context, ownerID, _ string, t actions.Target, _, text string) error {
+								owner := slackadapter.ChannelOwner{}
+								if identityResolver != nil {
+									if u, err := identityResolver.GetUser(ctx, ownerID); err == nil && u != nil {
+										owner.IsAdmin = u.Role == "admin" && u.Status == identitypkg.StatusApproved
+									}
+									if links, err := identityResolver.ListIdentitiesForUser(ctx, ownerID); err == nil {
+										for _, l := range links {
+											if l.Platform == "slack" {
+												owner.SlackUserID = l.PlatformID
+												break
+											}
+										}
+									}
+								}
+								return slackSender.PostForOwner(ctx, t.ChannelID, owner, allowedChannels, text)
 							}
 							// slack_dm DMs the action OWNER via their
 							// linked Slack identity, resolved at
@@ -725,7 +742,8 @@ func runHTTPAdapter(ctx context.Context, d httpAdapterDeps, adminHOut **admin.Ha
 						// deep-links to it, for users who get notified on
 						// the PWA instead of Slack. Requires [push].
 						if pushStore != nil && cfg.Push.Enabled() {
-							pushSender := push.NewSender(pushStore, cfg.Push.VAPIDPublicKey, cfg.Push.VAPIDPrivateKey, cfg.Push.Subject)
+							pushSender := push.NewSender(pushStore, cfg.Push.VAPIDPublicKey, cfg.Push.VAPIDPrivateKey, cfg.Push.Subject).
+								WithEndpointPolicy(push.EndpointPolicy{ExtraHosts: cfg.Push.AllowedEndpointHosts})
 							deliverers["push"] = func(ctx context.Context, ownerID, actionID string, t actions.Target, actionName, text string) error {
 								convID, err := ensureActionThread(ctx, ownerID, actionID, t.ConversationID, actionName)
 								if err != nil {
@@ -870,7 +888,8 @@ func runHTTPAdapter(ctx context.Context, d httpAdapterDeps, adminHOut **admin.Ha
 				if researchSkill != nil && researchRuns != nil && convStore != nil && adminH.WikiStore() != nil {
 					var researchPush *push.Sender
 					if pushStore != nil && cfg.Push.Enabled() {
-						researchPush = push.NewSender(pushStore, cfg.Push.VAPIDPublicKey, cfg.Push.VAPIDPrivateKey, cfg.Push.Subject)
+						researchPush = push.NewSender(pushStore, cfg.Push.VAPIDPublicKey, cfg.Push.VAPIDPrivateKey, cfg.Push.Subject).
+							WithEndpointPolicy(push.EndpointPolicy{ExtraHosts: cfg.Push.AllowedEndpointHosts})
 					}
 					researchSkill.SetOrchestrator(researchRuns, makeResearchSynthesizer(
 						researchSkill, pl, sm, adminH.WikiStore(), convStore, researchRuns, researchPush))

@@ -252,6 +252,8 @@ public_base_url = "http://${publicHosts[0]}"
 vapid_public_key = ${JSON.stringify(TEST_VAPID_PUBLIC)}
 vapid_private_key = ${JSON.stringify(TEST_VAPID_PRIVATE)}
 subject = "mailto:test@example.com"
+# push.spec subscribes with https://push.example.com endpoints.
+allowed_endpoint_hosts = ["push.example.com"]
 `
         : "";
     // No role tag — that's what makes it the chat model. The dummy

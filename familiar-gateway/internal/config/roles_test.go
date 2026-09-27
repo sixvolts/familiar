@@ -404,3 +404,19 @@ func TestValidateRejectsEmbeddingsInGenerationRole(t *testing.T) {
 		t.Error("the derived extract role kept the embeddings model")
 	}
 }
+
+// A malformed allow_cidrs entry fails the boot instead of silently
+// allowing nothing (or, worse, being misread).
+func TestValidateRejectsBadFetchCIDR(t *testing.T) {
+	c := DefaultConfig()
+	c.Models = []ModelConfig{{ID: "m", Endpoint: "e", Provider: "llama-server", Chat: true}}
+	c.Tools.Fetch.AllowCIDRs = []string{"100.101.102.103"}
+	c.normalizeRoles()
+	if err := c.Validate(); err == nil {
+		t.Error("a bare IP (not a CIDR) in allow_cidrs validated")
+	}
+	c.Tools.Fetch.AllowCIDRs = []string{"100.101.102.103/32"}
+	if err := c.Validate(); err != nil {
+		t.Errorf("a valid CIDR failed: %v", err)
+	}
+}

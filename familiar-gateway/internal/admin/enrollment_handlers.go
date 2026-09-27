@@ -36,6 +36,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/familiar/gateway/internal/identity"
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 )
@@ -306,9 +307,29 @@ func (h *Handler) deleteUserPasskey(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusForbidden, "not authorized")
 		return
 	}
+	// The instance must keep at least one admin passkey. First-run
+	// registration no longer reopens when credentials run out, so
+	// deleting the last one would leave nobody able to administer the
+	// instance (and it used to hand the admin account to whoever
+	// registered next).
+	var owner *identity.User
+	if h.users != nil {
+		owner, _ = h.users.GetUser(r.Context(), stored.UserID)
+	}
+	if owner != nil && owner.Role == "admin" && owner.Status == identity.StatusApproved {
+		n, err := h.credentials.ApprovedAdminCredentialCount(r.Context())
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if n <= 1 {
+			writeJSONError(w, http.StatusConflict,
+				"refusing to delete the last admin passkey — register another one (or another admin's) first")
+			return
+		}
+	}
 	// Don't let a non-admin lock themselves out by deleting their
-	// last credential. Admins bypass — they can recover by
-	// registering a fresh key out-of-band.
+	// last credential. Admins can remove anyone else's.
 	if !au.IsAdmin() {
 		mine, err := h.credentials.ListByUser(r.Context(), au.UserID)
 		if err != nil {
@@ -330,6 +351,18 @@ func (h *Handler) deleteUserPasskey(w http.ResponseWriter, r *http.Request) {
 	if err := h.endCredentialSessions(r.Context(), rawID); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "passkey deleted, but ending its sessions failed: "+err.Error())
 		return
+	}
+	// Sessions from before passkeys were recorded on them may be this
+	// key's too; end them, but not the caller's own.
+	if h.sessions != nil {
+		keep := ""
+		if c, err := r.Cookie(sessionCookieName); err == nil {
+			keep = c.Value
+		}
+		if err := h.sessions.DeleteUnboundByUser(r.Context(), stored.UserID, keep); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "passkey deleted, but ending its older sessions failed: "+err.Error())
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":            true,

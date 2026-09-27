@@ -67,3 +67,35 @@ func TestStore_SubscriptionLifecycle(t *testing.T) {
 		t.Error("endpoint should be gone after unscoped delete")
 	}
 }
+
+// A user keeps their most recent subscriptions only: each one is POSTed
+// to on every notification, and the count was unbounded.
+func TestStore_CapsSubscriptionsPerUser(t *testing.T) {
+	pool := testutil.PgTestPool(t)
+	s := NewStore(pool)
+	ctx := context.Background()
+	user := fmt.Sprintf("push-cap-%d", time.Now().UnixNano())
+	if _, err := pool.ExecContext(ctx,
+		`INSERT INTO users (id, display_name, status, role) VALUES ($1,$1,'approved','user')`, user); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < MaxSubscriptionsPerUser+3; i++ {
+		ep := fmt.Sprintf("https://fcm.googleapis.com/fcm/send/%s-%02d", user, i)
+		if err := s.Upsert(ctx, user, Subscription{Endpoint: ep, P256dh: "k", Auth: "a"}, ""); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(2 * time.Millisecond) // distinct created_at
+	}
+	subs, err := s.ListForUser(ctx, user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(subs) != MaxSubscriptionsPerUser {
+		t.Fatalf("kept %d subscriptions, want %d", len(subs), MaxSubscriptionsPerUser)
+	}
+	for _, sub := range subs {
+		if sub.Endpoint == fmt.Sprintf("https://fcm.googleapis.com/fcm/send/%s-%02d", user, 0) {
+			t.Error("the oldest subscription survived the cap")
+		}
+	}
+}

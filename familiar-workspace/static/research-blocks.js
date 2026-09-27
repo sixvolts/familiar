@@ -94,7 +94,10 @@
         var href = "";
         if (d.book && d.page) {
             href = "#note/" + encodeURIComponent(d.book) + "/" + encodeURIComponent(d.page);
-        } else if (d.note) {
+        } else if (d.note && /^#note\//.test(d.note)) {
+            // Only an in-app note link: a card's field may come from
+            // model output, and an app-styled "Open" button must not
+            // lead off-site.
             href = d.note;
         }
 

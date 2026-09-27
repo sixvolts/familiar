@@ -40,7 +40,6 @@ import (
 	instanceskill "github.com/familiar/gateway/internal/skills/instance"
 	memoryskill "github.com/familiar/gateway/internal/skills/memory"
 	"github.com/familiar/gateway/internal/skills/news"
-	profileskill "github.com/familiar/gateway/internal/skills/profile"
 	"github.com/familiar/gateway/internal/skills/search"
 	"github.com/familiar/gateway/internal/skills/skillpacks"
 	"github.com/familiar/gateway/internal/skills/weather"
@@ -314,6 +313,14 @@ func main() {
 	if err := skillReg.Register(news.New(cfg.Skills.News, braveClient)); err != nil {
 		log.Printf("[gateway] warning: register news skill: %v", err)
 	}
+	// Non-public ranges the operator lets fetch_page and skill imports
+	// reach (validated at config load).
+	if allow, err := cfg.AllowedFetchPrefixes(); err == nil {
+		fetchskill.SetAllowedCIDRs(allow)
+		if len(allow) > 0 {
+			log.Printf("[fetch] allowing non-public ranges: %v", allow)
+		}
+	}
 	if err := skillReg.Register(fetchskill.New()); err != nil {
 		log.Printf("[gateway] warning: register fetch skill: %v", err)
 	}
@@ -514,19 +521,9 @@ func main() {
 		log.Printf("[skills] warning: register memory skill: %v", err)
 	}
 
-	// Profile skill (Phase 5) — exposes update_my_email for Slack-
-	// bootstrapped users whose workspace didn't surface an email.
-	// Needs the identity resolver for SetUserEmail; skipped when the
-	// resolver isn't wired (no pgvector pool), in which case the
-	// bootstrap welcome DM can still fall back to its no-email
-	// message but the user has no way to self-link later.
-	if identityResolver != nil {
-		if err := skillReg.Register(profileskill.New(identityResolver)); err != nil {
-			log.Printf("[skills] warning: register profile skill: %v", err)
-		} else {
-			log.Printf("[skills] profile (update_my_email) registered")
-		}
-	}
+	// No update_my_email tool: binding an email to an account needs proof
+	// the user owns the address, and email is what book invites resolve
+	// by. Admins set emails (the invite flow).
 
 	// Notes skill (FAMILIAR-NOTES-SKILL-SPEC + KEY-PROVISIONING-SPEC).
 	// adminH is hoisted to outer scope (declared just below) so the

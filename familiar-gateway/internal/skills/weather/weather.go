@@ -15,6 +15,7 @@ package weather
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -367,22 +368,39 @@ func (s *Skill) fetchPirate(ctx context.Context, lat, lon float64, exclude strin
 	}
 	req, err := http.NewRequestWithContext(ctx, "GET", path+"?"+q.Encode(), nil)
 	if err != nil {
-		return nil, err
+		return nil, s.redact(err)
 	}
 	resp, err := s.http.Do(req)
 	if err != nil {
-		return nil, err
+		// A transport error (*url.Error) quotes the request URL, and the
+		// API key is part of that URL's path: returned as-is it reached
+		// the model's context, the tool transcript, the logs and the Home
+		// widget's 502 body. Keep only the cause.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = fmt.Errorf("pirate weather request failed: %w", ue.Err)
+		}
+		return nil, s.redact(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("pirate weather %d: %s", resp.StatusCode, string(body))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
+		return nil, s.redact(fmt.Errorf("pirate weather %d: %s", resp.StatusCode, string(body)))
 	}
 	var out pirateResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
+		return nil, s.redact(err)
 	}
 	return &out, nil
+}
+
+// redact removes the API key from an error's text, as a backstop for any
+// path that still quotes the request URL.
+func (s *Skill) redact(err error) error {
+	if err == nil || s.apiKey == "" || !strings.Contains(err.Error(), s.apiKey) {
+		return err
+	}
+	return errors.New(strings.ReplaceAll(err.Error(), s.apiKey, "[redacted]"))
 }
 
 // --- current weather --------------------------------------------------------

@@ -89,7 +89,9 @@
                 css.href = CDN.hljsCSS;
                 document.head.appendChild(css);
 
-                await Promise.all([loadScript(CDN.marked), loadScript(CDN.dompurify)]);
+                // DOMPurify normally comes from the shell (index.html); a
+                // second copy would replace the sanitizer the editor uses.
+                await Promise.all([loadScript(CDN.marked), window.DOMPurify ? null : loadScript(CDN.dompurify)]);
                 await loadScript(CDN.hljsJS);
                 // Register a few common languages so codeblocks
                 // syntax-highlight without bloating the bundle.
@@ -149,10 +151,8 @@
 
     function renderMarkdownReal(md) {
         const html = window.marked.parse(md || "");
-        return window.DOMPurify.sanitize(html, {
-            // Allow class on code blocks for hljs styling.
-            ADD_ATTR: ["class"],
-        });
+        // One policy for every surface (sanitize.js).
+        return window.familiarSanitize.markdown(html);
     }
 
     function renderMarkdownFallback(md) {

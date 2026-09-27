@@ -246,60 +246,8 @@ func (s *Store) importZipAs(ctx context.Context, owner string, data []byte, impo
 		return nil, err
 	}
 	defer os.RemoveAll(staged)
-
-	var totalBytes int64
-	var fileCount int
-	for _, f := range zr.File {
-		// Bound the entry count so a central directory stuffed with
-		// tiny (or zero-byte) entries can't spin extraction unbounded.
-		if fileCount++; fileCount > maxZipFiles {
-			return nil, fmt.Errorf("skillpkg: archive has more than %d entries", maxZipFiles)
-		}
-		name := filepath.Clean(f.Name)
-		if name == "." || strings.HasPrefix(name, "..") || filepath.IsAbs(name) {
-			return nil, fmt.Errorf("skillpkg: unsafe path %q in archive", f.Name)
-		}
-		if f.Mode()&os.ModeSymlink != 0 {
-			return nil, fmt.Errorf("skillpkg: symlink %q not allowed in a skill package", f.Name)
-		}
-		target := filepath.Join(staged, name)
-		if !strings.HasPrefix(target, staged+string(os.PathSeparator)) {
-			return nil, fmt.Errorf("skillpkg: unsafe path %q in archive", f.Name)
-		}
-		if f.FileInfo().IsDir() {
-			if err := os.MkdirAll(target, 0o755); err != nil {
-				return nil, err
-			}
-			continue
-		}
-		if f.UncompressedSize64 > maxZipFileBytes {
-			return nil, fmt.Errorf("skillpkg: %q exceeds the per-file size cap", f.Name)
-		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return nil, err
-		}
-		rc, err := f.Open()
-		if err != nil {
-			return nil, err
-		}
-		content, err := io.ReadAll(io.LimitReader(rc, maxZipFileBytes+1))
-		rc.Close()
-		if err != nil {
-			return nil, err
-		}
-		if len(content) > maxZipFileBytes {
-			return nil, fmt.Errorf("skillpkg: %q exceeds the per-file size cap", f.Name)
-		}
-		// Accumulate ACTUAL decompressed bytes (not the attacker-set
-		// UncompressedSize64 header) and abort before writing past the
-		// cumulative cap, so a bomb can't fill the temp dir mid-loop.
-		totalBytes += int64(len(content))
-		if totalBytes > maxZipTotal {
-			return nil, fmt.Errorf("skillpkg: archive decompresses past the %dMB total cap", maxZipTotal>>20)
-		}
-		if err := os.WriteFile(target, content, 0o644); err != nil {
-			return nil, err
-		}
+	if err := extractZip(zr, staged); err != nil {
+		return nil, err
 	}
 
 	root, err := findSkillRoot(staged)
@@ -307,6 +255,72 @@ func (s *Store) importZipAs(ctx context.Context, owner string, data []byte, impo
 		return nil, err
 	}
 	return s.importStagedAs(ctx, owner, root, importedBy, sourceURL, knownTools)
+}
+
+// extractZip unpacks an archive into dir with every guard an import
+// needs: an entry-count cap, per-file and cumulative decompressed-size
+// caps (counting the bytes actually read, not the header's claim),
+// and no symlinks or paths outside dir. Import and preview both use it,
+// so a preview refuses exactly what an import would. Preview used to
+// extract with none of these caps, so any user's dry-run import of a
+// zip bomb filled the temp dir (RAM on a tmpfs /tmp) before anything
+// looked at it.
+func extractZip(zr *zip.Reader, staged string) error {
+	var totalBytes int64
+	var fileCount int
+	for _, f := range zr.File {
+		// Bound the entry count so a central directory stuffed with
+		// tiny (or zero-byte) entries can't spin extraction unbounded.
+		if fileCount++; fileCount > maxZipFiles {
+			return fmt.Errorf("skillpkg: archive has more than %d entries", maxZipFiles)
+		}
+		name := filepath.Clean(f.Name)
+		if name == "." || strings.HasPrefix(name, "..") || filepath.IsAbs(name) {
+			return fmt.Errorf("skillpkg: unsafe path %q in archive", f.Name)
+		}
+		if f.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("skillpkg: symlink %q not allowed in a skill package", f.Name)
+		}
+		target := filepath.Join(staged, name)
+		if !strings.HasPrefix(target, staged+string(os.PathSeparator)) {
+			return fmt.Errorf("skillpkg: unsafe path %q in archive", f.Name)
+		}
+		if f.FileInfo().IsDir() {
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return err
+			}
+			continue
+		}
+		if f.UncompressedSize64 > maxZipFileBytes {
+			return fmt.Errorf("skillpkg: %q exceeds the per-file size cap", f.Name)
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return err
+		}
+		content, err := io.ReadAll(io.LimitReader(rc, maxZipFileBytes+1))
+		rc.Close()
+		if err != nil {
+			return err
+		}
+		if len(content) > maxZipFileBytes {
+			return fmt.Errorf("skillpkg: %q exceeds the per-file size cap", f.Name)
+		}
+		// Accumulate ACTUAL decompressed bytes (not the attacker-set
+		// UncompressedSize64 header) and abort before writing past the
+		// cumulative cap, so a bomb can't fill the temp dir mid-loop.
+		totalBytes += int64(len(content))
+		if totalBytes > maxZipTotal {
+			return fmt.Errorf("skillpkg: archive decompresses past the %dMB total cap", maxZipTotal>>20)
+		}
+		if err := os.WriteFile(target, content, 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // PreviewZip stages and parses an archive WITHOUT admitting it —
@@ -325,24 +339,8 @@ func (s *Store) PreviewZip(data []byte, knownTools map[string]bool) (*Loaded, []
 		return nil, nil, nil, err
 	}
 	defer os.RemoveAll(staged)
-	for _, f := range zr.File {
-		name := filepath.Clean(f.Name)
-		if name == "." || strings.HasPrefix(name, "..") || filepath.IsAbs(name) ||
-			f.Mode()&os.ModeSymlink != 0 || f.FileInfo().IsDir() {
-			continue
-		}
-		target := filepath.Join(staged, name)
-		if !strings.HasPrefix(target, staged+string(os.PathSeparator)) {
-			continue
-		}
-		_ = os.MkdirAll(filepath.Dir(target), 0o755)
-		rc, err := f.Open()
-		if err != nil {
-			continue
-		}
-		content, _ := io.ReadAll(io.LimitReader(rc, maxZipFileBytes))
-		rc.Close()
-		_ = os.WriteFile(target, content, 0o644)
+	if err := extractZip(zr, staged); err != nil {
+		return nil, nil, nil, err
 	}
 	root, err := findSkillRoot(staged)
 	if err != nil {

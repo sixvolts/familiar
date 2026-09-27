@@ -100,7 +100,64 @@ func (s *CredentialStore) Insert(ctx context.Context, userID, displayName string
 		VALUES ($1, $2, $3, $3, $4, $5)
 		ON CONFLICT (id) DO NOTHING
 	`, id, blob, userID, displayName, int64(cred.Authenticator.SignCount))
+	if err != nil {
+		return err
+	}
+	// Record the user's first passkey; it closes first-run bootstrap
+	// for good (see BootstrapOpen).
+	_, err = s.pool.ExecContext(ctx,
+		`UPDATE users SET first_passkey_at = NOW() WHERE id = $1 AND first_passkey_at IS NULL`, userID)
 	return err
+}
+
+// BootstrapOpen reports whether first-run registration (a passkey for
+// the admin, with no session) may run: no user has ever registered a
+// passkey. Deleting every credential doesn't reopen it.
+func (s *CredentialStore) BootstrapOpen(ctx context.Context) (bool, error) {
+	var open bool
+	err := s.pool.QueryRowContext(ctx, `
+		SELECT NOT EXISTS (SELECT 1 FROM users WHERE first_passkey_at IS NOT NULL)
+		   AND NOT EXISTS (SELECT 1 FROM webauthn_credentials)`).Scan(&open)
+	return open, err
+}
+
+// ClaimBootstrap marks userID as the bootstrap admin's first passkey,
+// only while bootstrap is still open. It reports false when another
+// first-run finished first: two ceremonies begun during the open window
+// can't both complete. Row-level, so concurrent claims serialize on the
+// user row.
+func (s *CredentialStore) ClaimBootstrap(ctx context.Context, userID string) (bool, error) {
+	res, err := s.pool.ExecContext(ctx, `
+		UPDATE users SET first_passkey_at = NOW()
+		 WHERE id = $1 AND first_passkey_at IS NULL
+		   AND NOT EXISTS (SELECT 1 FROM users o WHERE o.first_passkey_at IS NOT NULL AND o.id <> $1)
+		   AND NOT EXISTS (SELECT 1 FROM webauthn_credentials)`, userID)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
+}
+
+// ReleaseBootstrap undoes a claim whose credential never got stored, so
+// the operator can retry.
+func (s *CredentialStore) ReleaseBootstrap(ctx context.Context, userID string) error {
+	_, err := s.pool.ExecContext(ctx, `
+		UPDATE users SET first_passkey_at = NULL
+		 WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM webauthn_credentials WHERE user_id = $1)`, userID)
+	return err
+}
+
+// ApprovedAdminCredentialCount is how many passkeys approved admins
+// hold between them; deleting the last one would leave no way to
+// administer the instance.
+func (s *CredentialStore) ApprovedAdminCredentialCount(ctx context.Context) (int, error) {
+	var n int
+	err := s.pool.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM webauthn_credentials c
+		  JOIN users u ON u.id = c.user_id
+		 WHERE u.role = 'admin' AND u.status = 'approved'`).Scan(&n)
+	return n, err
 }
 
 // ListAll returns every stored credential. Used by BeginLogin when we

@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"log"
 	"net/http"
 	"sort"
 	"strconv"
@@ -47,7 +48,11 @@ func (h *Handler) homeWeather(w http.ResponseWriter, r *http.Request) {
 		}
 		rep, err := h.weather.HomeForecast(r.Context(), lat, lon)
 		if err != nil {
-			writeJSONError(w, http.StatusBadGateway, err.Error())
+			// The provider's error stays in the log; any signed-in user
+			// (or kiosk) can load Home, and the error text has carried
+			// the provider's API key.
+			log.Printf("[home] weather: %v", err)
+			writeJSONError(w, http.StatusBadGateway, "weather provider unavailable")
 			return
 		}
 		writeJSON(w, http.StatusOK, rep)

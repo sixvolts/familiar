@@ -377,16 +377,35 @@ func (r *Resolver) GetByEmail(ctx context.Context, email string) (*User, error) 
 	if email == "" {
 		return nil, nil
 	}
-	row := r.db.QueryRowContext(ctx,
-		`SELECT `+userColumns+` FROM users WHERE email = $1`, email)
-	u, err := scanUser(row)
+	// Case-insensitive: invites store addresses lowercased, while other
+	// paths kept what was typed, so "Bob@corp.com" missed "bob@corp.com".
+	// Two accounts differing only in case make the lookup ambiguous; it
+	// is refused rather than resolved to whichever row comes first (an
+	// invite by email would otherwise add that one to a book).
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT `+userColumns+` FROM users WHERE lower(email) = lower($1) LIMIT 2`, strings.TrimSpace(email))
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, nil
-		}
 		return nil, fmt.Errorf("identity: get by email: %w", err)
 	}
-	return &u, nil
+	defer rows.Close()
+	var found []User
+	for rows.Next() {
+		u, err := scanUser(rows)
+		if err != nil {
+			return nil, fmt.Errorf("identity: get by email: %w", err)
+		}
+		found = append(found, u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("identity: get by email: %w", err)
+	}
+	switch len(found) {
+	case 0:
+		return nil, nil
+	case 1:
+		return &found[0], nil
+	}
+	return nil, fmt.Errorf("identity: get by email: %q matches more than one account", email)
 }
 
 // DeriveCanonicalID turns a human display name into a lowercase,
@@ -430,9 +449,8 @@ func DeriveCanonicalID(display string) string {
 //
 // displayName should be the preferred human label (real name first,
 // display name fallback). email may be empty when the workspace
-// doesn't expose the address; the caller is expected to follow up
-// with the update_my_email skill on the user's next message if a
-// cross-platform link is needed. All inserts run in one transaction
+// doesn't expose the address; an admin can add one later. All inserts
+// run in one transaction
 // so a partial provision never leaves the user half-registered.
 //
 // Canonical id is derived from displayName and deduplicated against
@@ -528,70 +546,6 @@ func (r *Resolver) dedupeCanonicalID(ctx context.Context, candidate string) (str
 	return fmt.Sprintf("%s_%d", candidate, time.Now().Unix()), nil
 }
 
-// SetUserEmail is the write side of the update_my_email skill. Sets
-// users.email for a user whose row currently has no email, and
-// inserts a matching openai identity_map row so cross-platform
-// routing (Open WebUI → canonical user) works on the next request.
-// Refuses when the user already has an email set — changes to an
-// existing email are an admin operation, not a self-service one.
-func (r *Resolver) SetUserEmail(ctx context.Context, userID, email string) error {
-	if r == nil || r.db == nil {
-		return fmt.Errorf("identity: nil resolver")
-	}
-	if userID == "" {
-		return fmt.Errorf("identity: set email: userID required")
-	}
-	if email == "" {
-		return fmt.Errorf("identity: set email: email required")
-	}
-
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("identity: set email: begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	// Require the current email to be NULL — overwriting an existing
-	// email is an admin operation (race between Slack profile update
-	// and self-serve skill), not something a user tool should do
-	// silently.
-	res, err := tx.ExecContext(ctx, `
-		UPDATE users SET email = $1 WHERE id = $2 AND email IS NULL`,
-		email, userID)
-	if err != nil {
-		return fmt.Errorf("identity: set email: update users: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		// Either the user doesn't exist, or already has an email set.
-		// Both should fail with a useful message; the skill distinguishes
-		// via a follow-up GetUser check at its call site.
-		return fmt.Errorf("identity: set email: user %q missing or already has an email", userID)
-	}
-
-	// Add the openai identity_map row so Open WebUI's email header
-	// routes to this canonical user. Silent on duplicate (someone
-	// else's row with the same email would have failed the unique
-	// index on users.email above, so duplicates here are re-runs).
-	displayName := r.userName[userID]
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO identity_map (platform, platform_id, canonical_id, display_name)
-		VALUES ('openai', $1, $2, $3)
-		ON CONFLICT (platform, platform_id) DO NOTHING`,
-		email, userID, displayName); err != nil {
-		return fmt.Errorf("identity: set email: insert openai link: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("identity: set email: commit: %w", err)
-	}
-
-	r.mu.Lock()
-	r.cache["openai:"+email] = userID
-	r.mu.Unlock()
-	return nil
-}
-
 // Refresh reloads identity_map + user status from the database. Used
 // after transactional provisioning paths (Slack bootstrap) that want
 // to confirm the cache is coherent, and available to admin tooling
@@ -635,7 +589,10 @@ func (r *Resolver) CreateFirstRun(ctx context.Context, id, displayName, email st
 			display_name = EXCLUDED.display_name,
 			email        = EXCLUDED.email,
 			status       = 'approved',
-			role         = 'admin'`,
+			role         = 'admin'
+		-- Only an abandoned first-run row (no passkey yet) is rewritten;
+		-- a user who has ever registered a passkey never is.
+		WHERE users.first_passkey_at IS NULL`,
 		id, displayName, emailVal)
 	if err != nil {
 		return fmt.Errorf("identity: create first run: %w", err)

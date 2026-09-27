@@ -4,7 +4,7 @@
 // caching is wasted complexity. The shell precache is just enough
 // to skip a white flash on cold launch.
 
-const CACHE = 'familiar-v9';
+const CACHE = 'familiar-v10';
 
 // Shell assets precached on install. Cache-busting query params on
 // the CSS/JS <link>/<script> tags in mobile.html bypass these

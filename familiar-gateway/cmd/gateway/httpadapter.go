@@ -892,17 +892,23 @@ func runHTTPAdapter(ctx context.Context, d httpAdapterDeps, adminHOut **admin.Ha
 						researchPush = push.NewSender(pushStore, cfg.Push.VAPIDPublicKey, cfg.Push.VAPIDPrivateKey, cfg.Push.Subject).
 							WithEndpointPolicy(push.EndpointPolicy{ExtraHosts: cfg.Push.AllowedEndpointHosts})
 					}
-					researchSkill.SetOrchestrator(researchRuns, makeResearchSynthesizer(
-						researchSkill, pl, sm, adminH.WikiStore(), convStore, researchRuns, researchPush))
+					deliver := makeResearchDeliver(convStore, researchPush)
+					researchSkill.SetOrchestrator(researchRuns, deliver)
 					adminH.AttachResearchRuns(researchRuns)
 					adminH.AttachResearchCanceller(researchSkill.CancelRun)
 					// Reconcile runs orphaned by the previous process's
 					// exit: their in-memory goroutines are gone, so mark
-					// them failed to unblock those conversations (§6.7).
-					if n, rErr := researchRuns.FailOrphanedRuns(ctx, "interrupted by a gateway restart"); rErr != nil {
+					// them failed to unblock those conversations (§6.7),
+					// and say so there: the progress card just vanished.
+					orphans, rErr := researchRuns.FailOrphanedRuns(ctx, "interrupted by a gateway restart")
+					if rErr != nil {
 						log.Printf("[research] orphan reconcile: %v", rErr)
-					} else if n > 0 {
-						log.Printf("[research] reconciled %d run(s) orphaned by restart", n)
+					} else if len(orphans) > 0 {
+						log.Printf("[research] reconciled %d run(s) orphaned by restart", len(orphans))
+					}
+					for _, run := range orphans {
+						deliver(ctx, run, "Research didn't finish: "+run.Topic,
+							"Research on \""+run.Topic+"\" didn't finish: the gateway restarted while it was running. Ask me to retry when you like.")
 					}
 					log.Printf("[research] autonomous runs wired (push=%v)", researchPush != nil)
 				}

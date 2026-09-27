@@ -3,7 +3,10 @@ package admin
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/familiar/gateway/internal/db"
@@ -156,8 +159,23 @@ func TestResearchRunStore_FailOrphaned(t *testing.T) {
 	// FailOrphanedRuns is store-wide; the shared test schema may carry
 	// active runs from sibling tests, so assert per-run behavior rather
 	// than a global count.
-	if _, err := store.FailOrphanedRuns(ctx, "restart"); err != nil {
+	orphans, err := store.FailOrphanedRuns(ctx, "restart")
+	if err != nil {
 		t.Fatalf("FailOrphanedRuns: %v", err)
+	}
+	// The reconciled runs come back so their conversations can be told
+	// (the card just vanished before).
+	var sawR1 bool
+	for _, o := range orphans {
+		if o.ID == r2.ID {
+			t.Error("a finished run was returned as orphaned")
+		}
+		if o.ID == r1.ID {
+			sawR1 = o.ConversationID == "c1" && o.Topic == "A" && o.Status == RunStatusFailed
+		}
+	}
+	if !sawR1 {
+		t.Errorf("orphan r1 not returned with its conversation and topic: %+v", orphans)
 	}
 	got1, _ := store.Get(ctx, r1.ID)
 	if got1.Status != RunStatusFailed || got1.Error != "restart" {
@@ -303,5 +321,54 @@ func TestResearchRunStore_IncrementStats(t *testing.T) {
 	}
 	if got.InputTokens != 15000 || got.OutputTokens != 5000 {
 		t.Errorf("token split = in %d / out %d, want 15000 / 5000", got.InputTokens, got.OutputTokens)
+	}
+}
+
+func cancelRunRequest(h *Handler, user, id string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest("POST", "/console/api/research/runs/"+id+"/cancel", nil)
+	req.SetPathValue("id", id)
+	req = req.WithContext(ctxWithAuth(req.Context(), AuthUser{UserID: user, Role: "user"}))
+	rec := httptest.NewRecorder()
+	h.cancelResearchRun(rec, req)
+	return rec
+}
+
+// A run id that isn't a UUID is no run: it was a 500 carrying the
+// database's cast error.
+func TestCancelResearchRun_NonUUIDIsNotFound(t *testing.T) {
+	h := &Handler{researchRuns: &ResearchRunStore{}}
+	rec := cancelRunRequest(h, "ru", "abc")
+	if rec.Code != http.StatusNotFound || strings.Contains(rec.Body.String(), "uuid") {
+		t.Errorf("cancel abc = %d %s, want a plain 404", rec.Code, rec.Body.String())
+	}
+}
+
+// The stop marks an active run failed and cuts it; a finished run keeps
+// its status (and nothing is cut).
+func TestCancelResearchRun_ActiveAndFinished(t *testing.T) {
+	store, user := runStoreForTest(t)
+	ctx := context.Background()
+	var cut []string
+	h := &Handler{researchRuns: store, researchCanceller: func(id string) bool { cut = append(cut, id); return true }}
+
+	active, _ := store.Create(ctx, user, "cancel-a", "A", qs(1), "research:ru", "e1")
+	if rec := cancelRunRequest(h, user, active.ID); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "failed") {
+		t.Fatalf("cancel active = %d %s", rec.Code, rec.Body.String())
+	}
+	if got, _ := store.Get(ctx, active.ID); got.Status != RunStatusFailed || got.Error != "stopped by user" {
+		t.Errorf("active run after cancel: %+v", got)
+	}
+
+	done, _ := store.Create(ctx, user, "cancel-d", "D", qs(1), "research:ru", "e2")
+	st := RunStatusDone
+	_ = store.Update(ctx, done.ID, RunPatch{Status: &st})
+	if rec := cancelRunRequest(h, user, done.ID); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"done"`) {
+		t.Fatalf("cancel done = %d %s", rec.Code, rec.Body.String())
+	}
+	if got, _ := store.Get(ctx, done.ID); got.Status != RunStatusDone {
+		t.Errorf("a finished run was rewritten: %+v", got)
+	}
+	if len(cut) != 1 || cut[0] != active.ID {
+		t.Errorf("cut = %v, want only the active run", cut)
 	}
 }

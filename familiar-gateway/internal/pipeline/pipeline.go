@@ -154,7 +154,7 @@ type ResearchNoteRef struct {
 // is a research note. The wiki create_page/update_page tools stash the
 // page location in ToolResult.Data; we treat it as a research note when
 // it lands in the user's personal book with the "Research:" title
-// convention (the same convention makeResearchSynthesizer uses). Parses
+// convention (the same convention the research skill's synthesis uses). Parses
 // defensively — a non-write tool, or malformed/absent Data, is a clean
 // (false), never an error that could abort the turn.
 func researchNoteFrom(toolName string, data json.RawMessage) (ResearchNoteRef, bool) {
@@ -322,6 +322,26 @@ func (p *Pipeline) TurnRunning(sessID string) bool {
 // see commitUnfinished), but it still loses the answer.
 const turnHardCap = 1800 * time.Second
 
+// callerBoundKey marks a context whose end must reach the turn it
+// starts (BoundToCaller).
+type callerBoundKey struct{}
+
+// BoundToCaller marks ctx so a turn started with it is cut when ctx
+// ends. Turns are otherwise detached from their caller's context (a
+// closed chat stream must not cut the answer); background callers that
+// set their own deadlines and stops (research workers, the writer, run
+// synthesis) need those to reach the turn, or a stopped or timed-out
+// worker keeps searching and writing for up to turnHardCap.
+func BoundToCaller(ctx context.Context) context.Context {
+	return context.WithValue(ctx, callerBoundKey{}, true)
+}
+
+// CallerBound reports whether ctx was marked by BoundToCaller.
+func CallerBound(ctx context.Context) bool {
+	b, _ := ctx.Value(callerBoundKey{}).(bool)
+	return b
+}
+
 // SetLifetime wires the gateway's root (shutdown) context. Call once at
 // startup, before serving. It's the cancellation source for detached
 // turns: they ignore client disconnect but still stop on shutdown.
@@ -345,6 +365,10 @@ func (p *Pipeline) turnContext(reqCtx context.Context, sessID string) (context.C
 	var stopShutdown func() bool
 	if p.lifetime != nil {
 		stopShutdown = context.AfterFunc(p.lifetime, func() { cancel(context.Canceled) })
+	}
+	var stopCaller func() bool
+	if CallerBound(reqCtx) {
+		stopCaller = context.AfterFunc(reqCtx, func() { cancel(context.Cause(reqCtx)) })
 	}
 	// Register this turn so StopTurn can cut its generation. Keyed by
 	// session id (== workspace conversation_id), one entry per turn.
@@ -372,6 +396,9 @@ func (p *Pipeline) turnContext(reqCtx context.Context, sessID string) (context.C
 		}
 		if stopShutdown != nil {
 			stopShutdown()
+		}
+		if stopCaller != nil {
+			stopCaller()
 		}
 		timer.Stop()
 		cancel(context.Canceled)

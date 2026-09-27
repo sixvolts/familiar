@@ -1,6 +1,11 @@
 package weather
 
-import "testing"
+import (
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+)
 
 func TestParseLatLon(t *testing.T) {
 	cases := []struct {
@@ -57,5 +62,41 @@ func TestKnownLocationsHasBoring(t *testing.T) {
 		if loc.Latitude < 45.3 || loc.Latitude > 45.5 {
 			t.Errorf("knownLocations[%q] latitude out of range: %v", key, loc.Latitude)
 		}
+	}
+}
+
+// A daily point starts at local midnight; labelled in UTC, every place
+// east of UTC showed each day one date early.
+func TestFormatForecast_DatesInTheLocationsZone(t *testing.T) {
+	tokyo, err := time.LoadLocation("Asia/Tokyo")
+	if err != nil {
+		t.Skip("no tzdata")
+	}
+	midnight := time.Date(2026, 9, 24, 0, 0, 0, 0, tokyo)
+	loc := &geocodeResult{Name: "Tokyo", Country: "Japan", Timezone: "Asia/Tokyo"}
+	points := []pirateDailyPoint{{Time: midnight.Unix(), Icon: "rain"}}
+	for _, zone := range []*time.Location{forecastZone("Asia/Tokyo"), forecastZone("", "Asia/Tokyo"), forecastZone("auto", "Asia/Tokyo")} {
+		out := formatForecast(loc, "", points, zone)
+		if !strings.Contains(out, "2026-09-24") {
+			t.Errorf("zone %v: %q, want the local date 2026-09-24", zone, out)
+		}
+	}
+	if forecastZone("", "Not/AZone") != time.UTC {
+		t.Error("an unknown zone should fall back to UTC")
+	}
+}
+
+// The cache is bounded: expired entries go when it fills, then the one
+// expiring soonest.
+func TestTTLCache_Bounded(t *testing.T) {
+	c := newTTLCache()
+	for i := 0; i < maxCacheEntries*3; i++ {
+		c.set(fmt.Sprintf("k%d", i), cacheEntry{}, time.Hour)
+	}
+	if n := len(c.m); n > maxCacheEntries {
+		t.Errorf("cache holds %d entries, cap %d", n, maxCacheEntries)
+	}
+	if _, ok := c.get(fmt.Sprintf("k%d", maxCacheEntries*3-1)); !ok {
+		t.Error("the newest entry was evicted")
 	}
 }

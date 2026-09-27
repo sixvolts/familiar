@@ -146,13 +146,19 @@ the single source of truth (portable: export = zip of the directory).
 
 ```
 GET    /console/api/skills/mine                 list my skills
-POST   /console/api/skills/mine/import          zip/URL, preview→confirm (reuses admin flow + SafeTransport)
-PUT    /console/api/skills/mine/{name}          create/update authored skill
+PUT    /console/api/skills/mine/{name}          create/update authored skill (?create=1: 409 if the name exists)
 POST   /console/api/skills/mine/{name}/enable   / disable (library-level)
 POST   /console/api/skills/mine/{name}/chat     {enabled: bool} — trusted-path opt-in
 DELETE /console/api/skills/mine/{name}
 GET    /console/api/skills/mine/{name}/export
 ```
+
+Users don't import packages: the personal import route (zip upload or URL
+fetch into the caller's library) was removed, as no UI used it and it
+exposed the archive parser and the URL fetcher to every user. Admins import
+into the instance library (preview → confirm; the confirm carries the
+previewed digest and is refused if the package changed). A user customizes a
+built-in by authoring a skill of the same name.
 
 Admin routes unchanged. Shard binding UI gains the owner's user skills in the
 `#shard-skillpacks` checklist (a shard may bind its owner's skills, not other
@@ -163,8 +169,8 @@ users').
 - **Desktop Skills panel**: new "My skills" section above the instance
   library — cards with origin badge (`authored` / `imported from …`),
   enabled toggle, "Use in chat" toggle (warning dialog for imported), Edit /
-  Export / Delete. Import button available to every user (writes to their
-  library).
+  Export / Delete. New skill (authoring) for every user; import is
+  admin-only (instance library).
 - **Mobile**: read-only list + enable/off toggles in Account (same pattern as
   shards); authoring is desktop-only, same note ("Create and edit skills on
   the desktop console").

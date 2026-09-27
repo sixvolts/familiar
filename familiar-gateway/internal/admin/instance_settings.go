@@ -80,6 +80,28 @@ func (s *InstanceSettingsStore) GetAll(ctx context.Context) (map[string]string, 
 	return out, rows.Err()
 }
 
+// SetAll upserts several settings in one transaction: all land or none.
+func (s *InstanceSettingsStore) SetAll(ctx context.Context, kv map[string]string, updatedBy string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for k, v := range kv {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO instance_settings (key, value, updated_at, updated_by)
+			VALUES ($1, $2, NOW(), $3)
+			ON CONFLICT (key) DO UPDATE
+			   SET value = EXCLUDED.value,
+			       updated_at = NOW(),
+			       updated_by = EXCLUDED.updated_by`,
+			k, v, updatedBy); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // Set upserts one setting.
 func (s *InstanceSettingsStore) Set(ctx context.Context, key, value, updatedBy string) error {
 	_, err := s.db.ExecContext(ctx, `
@@ -160,38 +182,51 @@ func (h *Handler) getSystemPrompt(w http.ResponseWriter, r *http.Request) {
 //	{"base": "<prompt text>", "user_visible": true|false}
 //
 // An empty base clears the override — the pipeline falls back to the
-// file-loaded base.md. Writes the DB, then refreshes the in-memory
-// PromptStore so the change takes effect on the next turn without a
-// gateway restart.
+// file-loaded base.md — and so does a base equal to that file: the
+// editor shows base.md when there's no override and sends it back on
+// every save, so ticking "visible to users" froze today's base.md as
+// an override, and later base.md upgrades were silently ignored. An
+// absent base leaves the override as it is. Both settings are written
+// in one transaction, then the in-memory PromptStore is refreshed so
+// the change takes effect on the next turn without a restart (a
+// failure between two separate writes left the DB and the running
+// prompt disagreeing until the next restart applied it).
 func (h *Handler) putSystemPrompt(w http.ResponseWriter, r *http.Request) {
 	if h.instanceSettings == nil || h.promptStore == nil {
 		writeJSONError(w, http.StatusServiceUnavailable, "system prompt settings not configured")
 		return
 	}
 	au, _ := AuthUserFrom(r.Context())
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var body struct {
-		Base        string `json:"base"`
-		UserVisible bool   `json:"user_visible"`
+		Base        *string `json:"base"`
+		UserVisible bool    `json:"user_visible"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid body: "+err.Error())
-		return
-	}
-	base := strings.TrimSpace(body.Base)
-	if err := h.instanceSettings.Set(r.Context(), SettingSystemPromptBase, base, au.UserID); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	visibleStr := "false"
 	if body.UserVisible {
 		visibleStr = "true"
 	}
-	if err := h.instanceSettings.Set(r.Context(), SettingSystemPromptUserVisible, visibleStr, au.UserID); err != nil {
+	settings := map[string]string{SettingSystemPromptUserVisible: visibleStr}
+	var base string
+	if body.Base != nil {
+		base = strings.TrimSpace(*body.Base)
+		if base == strings.TrimSpace(h.promptStore.FileBase()) {
+			base = "" // the file itself: no override
+		}
+		settings[SettingSystemPromptBase] = base
+	}
+	if err := h.instanceSettings.SetAll(r.Context(), settings, au.UserID); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	// Refresh the in-memory cache the pipeline reads.
-	h.promptStore.SetBaseOverride(base)
+	if body.Base != nil {
+		h.promptStore.SetBaseOverride(base)
+	}
 
 	writeJSON(w, http.StatusOK, systemPromptResponse{
 		Base:        h.promptStore.EffectiveBase(),

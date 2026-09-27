@@ -217,6 +217,38 @@ func MapAllowedTools(allowed string, known map[string]bool) (matched, unmatched 
 }
 
 // PromptBlock renders the progressive-disclosure metadata layer for
+// MaxPromptSkills caps the skills advertised in one prompt block: a
+// description runs to 1024 characters, and the block rides in the
+// system prompt unbudgeted.
+const MaxPromptSkills = 20
+
+// CapPromptSkills keeps at most max of pkgs, built-ins first (a user's
+// library sorting ahead of "research" pushed the built-in out of chat),
+// then the rest in their order; the kept ones stay in their original
+// order. dropped is how many were cut.
+func CapPromptSkills(pkgs []*Package, max int) (kept []*Package, dropped int) {
+	if len(pkgs) <= max {
+		return pkgs, 0
+	}
+	keep := make(map[*Package]bool, max)
+	for _, p := range pkgs {
+		if len(keep) < max && p.Origin == "builtin" {
+			keep[p] = true
+		}
+	}
+	for _, p := range pkgs {
+		if len(keep) < max {
+			keep[p] = true
+		}
+	}
+	for _, p := range pkgs {
+		if keep[p] {
+			kept = append(kept, p)
+		}
+	}
+	return kept, len(pkgs) - len(kept)
+}
+
 // a shard's bound skills: one line per skill, plus the activation
 // contract. Bodies are NOT included — the model pulls them with
 // use_skill, exactly as the standard's load model intends.

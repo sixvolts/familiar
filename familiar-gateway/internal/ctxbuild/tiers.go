@@ -282,6 +282,16 @@ func (s *PromptStore) HasBaseOverride() bool {
 	return s.baseOverride != ""
 }
 
+// FileBase returns the file-loaded base.md, whatever the override.
+func (s *PromptStore) FileBase() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.base
+}
+
 // EffectiveBase returns the base layer Assemble will use — the admin
 // override when set, otherwise the file-loaded base.md. The admin
 // system-prompt editor + the optional user-facing viewer both render

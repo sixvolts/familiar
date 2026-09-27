@@ -72,19 +72,38 @@
         }
     }
 
+    // makeToggle turns el into a keyboard-operable disclosure: a button
+    // role, focusable, aria-expanded, Enter/Space as well as click. The
+    // headers took mouse clicks only and announced nothing. onToggle
+    // re-renders and moves focus to the new toggle.
+    function makeToggle(el, expanded, onToggle) {
+        el.setAttribute("role", "button");
+        el.tabIndex = 0;
+        el.setAttribute("aria-expanded", expanded ? "true" : "false");
+        el.addEventListener("click", onToggle);
+        el.addEventListener("keydown", (e) => {
+            if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onToggle();
+            }
+        });
+    }
+
     function renderSkillEntry(skill) {
         const card = document.createElement("article");
         card.className = "skill-card";
 
         const header = document.createElement("header");
         header.className = "skill-header";
-        header.addEventListener("click", () => {
+        makeToggle(header, skillsState.expanded.has(skill.name), () => {
             if (skillsState.expanded.has(skill.name)) {
                 skillsState.expanded.delete(skill.name);
             } else {
                 skillsState.expanded.add(skill.name);
             }
-            card.replaceWith(renderSkillEntry(skill));
+            const next = renderSkillEntry(skill);
+            card.replaceWith(next);
+            next.querySelector(".skill-header").focus();
         });
 
         const name = document.createElement("div");
@@ -130,13 +149,15 @@
 
         const header = document.createElement("div");
         header.className = "skill-tool-header";
-        header.addEventListener("click", () => {
+        makeToggle(header, skillsState.expandedTools.has(key), () => {
             if (skillsState.expandedTools.has(key)) {
                 skillsState.expandedTools.delete(key);
             } else {
                 skillsState.expandedTools.add(key);
             }
-            row.replaceWith(renderToolRow(skillName, tool));
+            const next = renderToolRow(skillName, tool);
+            row.replaceWith(next);
+            next.querySelector(".skill-tool-header").focus();
         });
 
         const name = document.createElement("code");
@@ -212,7 +233,7 @@
         if (!items.length) {
             const m = document.createElement("div");
             m.className = "micro";
-            m.textContent = "NO PERSONAL SKILLS YET — IMPORT A SKILL.MD PACKAGE TO GET STARTED";
+            m.textContent = "NO PERSONAL SKILLS YET — CLICK NEW SKILL TO WRITE ONE";
             container.appendChild(m);
             return;
         }
@@ -277,7 +298,7 @@
         cb.type = "checkbox";
         cb.checked = !!pkg.chat_enabled;
         cb.disabled = disabled;
-        cb.addEventListener("change", () => toggleMySkillChat(pkg));
+        cb.addEventListener("change", () => toggleMySkillChat(pkg, cb));
         label.appendChild(cb);
         label.appendChild(document.createTextNode(" Use in chat"));
         if (disabled) label.title = "Enable the skill first";
@@ -374,8 +395,13 @@
         if (!name) return setError("skill-editor-error", new Error("name is required"));
         if (!description) return setError("skill-editor-error", new Error("description is required"));
         if (!body.trim()) return setError("skill-editor-error", new Error("instructions are required"));
+        // A new skill is a create: the server refuses a name you already
+        // use (409) instead of overwriting that skill's instructions.
+        const create = editorState.name === null;
+        const saveBtn = document.getElementById("skill-editor-save");
+        saveBtn.disabled = true; // a double click raced two creates
         try {
-            const pkg = await apiJSON("/console/api/skills/mine/" + encodeURIComponent(name), {
+            const pkg = await apiJSON("/console/api/skills/mine/" + encodeURIComponent(name) + (create ? "?create=1" : ""), {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ description, body }),
@@ -385,6 +411,8 @@
             await loadMySkills();
         } catch (e) {
             setError("skill-editor-error", e);
+        } finally {
+            saveBtn.disabled = false;
         }
     }
 
@@ -435,8 +463,12 @@
     // skills, and duplicates of imported skills (origin becomes
     // 'authored' for editability but source_url survives the copy).
     // From-scratch authored skills flip silently — the user wrote them.
-    async function toggleMySkillChat(pkg) {
-        const enabling = !pkg.chat_enabled;
+    // The desired state is the checkbox's, as toggleSkillpackChat does:
+    // derived from pkg.chat_enabled it went stale after a failed POST
+    // (the box stayed flipped), and the next click sent the opposite of
+    // what the box showed.
+    async function toggleMySkillChat(pkg, cb) {
+        const enabling = cb.checked;
         if (enabling && (pkg.origin !== "authored" || pkg.source_url)) {
             const src = pkg.source_url ? "from " + pkg.source_url : "from an imported package";
             if (!confirm(
@@ -460,6 +492,7 @@
             toast("Skill " + pkg.name + (enabling ? " available in chat" : " removed from chat"), "success");
             await loadMySkills();
         } catch (e) {
+            cb.checked = !enabling; // keep telling the truth about the server
             setError("myskills-error", e);
         }
     }
@@ -672,7 +705,7 @@
     // there is no user-facing zip import. The endpoint dry-runs by
     // default; Approve sends confirm=true.
 
-    const importState = { previewed: false };
+    const importState = { previewed: false, digest: "" };
 
     function importEndpoint() {
         return "/console/api/skillpacks/import";
@@ -689,6 +722,7 @@
 
     function invalidatePreview() {
         importState.previewed = false;
+        importState.digest = "";
         const prev = document.getElementById("skillpack-import-preview");
         prev.hidden = true;
         prev.innerHTML = "";
@@ -700,22 +734,27 @@
     // endpoint from whichever source is filled in. Multipart for a
     // file (the browser sets the boundary — no manual Content-Type),
     // JSON for a URL.
+    // The confirm carries the digest the preview showed: the server
+    // admits only that package (a URL, or anything between the gateway
+    // and a plain-http one, could serve another the second time).
     function buildImportRequest(confirm) {
         const fileInput = document.getElementById("skillpack-import-file");
         const url = document.getElementById("skillpack-import-url").value.trim();
         const file = fileInput.files && fileInput.files[0];
+        const digest = confirm ? importState.digest : "";
         if (file && url) throw new Error("pick a file OR a URL, not both");
         if (file) {
             const fd = new FormData();
             fd.append("file", file);
             fd.append("confirm", confirm ? "true" : "false");
+            if (digest) fd.append("digest", digest);
             return { method: "POST", body: fd };
         }
         if (url) {
             return {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ url, confirm: !!confirm }),
+                body: JSON.stringify({ url, confirm: !!confirm, digest }),
             };
         }
         throw new Error("choose a zip file or enter a URL");
@@ -727,6 +766,7 @@
             const res = await apiJSON(importEndpoint(), buildImportRequest(false));
             renderImportPreview(res);
             importState.previewed = true;
+            importState.digest = res.digest || "";
             document.getElementById("skillpack-import-approve").hidden = false;
             document.getElementById("skillpack-import-go").hidden = true;
         } catch (e) {
@@ -738,6 +778,8 @@
     async function approveImport() {
         if (!importState.previewed) return;
         setError("skillpack-import-error", null);
+        const btn = document.getElementById("skillpack-import-approve");
+        btn.disabled = true; // a double click raced two imports
         try {
             const pkg = await apiJSON(importEndpoint(), buildImportRequest(true));
             toast("Skill " + pkg.name + " imported", "success");
@@ -745,6 +787,8 @@
             await loadSkillpacks();
         } catch (e) {
             setError("skillpack-import-error", e);
+        } finally {
+            btn.disabled = false;
         }
     }
 

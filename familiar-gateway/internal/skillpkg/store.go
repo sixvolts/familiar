@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/familiar/gateway/internal/db"
@@ -110,7 +111,29 @@ func (p *Package) Enabled() bool { return p.DisabledAt == nil }
 type Store struct {
 	pool *db.Pool
 	Root string
+
+	// names serializes the create/import of one (owner, name): two
+	// concurrent creates (a double-clicked Save or Approve) both passed
+	// the no-row check and wrote into the same directory, and the
+	// loser's cleanup after its failed insert deleted the winner's files.
+	names sync.Map // "owner/name" → *sync.Mutex
 }
+
+// lockName holds the create/import lock for (owner, name) until the
+// returned func is called. In-process: one gateway serves a database.
+func (s *Store) lockName(owner, name string) func() {
+	v, _ := s.names.LoadOrStore(owner+"/"+name, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
+
+// afterNameLookup runs between a create's name check and its write
+// (tests widen the race window with it; nil otherwise).
+var afterNameLookup func()
+
+// ErrExists is returned by CreateAuthored when the name is taken.
+var ErrExists = errors.New("skillpkg: a skill by that name already exists")
 
 func NewStore(pool *db.Pool, root string) (*Store, error) {
 	if pool == nil {
@@ -195,12 +218,21 @@ func (s *Store) importStagedAs(ctx context.Context, owner, stagedDir, importedBy
 		dest = filepath.Join(s.Root, userSubdir, owner, name)
 	}
 
+	unlock := s.lockName(owner, name)
+	defer unlock()
 	if _, err := os.Stat(dest); err == nil {
 		// A directory with no matching row is a stale leftover (e.g. a
 		// deleted user's cascade removed the row but not the tree) —
-		// self-heal by replacing it. A live row is a real conflict.
-		if _, err := s.getScoped(ctx, owner, name); err == nil || owner == "" {
+		// self-heal by replacing it. A live row is a real conflict, and
+		// so is not knowing: any other lookup error (a cancelled
+		// request, a DB blip) used to count as "no row" and delete a
+		// live skill's files.
+		_, err := s.getScoped(ctx, owner, name)
+		switch {
+		case err == nil || owner == "":
 			return nil, fmt.Errorf("skillpkg: %q is already installed — delete it first to re-import", name)
+		case !errors.Is(err, ErrNotFound):
+			return nil, err
 		}
 		_ = os.RemoveAll(dest)
 	}
@@ -637,17 +669,32 @@ func (s *Store) SetShardSkills(ctx context.Context, shardID string, skillIDs []s
 			return fmt.Errorf("skillpkg: skill %s is not available to this shard's owner", id)
 		}
 	}
+	// One skill per name: a personal skill and a library one of the
+	// same name could both be bound, the prompt listed the name twice
+	// and use_skill served either.
+	var dup string
+	err = tx.QueryRowContext(ctx, `
+		SELECT p.name FROM shard_skills ss JOIN skill_packages p ON p.id = ss.skill_id
+		 WHERE ss.shard_id = $1 GROUP BY p.name HAVING count(*) > 1 LIMIT 1`, shardID).Scan(&dup)
+	switch {
+	case err == nil:
+		return fmt.Errorf("skillpkg: two skills named %q — bind yours or the library's, not both", dup)
+	case !errors.Is(err, sql.ErrNoRows):
+		return err
+	}
 	return tx.Commit()
 }
 
 // ListShardSkills returns the ENABLED packages bound to a shard —
 // the set the augmenter advertises and the tools authorize against.
 func (s *Store) ListShardSkills(ctx context.Context, shardID string) ([]*Package, error) {
+	// One per name, the owner's first (as chatPackage): shards bound
+	// before SetShardSkills refused same-name pairs may still carry one.
 	rows, err := s.pool.QueryContext(ctx, `
-		SELECT `+pkgCols+` FROM skill_packages p
+		SELECT DISTINCT ON (p.name) `+pkgCols+` FROM skill_packages p
 		  JOIN shard_skills ss ON ss.skill_id = p.id
 		 WHERE ss.shard_id = $1 AND p.disabled_at IS NULL
-		 ORDER BY p.name`, shardID)
+		 ORDER BY p.name, p.owner_id NULLS LAST`, shardID)
 	if err != nil {
 		return nil, err
 	}
@@ -792,8 +839,9 @@ func (s *Store) SetChatEnabled(ctx context.Context, id string, enabled bool) err
 // block advertises.
 func (s *Store) ListChatEnabled(ctx context.Context, owner string) ([]*Package, error) {
 	// DISTINCT ON (name) with owner-first ordering: when a user's
-	// personal skill shares a name with a builtin (the documented
-	// duplicate-as-mine customization path), advertise ONE entry — the
+	// personal skill shares a name with a builtin (how a user
+	// customizes one: an authored skill of the same name), advertise
+	// ONE entry — the
 	// owner's — matching what chatPackage will actually serve. Without
 	// it the prompt block lists the same name twice with two
 	// descriptions and the model can't reach the second one.
@@ -874,6 +922,17 @@ func (s *Store) FileForUser(ctx context.Context, userID, name, relPath string) (
 // duplicate). Imported skills are read-only: origin is immutable and
 // editing one requires Duplicate first.
 func (s *Store) SaveAuthored(ctx context.Context, owner, name, description, body string, knownTools map[string]bool) (*Package, error) {
+	return s.saveAuthored(ctx, owner, name, description, body, knownTools, false)
+}
+
+// CreateAuthored is SaveAuthored for a new skill: ErrExists when the
+// owner already has one by that name (the New skill editor silently
+// overwrote an existing authored skill).
+func (s *Store) CreateAuthored(ctx context.Context, owner, name, description, body string, knownTools map[string]bool) (*Package, error) {
+	return s.saveAuthored(ctx, owner, name, description, body, knownTools, true)
+}
+
+func (s *Store) saveAuthored(ctx context.Context, owner, name, description, body string, knownTools map[string]bool, createOnly bool) (*Package, error) {
 	if owner == "" {
 		return nil, fmt.Errorf("skillpkg: authoring requires an owner")
 	}
@@ -885,8 +944,15 @@ func (s *Store) SaveAuthored(ctx context.Context, owner, name, description, body
 	}
 
 	fm := Frontmatter{Name: name, Description: strings.TrimSpace(description)}
+	unlock := s.lockName(owner, name)
+	defer unlock()
 	existing, err := s.getScoped(ctx, owner, name)
+	if afterNameLookup != nil {
+		afterNameLookup()
+	}
 	switch {
+	case err == nil && createOnly:
+		return nil, ErrExists
 	case err == nil:
 		if existing.Origin != "authored" {
 			return nil, fmt.Errorf("skillpkg: %q was imported and is read-only — duplicate it as an authored skill to edit", name)
@@ -1065,7 +1131,9 @@ func (s *Store) boundPackage(ctx context.Context, shardID, name string) (*Packag
 	p, err := scanPackage(s.pool.QueryRowContext(ctx, `
 		SELECT `+pkgCols+` FROM skill_packages p
 		  JOIN shard_skills ss ON ss.skill_id = p.id
-		 WHERE ss.shard_id = $1 AND p.name = $2 AND p.disabled_at IS NULL`,
+		 WHERE ss.shard_id = $1 AND p.name = $2 AND p.disabled_at IS NULL
+		 ORDER BY p.owner_id NULLS LAST
+		 LIMIT 1`,
 		shardID, name))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("skillpkg: skill %q is not available to this shard", name)

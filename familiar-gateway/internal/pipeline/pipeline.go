@@ -689,12 +689,9 @@ func (p *Pipeline) GenerateTitle(ctx context.Context, userMsg, assistantMsg stri
 	return p.sidecarClient.GenerateTitle(ctx, userMsg, assistantMsg)
 }
 
-// sidecarModelLabel is the "model" field on direct sidecar chat calls
-// (the preamble generator). llama-server ignores it — the endpoint
-// selects the loaded model — so it's a label, not a selector. Kept
-// generic instead of pinning a specific model name that goes stale
-// on a swap. See EXTERNAL-READINESS-REVIEW.md for the broader note on
-// threading real per-endpoint model ids through the sidecar client.
+// sidecarModelLabel is the "model" field on a preamble call when there
+// is no sidecar client to resolve the classify model through (only the
+// static endpoint). llama-server ignores it.
 const sidecarModelLabel = "sidecar"
 
 // generatePreamble calls the sidecar to produce a brief acknowledgment
@@ -730,15 +727,18 @@ func (p *Pipeline) generatePreamble(ctx context.Context, userMsg string, complex
 		ChatTemplateKwargs map[string]any `json:"chat_template_kwargs,omitempty"`
 	}
 
+	// Borrow the classify task's model, which the operator points at a
+	// fast model. Resolved per call through the sidecar client, so the
+	// preamble follows the classify role's failover and names the model
+	// it reaches; the endpoint captured at boot is the fallback.
+	endpoint, model := p.sidecarEndpoint, sidecarModelLabel
+	if p.sidecarClient != nil {
+		if ep, m := p.sidecarClient.TaskTarget(sidecar.TaskClassify); ep != "" {
+			endpoint, model = ep, m
+		}
+	}
 	body := sidecarReq{
-		// The model name is a label only: llama-server serves whatever
-		// model is loaded at the endpoint, so the field is ignored. We
-		// borrow the sidecar (classify-slot) endpoint, which the
-		// operator points at their fast preamble model. (A multi-model
-		// backend like vLLM that routes by name would need a real
-		// per-endpoint model id threaded through the sidecar client —
-		// tracked separately; see EXTERNAL-READINESS-REVIEW.md.)
-		Model:              sidecarModelLabel,
+		Model:              model,
 		Messages:           []sidecarMsg{{Role: "user", Content: preamblePrompt}},
 		MaxTokens:          150,
 		Stream:             true,
@@ -755,7 +755,7 @@ func (p *Pipeline) generatePreamble(ctx context.Context, userMsg string, complex
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(preambleCtx, http.MethodPost,
-		p.sidecarEndpoint+"/v1/chat/completions", bytes.NewReader(bodyBytes))
+		strings.TrimRight(endpoint, "/")+"/v1/chat/completions", bytes.NewReader(bodyBytes))
 	if err != nil {
 		log.Printf("[pipeline] preamble request error: %v", err)
 		return ""
@@ -1441,7 +1441,7 @@ func (p *Pipeline) runTurn(
 		return p.completeWithFailover(c, cands, req, onChunk, info)
 	}
 
-	llmResp, loopMsgs, err := p.runCompletion(llmCtx, sess, route.provider, llmReq, route.complexityLabel(), route.classifier.SearchDepth, complete, onStatus, overrides, userSkillsUnlocked, &info.PagesFetched, &info.ResearchNote)
+	llmResp, loopMsgs, err := p.runCompletion(llmCtx, sess, route.provider, llmReq, route.modelID, route.complexityLabel(), route.classifier.SearchDepth, complete, onStatus, overrides, userSkillsUnlocked, &info.PagesFetched, &info.ResearchNote)
 	if err != nil {
 		return "", err
 	}
@@ -1778,6 +1778,7 @@ type completeFn func(ctx context.Context, req llm.CompletionRequest) (*llm.Compl
 func (p *Pipeline) runToolLoop(
 	ctx context.Context,
 	baseReq llm.CompletionRequest,
+	modelID string, // the routed model's registry id; baseReq.Model is the name sent on the wire
 	complexity string,
 	searchDepth classifier.SearchDepth,
 	searchBudgetOverride int,
@@ -1914,7 +1915,12 @@ func (p *Pipeline) runToolLoop(
 	if toolCfg.WindowSize == 0 {
 		toolCfg = ctxbuild.DefaultConfig()
 	}
-	if modelCfg := p.router.GetRegistry().GetModelConfig(baseReq.Model); modelCfg != nil && modelCfg.ContextWindow > 0 {
+	// Look the window up by the routed model's registry id, the same id
+	// assembleMessages sizes the prompt with. baseReq.Model is the name
+	// sent to the server, which drops the id's "host/" prefix, so for
+	// every real (slashed) id the lookup missed: the tool budget stayed
+	// at the global window and the per-result cap never grew.
+	if modelCfg := p.router.GetRegistry().GetModelConfig(modelID); modelCfg != nil && modelCfg.ContextWindow > 0 {
 		toolCfg.WindowSize = modelCfg.ContextWindow
 	}
 
@@ -2194,12 +2200,16 @@ func (p *Pipeline) GetRouter() *router.Router {
 	return p.router
 }
 
-// modelIDToProviderModel extracts the model name from an ID like "llama-server/qwen3-30b".
-func modelIDToProviderModel(modelID string) string {
-	if idx := strings.Index(modelID, "/"); idx >= 0 {
-		return modelID[idx+1:]
+// requestModel is the name sent as a request's `model` for a model id:
+// the model's configured `model` when set, else the id without its
+// "host/" namespace. The sidecar uses the same rule, so chat and the
+// sidecar tasks name a model the same way. Chat used to ignore a
+// configured `model` and always send the stripped id.
+func (p *Pipeline) requestModel(modelID string) string {
+	if p.router != nil && p.router.GetRegistry() != nil {
+		return p.router.GetRegistry().RequestModelFor(modelID)
 	}
-	return modelID
+	return config.StripModelNamespace(modelID)
 }
 
 // routeResult bundles everything routing produces: the selected provider
@@ -2525,7 +2535,7 @@ func (p *Pipeline) buildLLMRequest(messages []llm.Message, route *routeResult, i
 		}
 	}
 	req := llm.CompletionRequest{
-		Model:          modelIDToProviderModel(route.modelID),
+		Model:          p.requestModel(route.modelID),
 		Messages:       messages,
 		MaxTokens:      maxTokens,
 		Stream:         stream,
@@ -2572,7 +2582,7 @@ func (p *Pipeline) buildLLMRequest(messages []llm.Message, route *routeResult, i
 // shard's scope_tag so memory-writing skills can tag rows, and the
 // tool loop runs with an allowlist derived from overrides.ToolAllowlist.
 // Trusted-path callers pass nil.
-func (p *Pipeline) runCompletion(ctx context.Context, sess *session.Session, provider llm.Provider, req llm.CompletionRequest, complexity string, searchDepth classifier.SearchDepth, complete completeFn, onStatus func(string), overrides *ShardOverrides, userSkillsUnlocked bool, pagesFetched *int, researchNote *ResearchNoteRef) (*llm.CompletionResponse, []llm.Message, error) {
+func (p *Pipeline) runCompletion(ctx context.Context, sess *session.Session, provider llm.Provider, req llm.CompletionRequest, modelID string, complexity string, searchDepth classifier.SearchDepth, complete completeFn, onStatus func(string), overrides *ShardOverrides, userSkillsUnlocked bool, pagesFetched *int, researchNote *ResearchNoteRef) (*llm.CompletionResponse, []llm.Message, error) {
 	if len(req.Tools) > 0 {
 		loopCtx := skills.WithContext(ctx, skills.SessionContext{
 			SessionID:      sess.ID,
@@ -2588,7 +2598,7 @@ func (p *Pipeline) runCompletion(ctx context.Context, sess *session.Session, pro
 		if overrides != nil {
 			allowlist = toolAllowlistSet(overrides.ToolAllowlist)
 		}
-		resp, loopMsgs, err := p.runToolLoop(loopCtx, req, complexity, searchDepth, searchBudgetFor(overrides), complete, onStatus, allowlist, userSkillsUnlocked, pagesFetched, researchNote)
+		resp, loopMsgs, err := p.runToolLoop(loopCtx, req, modelID, complexity, searchDepth, searchBudgetFor(overrides), complete, onStatus, allowlist, userSkillsUnlocked, pagesFetched, researchNote)
 		if err != nil {
 			return nil, nil, fmt.Errorf("LLM tool loop: %w", err)
 		}
@@ -2647,7 +2657,7 @@ func (p *Pipeline) completionCandidates(route *routeResult, overrides *ShardOver
 func (p *Pipeline) completeWithFailover(ctx context.Context, cands []completionCandidate, req llm.CompletionRequest, onChunk func(string), info *RouteInfo) (*llm.CompletionResponse, error) {
 	var lastErr error
 	for i, cand := range cands {
-		req.Model = modelIDToProviderModel(cand.id)
+		req.Model = p.requestModel(cand.id)
 		emitted := false
 		var resp *llm.CompletionResponse
 		var err error

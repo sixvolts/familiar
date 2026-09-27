@@ -9,6 +9,8 @@
 // the budgets be tuned without retraining or re-prompting.
 package classifier
 
+import "strings"
+
 // ThinkingLevel is the requested thinking budget for the chat model.
 // "off" disables thinking entirely; the others scale to a token
 // budget at request time via [effort.thinking.<level>].
@@ -107,7 +109,10 @@ const (
 func (o Output) FromModel() bool { return o.Source == SourceModel }
 
 // ConservativeFallback is the EXPENSIVE fallback: thinking and memory
-// both at their highest non-search settings, search off.
+// both at their highest settings, search shallow (one permitted call).
+// Search used to be off here, which is a hard veto (webSearchDisabled):
+// a classifier that answered "thinking":"none" turned "look up the latest
+// release notes" into a confidently stale answer.
 //
 // Its scope is now narrow. It applies only when the classifier actually
 // responded and its levels failed Validate() — a model that answered but
@@ -123,9 +128,60 @@ func ConservativeFallback() Output {
 	return Output{
 		Thinking:    ThinkingHigh,
 		MemoryDepth: MemoryDeep,
-		SearchDepth: SearchNone,
+		SearchDepth: SearchShallow,
 		Source:      SourceUnparsed,
 	}
+}
+
+// Normalize maps the classifier's near misses onto the canonical levels:
+// case and surrounding space ("Low", " high"), and the one word each
+// scale spells differently ("thinking":"none" for off, "off" for a depth
+// of none). The prompt uses "off" for thinking and "none" for the
+// depths, so the swap is a natural slip.
+func (o Output) Normalize() Output {
+	norm := func(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+	o.Thinking = ThinkingLevel(norm(string(o.Thinking)))
+	if o.Thinking == "none" {
+		o.Thinking = ThinkingOff
+	}
+	o.MemoryDepth = MemoryDepth(norm(string(o.MemoryDepth)))
+	if o.MemoryDepth == "off" {
+		o.MemoryDepth = MemoryNone
+	}
+	o.SearchDepth = SearchDepth(norm(string(o.SearchDepth)))
+	if o.SearchDepth == "off" {
+		o.SearchDepth = SearchNone
+	}
+	return o
+}
+
+// Repair replaces each field that still isn't a known level with
+// ConservativeFallback's, keeping the valid fields and the condensed
+// query. One bad field used to throw away the whole verdict. It reports
+// whether anything was replaced; a repaired verdict is stamped
+// SourceUnparsed, so it still counts as a fallback.
+func (o Output) Repair() (Output, bool) {
+	fb := ConservativeFallback()
+	repaired := false
+	switch o.Thinking {
+	case ThinkingOff, ThinkingLow, ThinkingMedium, ThinkingHigh:
+	default:
+		o.Thinking, repaired = fb.Thinking, true
+	}
+	switch o.MemoryDepth {
+	case MemoryNone, MemoryShallow, MemoryDeep:
+	default:
+		o.MemoryDepth, repaired = fb.MemoryDepth, true
+	}
+	switch o.SearchDepth {
+	case SearchNone, SearchShallow, SearchDeep:
+	default:
+		o.SearchDepth, repaired = fb.SearchDepth, true
+	}
+	if repaired {
+		o.Source = SourceUnparsed
+	}
+	return o, repaired
 }
 
 // StaticDefault is what to use when we learned NOTHING about the turn —

@@ -175,6 +175,26 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// Text-generation roles need a model that generates text. An
+	// embeddings model there only ever fails (EmbeddingsProvider has no
+	// completion path), and the heartbeat reports it online, so the
+	// role never fails over.
+	for _, role := range RoleNames {
+		if !takesGlobalFallback(role) {
+			continue
+		}
+		for _, id := range c.Roles.Chain(role).Candidates() {
+			if m := byID[id]; m != nil && m.Provider == "embeddings" {
+				return fmt.Errorf("roles.%s references embeddings model %q, which can't generate text", role, id)
+			}
+		}
+	}
+	for _, m := range c.Models {
+		if m.Chat && m.Provider == "embeddings" {
+			return fmt.Errorf("model %q has chat = true but provider = \"embeddings\", which can't generate text", m.ID)
+		}
+	}
+
 	// Every model in the embedder chain must actually be an embeddings
 	// backend — pointing the role at a chat model yields a provider whose
 	// Embed path doesn't exist, which would surface as every memory write

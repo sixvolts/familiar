@@ -566,6 +566,7 @@ rp_origins = [
 id              = "gpu-host/qwen3.5-122b"
 provider        = "llama-server"
 endpoint        = "http://10.0.0.10:8080"
+chat            = true                # the chat model (see [roles.chat] for failover)
 context_window  = 32768
 capabilities    = [
     "deep_reasoning",

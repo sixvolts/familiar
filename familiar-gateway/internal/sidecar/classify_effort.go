@@ -47,9 +47,10 @@ type ClassifyStats struct {
 //   - SourceStatic   we learned nothing (no client, chain offline, transport
 //     failure, timeout, unparseable body) -> StaticDefault,
 //     which is deliberately CHEAP
-//   - SourceUnparsed a response arrived but its levels failed Validate()
-//     -> ConservativeFallback, the one case where erring
-//     expensive is defensible
+//   - SourceUnparsed a response arrived but a level failed Validate() even
+//     after Normalize -> that field takes ConservativeFallback's
+//     value (the one case where erring expensive is defensible);
+//     the valid fields and the condensed query are kept
 //
 // Caller responsibility: trim `history` to the most recent few turns. The
 // prompt advertises 2-3; passing 50 wastes tokens without changing the
@@ -104,13 +105,16 @@ func (c *Client) ClassifyWithStats(ctx context.Context, history []Turn, userMsg 
 		log.Printf("[sidecar] classify failed after %s (%v) — using static default", st.Duration.Round(time.Millisecond), err)
 		return classifier.StaticDefault(), st
 	}
+	out = out.Normalize()
 	if !out.Validate() {
 		st.Err = fmt.Errorf("invalid levels: %+v", out)
-		// The model answered but the levels are unusable. That is weak
-		// evidence this turn confused a small model, so this is the one
-		// case where erring expensive is defensible.
-		log.Printf("[sidecar] classify returned invalid levels (%+v) — using conservative fallback", out)
-		return classifier.ConservativeFallback(), st
+		// The model answered but some level is unusable. That is weak
+		// evidence this turn confused a small model, so the bad field
+		// errs expensive; the fields it got right, and its condensed
+		// query, are kept.
+		repaired, _ := out.Repair()
+		log.Printf("[sidecar] classify returned invalid levels (%+v) — repaired to %+v", out, repaired)
+		return repaired, st
 	}
 	out.Source = classifier.SourceModel
 	return out, st
@@ -161,7 +165,7 @@ func (r *HTTPRouter) classifyEffortWithUsage(ctx context.Context, history []Turn
 		Content string `json:"content"`
 	}
 	type chatReq struct {
-		Model              string         `json:"model"`
+		Model              string         `json:"model,omitempty"`
 		Messages           []chatMsg      `json:"messages"`
 		MaxTokens          int            `json:"max_tokens"`
 		Temperature        float64        `json:"temperature"`
@@ -207,11 +211,8 @@ func (r *HTTPRouter) classifyEffortWithUsage(ctx context.Context, history []Turn
 	msgs = append(msgs, chatMsg{Role: "user", Content: capClassifyText(userMsg, maxClassifyUserChars)})
 
 	reqBody, err := json.Marshal(chatReq{
-		// The served model name. llama-server with a single loaded model
-		// ignores this field, which is why a stale literal here has been
-		// harmless; it is NOT resolved from the [roles.classify] chain,
-		// so a backend that validates the name would reject a failover.
-		Model:              classifyServedModelName,
+		// The resolved model's request name (see HTTPRouter.model).
+		Model:              r.model,
 		Messages:           msgs,
 		MaxTokens:          200,
 		Temperature:        0.1,
@@ -267,9 +268,6 @@ func (r *HTTPRouter) classifyEffortWithUsage(ctx context.Context, history []Turn
 const (
 	maxClassifyTurnChars = 600
 	maxClassifyUserChars = 2000
-	// classifyServedModelName is sent as the request's `model`. See the
-	// note at its use site — it is not chain-resolved.
-	classifyServedModelName = "gemma-4-26b-a4b"
 )
 
 // capClassifyText bounds s to n runes, keeping the HEAD AND TAIL and

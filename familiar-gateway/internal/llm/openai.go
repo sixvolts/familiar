@@ -408,14 +408,14 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req CompletionRequest) (*
 		ToolCalls:    toolCalls,
 		FinishReason: finishReason,
 	}
-	// Post-hoc reasoning split for models that generate untagged
-	// chain-of-thought (like Cohere2 for non-tool queries).
-	if result.ReasoningContent == "" && len(result.ToolCalls) == 0 {
-		if r, c, ok := splitUntaggedReasoning(result.Content); ok {
-			result.ReasoningContent = r
-			result.Content = c
-		}
-	}
+	// No post-hoc reasoning split here. splitUntaggedReasoning was
+	// written for Command A's untagged chain-of-thought, but ran on every
+	// answer from every OpenAI-compatible model: an ordinary reply that
+	// opened with "According to…", "Let's…" or "Okay," and later said
+	// "This is…" had everything before that sentence moved into the
+	// collapsed thinking panel, and only the tail saved as the answer.
+	// Command A is served through llama-completion with the cohere2
+	// formatter, which does its own split.
 	return result, nil
 }
 
@@ -590,13 +590,7 @@ func (p *OpenAIProvider) CompleteStream(ctx context.Context, req CompletionReque
 		ToolCalls:    toolCalls,
 		FinishReason: finishReason,
 	}
-	// Post-hoc reasoning split (same as non-streaming path).
-	if result.ReasoningContent == "" && len(result.ToolCalls) == 0 {
-		if r, c, ok := splitUntaggedReasoning(result.Content); ok {
-			result.ReasoningContent = r
-			result.Content = c
-		}
-	}
+	// No post-hoc reasoning split (see Complete).
 	return result, nil
 }
 
@@ -621,8 +615,17 @@ func (p *OpenAIProvider) HealthCheck(ctx context.Context) error {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusUnauthorized {
-		return fmt.Errorf("%s: unauthorized", p.name)
+	// Unhealthy: rejected credentials, or a server that answers but can't
+	// serve (5xx: an upstream behind a proxy is dead, or llama-server is
+	// still loading its model). Every non-401 status used to count as
+	// healthy, so a listening-but-broken primary stayed "online", every
+	// call went to it and failed, and failover never started. Other 4xx
+	// (a 404 from a server without /v1/models) still count as reachable.
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		return fmt.Errorf("%s: unauthorized (HTTP %d)", p.name, resp.StatusCode)
+	case resp.StatusCode >= 500:
+		return fmt.Errorf("%s: health HTTP %d", p.name, resp.StatusCode)
 	}
 	return nil
 }

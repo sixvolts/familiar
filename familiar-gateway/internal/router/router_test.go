@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/familiar/gateway/internal/config"
+	"github.com/familiar/gateway/internal/sidecar"
 )
 
 func noKey(string) string { return "" }
@@ -230,3 +231,20 @@ func TestGetChatModelIDUnconfiguredRoleFallsThrough(t *testing.T) {
 		t.Fatalf("empty chat chain should fall through to config selection, got %q", got)
 	}
 }
+
+// Without a chat role, chat falls back to the first role-less model;
+// an embeddings model is never it.
+func TestChatModelIDFromConfigSkipsEmbeddings(t *testing.T) {
+	r := NewRouter(config.RouterConfig{Enabled: true}, NewRegistry([]config.ModelConfig{
+		{ID: "embed/a", Provider: "embeddings", Endpoint: "e"},
+		{ID: "gpu-host/big", Provider: "llama-server", Endpoint: "e"},
+	}))
+	if got := r.GetChatModelID(); got != "gpu-host/big" {
+		t.Errorf("chat model = %q, want the generation model", got)
+	}
+}
+
+// The sidecar learns a model's configured request name through this
+// interface; if the registry stopped satisfying it, sidecar requests
+// would silently fall back to the id without its namespace.
+var _ sidecar.RequestModelNamer = (*Registry)(nil)

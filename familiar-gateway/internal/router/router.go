@@ -222,6 +222,11 @@ func (r *Router) chatModelIDFromConfig() string {
 	// research model) can share the registry without stealing chat.
 	var flagged, roleless []string
 	for id, e := range r.registry.entries {
+		// An embeddings model can't answer chat (see
+		// config.deriveChatModelID).
+		if e.Config.Provider == "embeddings" {
+			continue
+		}
 		if e.Config.Chat {
 			flagged = append(flagged, id)
 		}

@@ -48,7 +48,7 @@ func (r *HTTPRouter) chatComplete(ctx context.Context, systemPrompt, userPrompt 
 		Content string `json:"content"`
 	}
 	type chatReq struct {
-		Model              string         `json:"model"`
+		Model              string         `json:"model,omitempty"`
 		Messages           []chatMsg      `json:"messages"`
 		MaxTokens          int            `json:"max_tokens"`
 		Temperature        float64        `json:"temperature"`
@@ -73,7 +73,7 @@ func (r *HTTPRouter) chatComplete(ctx context.Context, systemPrompt, userPrompt 
 	msgs = append(msgs, chatMsg{Role: "user", Content: userPrompt})
 
 	reqBody, err := json.Marshal(chatReq{
-		Model:              "gemma-4-26b-a4b",
+		Model:              r.model,
 		Messages:           msgs,
 		MaxTokens:          maxTokens,
 		Temperature:        temperature,

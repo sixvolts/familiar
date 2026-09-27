@@ -156,6 +156,18 @@ func (r *Registry) EndpointForModel(modelID string) string {
 	return ""
 }
 
+// RequestModelFor returns the name to send as a request's `model` for a
+// registered model (config.ModelConfig.RequestModel), or the ID without
+// its namespace for an unknown one.
+func (r *Registry) RequestModelFor(modelID string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if e, ok := r.entries[modelID]; ok {
+		return e.Config.RequestModel()
+	}
+	return config.StripModelNamespace(modelID)
+}
+
 // List returns every registered model's config + current status,
 // in stable (sorted-by-ID) order. Used by the admin model-catalog
 // endpoint that drives the chat UI's model menu.

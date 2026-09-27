@@ -3,9 +3,21 @@
 # Copy to ~/.familiar/gateway.toml and edit for your deployment.
 # The gateway auto-discovers this path; override with --config <path>.
 #
-# Environment variable substitution is NOT supported in TOML values.
-# Secrets (API keys, bot tokens) go inline; move to the vault once
-# you have one set up.
+# Secrets: this file holds the database password, API keys, bot tokens
+# and the VAPID signing key, so keep it private (chmod 600; the gateway
+# warns when others can read it). There is no vault.
+#
+# Environment variables: $VAR and ${VAR} are expanded in memory.local_dsn,
+# model api_key and endpoint, [embedder].endpoint, the Slack tokens, the
+# Brave and PirateWeather keys, the [push] VAPID keys and subject, and
+# path fields (which also expand a leading ~/). Write $$ for a literal $
+# (a password containing $, say); a $ that names no set variable is
+# dropped, with a warning naming the field. A model that sets
+# vault_key (any name) and no api_key reads its key from the
+# environment variable FAMILIAR_<ID>_KEY (its id uppercased, other
+# characters as _).
+#
+# Unknown keys are reported at boot ("... isn't a config key").
 #
 # ─── Minimum viable config ──────────────────────────────────────────
 # To get a working single-user install, you need:
@@ -77,12 +89,9 @@ help_notes    = ""                    # freeform guidance injected into the tool
 # Keep this list small — it's meant for the owner and any accounts
 # that must survive a database reset, not for day-to-day users.
 
-# OWNER-MIGRATION: the legacy "owner" canonical_id was retired in
-# favour of an explicit per-user identifier (e.g. "operator", "ali").
-# Pre-migration deploys can rename their data with
-# `internal/db/migrate.go`'s "owner_to_operator_rename" step; new
-# deploys should seed themselves with the canonical_id they actually
-# want. Examples below use "operator" — substitute your own.
+# Seed yourself with the canonical_id you want (a per-user identifier
+# such as "operator" or "ali"). Examples below use "operator" —
+# substitute your own.
 #
 # [[identity.seed]]
 # platform     = "cli"
@@ -92,7 +101,7 @@ help_notes    = ""                    # freeform guidance injected into the tool
 #
 # [[identity.seed]]
 # platform     = "openai"
-# platform_id  = "operator@example.com"  # email used in X-User-Email header
+# platform_id  = "operator@example.com"
 # canonical_id = "operator"
 # display_name = "Operator"
 #
@@ -124,8 +133,8 @@ history_file = "~/.familiar/cli_history"
 # listener, and the gateway serves plain HTTP. Bind wider only if the
 # workspace runs on another host, and firewall the port to it.
 listen_addr = "127.0.0.1:8000"
-# OWNER-MIGRATION removed the default_sender_id field. Requests with no
-# X-User-Email header and no admin session cookie now return 401.
+# Requests with no admin session cookie (or shard token, on the shard
+# API) get 401.
 
 [adapter.slack]
 # Slack Socket Mode adapter. Requires app_mentions:read, chat:write,
@@ -363,7 +372,6 @@ pool_size = 50                        # hybrid candidates fed to the reranker
 window_size = 32768
 output_reservation = 4096
 system_prompt_ratio   = 0.10          # ~10% system prompt + tool schemas
-working_context_ratio = 0.05          # ~5% user profile (Layer 1)
 memory_ratio          = 0.12          # ~12% retrieved memories
 tool_result_ratio     = 0.12          # ~12% skill output
 # Per-result cap: a single tool result is head+tail truncated to this
@@ -563,12 +571,11 @@ first_user_id   = "operator"
 # Legacy single-RP form. Used when no [[admin.relying_party]] blocks
 # above are configured. rp_id must be the hostname the browser sees
 # (no scheme, no port); rp_origins must list every scheme+host+port
-# the UI is loaded from.
+# the UI is loaded from — the workspace's, not this gateway's (the
+# workspace serves the UI; :3000 without TLS, :8443 with it).
 rp_id = "localhost"
 rp_origins = [
-    "http://localhost:8000",
-    # "http://100.64.0.1:8000",     # Tailscale
-    # "http://10.0.0.104:8000",    # LAN
+    "http://localhost:3000",
     # "https://your-host.ts.net:8443",
 ]
 

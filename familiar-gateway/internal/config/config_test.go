@@ -26,7 +26,7 @@ func TestExpandPath(t *testing.T) {
 		t.Skip("cannot determine home dir")
 	}
 
-	got := expandPath("~/some/path")
+	got := expandPath("test", "~/some/path")
 	expected := filepath.Join(home, "some/path")
 	if got != expected {
 		t.Fatalf("expected %q, got %q", expected, got)
@@ -34,7 +34,7 @@ func TestExpandPath(t *testing.T) {
 }
 
 func TestExpandPathNoTilde(t *testing.T) {
-	got := expandPath("/absolute/path")
+	got := expandPath("test", "/absolute/path")
 	if got != "/absolute/path" {
 		t.Fatalf("expected /absolute/path, got %q", got)
 	}
@@ -72,7 +72,7 @@ fallback_model = "test-model"
 
 func TestExpandEnv(t *testing.T) {
 	t.Setenv("FAMILIAR_TEST_VAR", "hello")
-	got := expandEnv("prefix-$FAMILIAR_TEST_VAR-suffix")
+	got := expandEnv("test", "prefix-$FAMILIAR_TEST_VAR-suffix")
 	if !strings.Contains(got, "hello") {
 		t.Fatalf("expected env expansion, got %q", got)
 	}

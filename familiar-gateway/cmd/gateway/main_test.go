@@ -57,6 +57,7 @@ enabled = false
 
 [[models]]
 id = "test/dummy"
+provider = "llama-server"
 endpoint = "http://127.0.0.1:1"
 role = "small"
 `, filepath.Join(dir, "skills"))

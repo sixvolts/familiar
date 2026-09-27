@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -59,25 +60,30 @@ func (c *Config) Validate() error {
 	if c.Memory.DedupThreshold < 0 || c.Memory.DedupThreshold > 1 {
 		return fmt.Errorf("memory.dedup_threshold must be in [0,1] (got %v)", c.Memory.DedupThreshold)
 	}
-	if c.Memory.DedupThreshold > 0 && c.Memory.DedupThreshold < c.Memory.RelevanceThreshold {
-		return fmt.Errorf("memory.dedup_threshold (%v) must be >= memory.relevance_threshold (%v)",
-			c.Memory.DedupThreshold, c.Memory.RelevanceThreshold)
-	}
 	if c.Memory.SupersedeThreshold < 0 || c.Memory.SupersedeThreshold > 1 {
 		return fmt.Errorf("memory.supersede_threshold must be in [0,1] (got %v)", c.Memory.SupersedeThreshold)
+	}
+	// The ordering relevance <= supersede <= dedup is checked on the
+	// values that run, defaults included: an unset supersede_threshold
+	// runs at its default, which went unchecked against a raised
+	// relevance or lowered dedup threshold.
+	relevance := c.Memory.RelevanceThreshold
+	supersede := c.Memory.SupersedeThresholdOrDefault()
+	dedup := c.Memory.DedupThresholdOrDefault()
+	if dedup < relevance {
+		return fmt.Errorf("memory.dedup_threshold (%v) must be >= memory.relevance_threshold (%v)", dedup, relevance)
 	}
 	// Superseding hides a row, so it must demand at least as much
 	// confidence as merely retrieving one. A floor below the retrieval
 	// threshold would let an extraction bury facts it would not even have
 	// been shown.
-	if c.Memory.SupersedeThreshold > 0 && c.Memory.SupersedeThreshold < c.Memory.RelevanceThreshold {
-		return fmt.Errorf("memory.supersede_threshold (%v) must be >= memory.relevance_threshold (%v) — superseding hides a fact, so it needs more confidence than retrieving one",
-			c.Memory.SupersedeThreshold, c.Memory.RelevanceThreshold)
+	if supersede < relevance {
+		return fmt.Errorf("memory.supersede_threshold (%v%s) must be >= memory.relevance_threshold (%v) — superseding hides a fact, so it needs more confidence than retrieving one",
+			supersede, defaultNote(c.Memory.SupersedeThreshold), relevance)
 	}
-	if c.Memory.SupersedeThreshold > 0 && c.Memory.DedupThreshold > 0 &&
-		c.Memory.SupersedeThreshold > c.Memory.DedupThreshold {
-		return fmt.Errorf("memory.supersede_threshold (%v) must be <= memory.dedup_threshold (%v) — a fact similar enough to be a duplicate is skipped before it can supersede anything",
-			c.Memory.SupersedeThreshold, c.Memory.DedupThreshold)
+	if supersede > dedup {
+		return fmt.Errorf("memory.supersede_threshold (%v%s) must be <= memory.dedup_threshold (%v) — a fact similar enough to be a duplicate is skipped before it can supersede anything",
+			supersede, defaultNote(c.Memory.SupersedeThreshold), dedup)
 	}
 
 	// At least one model must be configured and each entry must have an
@@ -94,6 +100,14 @@ func (c *Config) Validate() error {
 		}
 		if m.Endpoint == "" {
 			return fmt.Errorf("models[%d] (%s): endpoint is required", i, m.ID)
+		}
+		// Checked here, not on the first call: a typo or a removed
+		// provider ("anthropic") booted fine and failed every request.
+		if !KnownProviders[m.Provider] {
+			return fmt.Errorf("models[%d] (%s): unknown provider %q (want one of %s)", i, m.ID, m.Provider, knownList(KnownProviders))
+		}
+		if m.Provider == "llama-completion" && !KnownFormatters[m.Formatter] {
+			return fmt.Errorf("models[%d] (%s): unknown formatter %q (want one of %s)", i, m.ID, m.Formatter, knownList(KnownFormatters))
 		}
 		modelIDs[m.ID] = struct{}{}
 
@@ -226,6 +240,9 @@ func (c *Config) Validate() error {
 	}
 	for _, knob := range c.ignored {
 		log.Printf("[config] warning: %s is set but does nothing; remove it", knob)
+	}
+	for _, key := range c.unknown {
+		log.Printf("[config] warning: %s isn't a config key (a typo, or renamed or removed) and is ignored", key)
 	}
 
 	// Heartbeat tuning — coerce non-positive values to defaults with a
@@ -376,6 +393,44 @@ var ignoredKeys = [][]string{
 	{"sidecar", "socket_path"},
 	{"sidecar", "condense_model"},
 	{"roles", "condense"},
+}
+
+// KnownProviders are the [[models]] provider values the router builds
+// (router.buildProvider; a router test keeps the two in step).
+var KnownProviders = map[string]bool{
+	"llama-server": true, "openai": true, "ollama": true, "vllm": true,
+	"embeddings": true, "llama-completion": true,
+}
+
+// KnownFormatters are the llama-completion formatters (router.pickFormatter).
+var KnownFormatters = map[string]bool{"": true, "qwen35": true, "cohere2": true}
+
+func knownList(m map[string]bool) string {
+	var out []string
+	for k := range m {
+		if k != "" {
+			out = append(out, fmt.Sprintf("%q", k))
+		}
+	}
+	sort.Strings(out)
+	return strings.Join(out, ", ")
+}
+
+// defaultNote marks a threshold that wasn't set.
+func defaultNote(set float64) string {
+	if set > 0 {
+		return ""
+	}
+	return ", the default"
+}
+
+// UnknownKeys lists the keys in the file that match no config field.
+func UnknownKeys(md toml.MetaData) []string {
+	var out []string
+	for _, k := range md.Undecoded() {
+		out = append(out, k.String())
+	}
+	return out
 }
 
 // ignoredKnobs names the ignoredKeys the file sets.

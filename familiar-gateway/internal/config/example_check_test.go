@@ -21,6 +21,12 @@ func TestConfigExampleParsesAndValidates(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("config.example.toml does not validate: %v", err)
 	}
+	// Every key it shows is one the gateway reads: an unknown key is
+	// ignored at boot, and operators copy them (working_context_ratio
+	// sat here long after nothing read it).
+	if len(cfg.unknown) > 0 {
+		t.Errorf("config.example.toml sets keys the gateway doesn't know: %v", cfg.unknown)
+	}
 	// The example's chat role should resolve to the heavy backend it
 	// documents, via the chat=true/lex-order derivation.
 	if cfg.Roles.Chat.Primary == "" {

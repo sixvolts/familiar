@@ -15,7 +15,7 @@ import (
 // pins it: an empty-owner upsert must be rejected, a real-owner one
 // must succeed. (DB-gated like the other relationships suites.)
 func TestUpsertRelationships_RejectsEmptyUserID(t *testing.T) {
-	pool := testutil.PgTestPool(t)
+	pool := testutil.PgScopedPool(t, "memory_rel_test")
 	testutil.TruncateTables(t, pool, "relationships")
 	s, err := NewPgRelationshipStore(pool)
 	if err != nil {

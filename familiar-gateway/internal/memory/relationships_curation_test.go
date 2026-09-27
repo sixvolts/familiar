@@ -22,7 +22,7 @@ func countRelsWhere(t *testing.T, s *PgRelationshipStore, where string, args ...
 }
 
 func TestMergeEntities_RewritesDedupesAndDropsSelfLoops(t *testing.T) {
-	pool := testutil.PgTestPool(t)
+	pool := testutil.PgScopedPool(t, "memory_rel_test")
 	testutil.TruncateTables(t, pool, "relationships")
 	s, err := NewPgRelationshipStore(pool)
 	if err != nil {
@@ -68,7 +68,7 @@ func TestMergeEntities_RewritesDedupesAndDropsSelfLoops(t *testing.T) {
 }
 
 func TestUpdateRelationship_EditsAndConflicts(t *testing.T) {
-	pool := testutil.PgTestPool(t)
+	pool := testutil.PgScopedPool(t, "memory_rel_test")
 	testutil.TruncateTables(t, pool, "relationships")
 	s, err := NewPgRelationshipStore(pool)
 	if err != nil {

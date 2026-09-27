@@ -13,7 +13,7 @@ import (
 // turns are already excluded. A global triple (no scope_tag) and a
 // triple scoped to a NON-isolated shard both stay visible.
 func TestRelationshipRetrieval_ExcludesIsolatedShardTriples(t *testing.T) {
-	pool := testutil.PgTestPool(t)
+	pool := testutil.PgScopedPool(t, "memory_rel_test")
 	testutil.TruncateTables(t, pool, "relationships")
 	s, err := NewPgRelationshipStore(pool)
 	if err != nil {
@@ -82,7 +82,7 @@ func TestRelationshipRetrieval_ExcludesIsolatedShardTriples(t *testing.T) {
 // isolated tag on it, hiding the owner's triple from top-level
 // retrieval. A trusted-path write may still take over a shard triple.
 func TestUpsertRelationships_ShardCannotClobberTopLevelTriple(t *testing.T) {
-	pool := testutil.PgTestPool(t)
+	pool := testutil.PgScopedPool(t, "memory_rel_test")
 	testutil.TruncateTables(t, pool, "relationships")
 	s, err := NewPgRelationshipStore(pool)
 	if err != nil {

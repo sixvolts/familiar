@@ -440,14 +440,23 @@
         // wheel/key handlers below detach SYNCHRONOUSLY on an upward
         // gesture so a streamed token arriving in the same frame can't
         // re-yank before the (async) scroll event recomputes — without
-        // that, our own scroll-to-bottom would fight the user.
+        // that, our own scroll-to-bottom would fight the user. A
+        // scrollbar drag or a touch scroll fires neither, so
+        // autoscrollIfStuck also checks for itself: moved up since our
+        // last snap and away from the bottom means let go now. (Content
+        // growing below doesn't move scrollTop; content shrinking clamps
+        // it, but to the bottom.)
         let stickToBottom = true;
+        let lastSnap = messagesEl.scrollTop;
         const NEAR_BOTTOM_PX = 64;
         function isNearBottom() {
             return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight <= NEAR_BOTTOM_PX;
         }
         function autoscrollIfStuck() {
-            if (stickToBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
+            if (messagesEl.scrollTop < lastSnap - 2 && !isNearBottom()) stickToBottom = false;
+            if (!stickToBottom) return;
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+            lastSnap = messagesEl.scrollTop;
         }
         messagesEl.addEventListener("scroll", () => {
             lastScrollTop = messagesEl.scrollTop;
@@ -1478,6 +1487,7 @@
             // during the previous turn.
             stickToBottom = true;
             messagesEl.scrollTop = messagesEl.scrollHeight;
+            lastSnap = messagesEl.scrollTop;
 
             // Persist the user message before calling the LLM —
             // makes resume-after-refresh work even mid-stream.

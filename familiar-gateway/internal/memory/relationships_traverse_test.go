@@ -35,7 +35,7 @@ func seedEdges(t *testing.T, s *PgRelationshipStore) {
 }
 
 func TestTraverseFrom_Depth1(t *testing.T) {
-	pool := testutil.PgTestPool(t)
+	pool := testutil.PgScopedPool(t, "memory_rel_test")
 	testutil.TruncateTables(t, pool, "relationships")
 	s, err := NewPgRelationshipStore(pool)
 	if err != nil {
@@ -79,7 +79,7 @@ func TestTraverseFrom_Depth1(t *testing.T) {
 }
 
 func TestTraverseFrom_Depth2ReachesGPU(t *testing.T) {
-	pool := testutil.PgTestPool(t)
+	pool := testutil.PgScopedPool(t, "memory_rel_test")
 	testutil.TruncateTables(t, pool, "relationships")
 	s, err := NewPgRelationshipStore(pool)
 	if err != nil {
@@ -116,7 +116,7 @@ func TestTraverseFrom_Depth2ReachesGPU(t *testing.T) {
 }
 
 func TestTraverseFrom_Depth3ReachesGPU(t *testing.T) {
-	pool := testutil.PgTestPool(t)
+	pool := testutil.PgScopedPool(t, "memory_rel_test")
 	testutil.TruncateTables(t, pool, "relationships")
 	s, err := NewPgRelationshipStore(pool)
 	if err != nil {
@@ -140,7 +140,7 @@ func TestTraverseFrom_Depth3ReachesGPU(t *testing.T) {
 }
 
 func TestTraverseFrom_CycleTerminates(t *testing.T) {
-	pool := testutil.PgTestPool(t)
+	pool := testutil.PgScopedPool(t, "memory_rel_test")
 	testutil.TruncateTables(t, pool, "relationships")
 	s, err := NewPgRelationshipStore(pool)
 	if err != nil {
@@ -161,7 +161,7 @@ func TestTraverseFrom_CycleTerminates(t *testing.T) {
 }
 
 func TestTraverseFrom_DepthClamp(t *testing.T) {
-	pool := testutil.PgTestPool(t)
+	pool := testutil.PgScopedPool(t, "memory_rel_test")
 	testutil.TruncateTables(t, pool, "relationships")
 	s, err := NewPgRelationshipStore(pool)
 	if err != nil {
@@ -185,7 +185,7 @@ func TestTraverseFrom_DepthClamp(t *testing.T) {
 }
 
 func TestEntityVocab_FindIn(t *testing.T) {
-	pool := testutil.PgTestPool(t)
+	pool := testutil.PgScopedPool(t, "memory_rel_test")
 	testutil.TruncateTables(t, pool, "relationships")
 	s, err := NewPgRelationshipStore(pool)
 	if err != nil {

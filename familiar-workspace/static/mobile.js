@@ -1040,12 +1040,28 @@
             // scrolling up to re-read (the code they pasted, an earlier
             // answer) used to be undone by every token. Back at the
             // bottom, it follows again.
+            //
+            // The scroll event that reports the reader moving up arrives a
+            // frame late, and a token handled in between saw the stale
+            // flag and snapped the view back: on a fast stream the reader
+            // was pinned to the bottom. So follow() also looks for itself:
+            // moved up since our last snap and away from the bottom means
+            // let go now. (Content growing below doesn't move scrollTop;
+            // content shrinking clamps it, but to the bottom.) The scroll
+            // event still re-attaches on the way back down.
             var stuck = true;
-            var onThreadScroll = function () {
-                stuck = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 40;
+            var lastSnap = scroll.scrollTop;
+            var fromBottom = function () {
+                return scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight;
             };
+            var onThreadScroll = function () { stuck = fromBottom() < 40; };
             scroll.addEventListener('scroll', onThreadScroll, { passive: true });
-            var follow = function () { if (stuck) scroll.scrollTop = scroll.scrollHeight; };
+            var follow = function () {
+                if (scroll.scrollTop < lastSnap - 2 && fromBottom() >= 40) stuck = false;
+                if (!stuck) return;
+                scroll.scrollTop = scroll.scrollHeight;
+                lastSnap = scroll.scrollTop;
+            };
 
             var sendBtn = document.querySelector('.mob-thread-send');
             state.streaming = true;

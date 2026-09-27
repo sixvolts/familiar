@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/familiar/gateway/internal/db"
+	"github.com/familiar/gateway/internal/testdsn"
 	_ "github.com/lib/pq"
 )
 
@@ -66,6 +67,34 @@ func PgTestPool(t *testing.T) *db.Pool {
 		t.Fatalf("db.Migrate: %v", err)
 	}
 	t.Cleanup(func() { _ = pool.Close() })
+	return pool
+}
+
+// PgScopedPool is PgTestPool on the package's own schema (created and
+// migrated if needed): its tables are not the public schema's, which
+// other packages' tests write and truncate at the same time. Two packages
+// sharing public tables deadlocked there (a shard deletion's purge
+// against another package's TRUNCATE).
+func PgScopedPool(t *testing.T, schema string) *db.Pool {
+	t.Helper()
+	dsn := os.Getenv(EnvDSN)
+	if dsn == "" {
+		t.Skipf("skipping: %s not set", EnvDSN)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	admin := PgTestDB(t)
+	if _, err := admin.ExecContext(ctx, `CREATE SCHEMA IF NOT EXISTS `+schema); err != nil {
+		t.Fatalf("create schema %s: %v", schema, err)
+	}
+	pool, err := db.Open(testdsn.Scoped(t, dsn, schema))
+	if err != nil {
+		t.Fatalf("db.Open (%s schema): %v", schema, err)
+	}
+	t.Cleanup(func() { _ = pool.Close() })
+	if err := db.Migrate(ctx, pool); err != nil {
+		t.Fatalf("db.Migrate (%s schema): %v", schema, err)
+	}
 	return pool
 }
 

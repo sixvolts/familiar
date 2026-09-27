@@ -217,7 +217,7 @@
                 <circle class="fmark-loader-dot" cx="198.69" cy="146.74" r="7.817" fill="#E8BE55"/>
             </g>
         </svg>
-        <div class="micro">Checking session</div>
+        <div class="micro" id="view-loading-msg" role="status">Checking session</div>
     </div>
 </main>
 
@@ -332,8 +332,7 @@
         </a>
 
         <!-- Home row — muted gray, neutral active state. Clicking
-             switches workspace mode to 'home' (lands in Phase 3b;
-             for now this is a no-op so nothing breaks). -->
+             opens the Home panel. -->
         <a href="#" class="sidebar-row sidebar-home" data-mode="home" id="sidebar-home-row">
             <span class="sidebar-glyph" aria-hidden="true">
                 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
@@ -353,83 +352,91 @@
              Order: Chat → Notes → Wiki → Shards (Home stays the
              row above this group). -->
         <div class="sidebar-categories">
-            <a href="#" class="sidebar-row sidebar-cat sidebar-cat-chat is-active" data-surface="chat" data-category="chat">
-                <span class="sidebar-glyph" aria-hidden="true">
-                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M4 5.5 a2 2 0 0 1 2 -2 h12 a2 2 0 0 1 2 2 v9 a2 2 0 0 1 -2 2 H9 l-4 3.5 V5.5 Z"/>
-                    </svg>
-                </span>
-                <span class="sidebar-row-label">Chat</span>
-                <span class="sidebar-row-count" id="sidebar-count-chat"></span>
+            <div class="sidebar-row sidebar-cat sidebar-cat-chat is-active" data-surface="chat" data-category="chat">
+                <a href="#" class="sidebar-cat-main">
+                    <span class="sidebar-glyph" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M4 5.5 a2 2 0 0 1 2 -2 h12 a2 2 0 0 1 2 2 v9 a2 2 0 0 1 -2 2 H9 l-4 3.5 V5.5 Z"/>
+                        </svg>
+                    </span>
+                    <span class="sidebar-row-label">Chat</span>
+                    <span class="sidebar-row-count" id="sidebar-count-chat"></span>
+                </a>
                 <button class="sidebar-cat-new" type="button" aria-label="New chat">+</button>
-                <span class="sidebar-row-chevron" aria-hidden="true">›</span>
-            </a>
-            <a href="#" class="sidebar-row sidebar-cat sidebar-cat-notes" data-surface="notes" data-category="notes">
-                <span class="sidebar-glyph" aria-hidden="true">
-                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M6 3 h8 l5 5 v12 a1.5 1.5 0 0 1 -1.5 1.5 H6 a1.5 1.5 0 0 1 -1.5 -1.5 V4.5 A1.5 1.5 0 0 1 6 3 Z"/>
-                        <path d="M14 3 v3.5 A1.5 1.5 0 0 0 15.5 8 H19"/>
-                    </svg>
-                </span>
-                <span class="sidebar-row-label">Notes</span>
-                <span class="sidebar-row-count" id="sidebar-count-notes"></span>
+                <button class="sidebar-row-chevron" type="button" aria-expanded="false" aria-label="Show recent chats">›</button>
+            </div>
+            <div class="sidebar-row sidebar-cat sidebar-cat-notes" data-surface="notes" data-category="notes">
+                <a href="#" class="sidebar-cat-main">
+                    <span class="sidebar-glyph" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M6 3 h8 l5 5 v12 a1.5 1.5 0 0 1 -1.5 1.5 H6 a1.5 1.5 0 0 1 -1.5 -1.5 V4.5 A1.5 1.5 0 0 1 6 3 Z"/>
+                            <path d="M14 3 v3.5 A1.5 1.5 0 0 0 15.5 8 H19"/>
+                        </svg>
+                    </span>
+                    <span class="sidebar-row-label">Notes</span>
+                    <span class="sidebar-row-count" id="sidebar-count-notes"></span>
+                </a>
                 <button class="sidebar-cat-new" type="button" aria-label="New note">+</button>
-                <span class="sidebar-row-chevron" aria-hidden="true">›</span>
-            </a>
-            <a href="#" class="sidebar-row sidebar-cat sidebar-cat-wiki" data-surface="wiki" data-category="wiki">
-                <span class="sidebar-glyph" aria-hidden="true">
-                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-                        <rect x="4" y="6" width="4" height="14" rx="1"/>
-                        <path d="M4 9.5 H8"/>
-                        <rect x="9" y="4.5" width="4" height="15.5" rx="1"/>
-                        <path d="M9 8 H13"/>
-                        <path d="M15.2 6.3 l3.6 -1 a1 1 0 0 1 1.25 0.7 l3.3 12.0 a1 1 0 0 1 -0.7 1.25 l-3.6 1 a1 1 0 0 1 -1.25 -0.7 l-3.3 -12.0 a1 1 0 0 1 0.7 -1.25 Z"/>
-                        <path d="M16.6 9.7 L20.2 8.7"/>
-                    </svg>
-                </span>
-                <span class="sidebar-row-label">Wiki</span>
-                <span class="sidebar-row-count" id="sidebar-count-wiki"></span>
+                <button class="sidebar-row-chevron" type="button" aria-expanded="false" aria-label="Show notes">›</button>
+            </div>
+            <div class="sidebar-row sidebar-cat sidebar-cat-wiki" data-surface="wiki" data-category="wiki">
+                <a href="#" class="sidebar-cat-main">
+                    <span class="sidebar-glyph" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="4" y="6" width="4" height="14" rx="1"/>
+                            <path d="M4 9.5 H8"/>
+                            <rect x="9" y="4.5" width="4" height="15.5" rx="1"/>
+                            <path d="M9 8 H13"/>
+                            <path d="M15.2 6.3 l3.6 -1 a1 1 0 0 1 1.25 0.7 l3.3 12.0 a1 1 0 0 1 -0.7 1.25 l-3.6 1 a1 1 0 0 1 -1.25 -0.7 l-3.3 -12.0 a1 1 0 0 1 0.7 -1.25 Z"/>
+                            <path d="M16.6 9.7 L20.2 8.7"/>
+                        </svg>
+                    </span>
+                    <span class="sidebar-row-label">Wiki</span>
+                    <span class="sidebar-row-count" id="sidebar-count-wiki"></span>
+                </a>
                 <button class="sidebar-cat-new" type="button" aria-label="New book">+</button>
-                <span class="sidebar-row-chevron" aria-hidden="true">›</span>
-            </a>
-            <a href="#" class="sidebar-row sidebar-cat sidebar-cat-shards" data-surface="shards" data-category="shards">
-                <span class="sidebar-glyph" aria-hidden="true">
-                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M14 2.2 L20.5 9.6 L17.2 21.6 L7.4 19.0 L4.2 12.4 Z"/>
-                        <path d="M14 2.2 L10.4 11.6 L4.2 12.4"/>
-                        <path d="M10.4 11.6 L17.2 21.6"/>
-                        <path d="M10.4 11.6 L20.5 9.6"/>
-                    </svg>
-                </span>
-                <span class="sidebar-row-label">Shards</span>
-                <span class="sidebar-row-count" id="sidebar-count-shards"></span>
+                <button class="sidebar-row-chevron" type="button" aria-expanded="false" aria-label="Show books">›</button>
+            </div>
+            <div class="sidebar-row sidebar-cat sidebar-cat-shards" data-surface="shards" data-category="shards">
+                <a href="#" class="sidebar-cat-main">
+                    <span class="sidebar-glyph" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M14 2.2 L20.5 9.6 L17.2 21.6 L7.4 19.0 L4.2 12.4 Z"/>
+                            <path d="M14 2.2 L10.4 11.6 L4.2 12.4"/>
+                            <path d="M10.4 11.6 L17.2 21.6"/>
+                            <path d="M10.4 11.6 L20.5 9.6"/>
+                        </svg>
+                    </span>
+                    <span class="sidebar-row-label">Shards</span>
+                    <span class="sidebar-row-count" id="sidebar-count-shards"></span>
+                </a>
                 <button class="sidebar-cat-new" type="button" aria-label="New shard">+</button>
-                <span class="sidebar-row-chevron" aria-hidden="true">›</span>
-            </a>
+                <button class="sidebar-row-chevron" type="button" aria-expanded="false" aria-label="Show shards">›</button>
+            </div>
             <!-- Scheduled actions — opens the panel directly.
                  Teal accent, shared with the Home action card. -->
-            <a href="#" class="sidebar-row sidebar-cat sidebar-cat-scheduled" data-surface="scheduled" data-category="scheduled">
-                <span class="sidebar-glyph" aria-hidden="true">
-                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-                        <circle cx="12" cy="12" r="9"/>
-                        <path d="M12 7.5 V12 L15 14"/>
-                    </svg>
-                </span>
-                <span class="sidebar-row-label">Actions</span>
-                <span class="sidebar-row-count" id="sidebar-count-scheduled"></span>
+            <div class="sidebar-row sidebar-cat sidebar-cat-scheduled" data-surface="scheduled" data-category="scheduled">
+                <a href="#" class="sidebar-cat-main">
+                    <span class="sidebar-glyph" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="12" cy="12" r="9"/>
+                            <path d="M12 7.5 V12 L15 14"/>
+                        </svg>
+                    </span>
+                    <span class="sidebar-row-label">Actions</span>
+                    <span class="sidebar-row-count" id="sidebar-count-scheduled"></span>
+                </a>
                 <button class="sidebar-cat-new" type="button" aria-label="New action">+</button>
-                <span class="sidebar-row-chevron" aria-hidden="true">›</span>
-            </a>
+                <button class="sidebar-row-chevron" type="button" aria-expanded="false" aria-label="Show scheduled actions">›</button>
+            </div>
         </div>
 
         <!-- Flex spacer pushes the user footer to the bottom regardless
              of how many child rows are expanded above. -->
         <div class="sidebar-spacer"></div>
 
-        <!-- User / Config footer — clicking opens the User panel as a
-             workspace replacement (Phase 3c). For now this is a
-             rendered shell; the click handler is a no-op so we don't
-             black out the workspace. -->
+        <!-- User / Config footer — clicking opens the User panel
+             (for a shard session, a small popover with Sign out). -->
         <a href="#" class="sidebar-user" id="sidebar-user-row" data-mode="user">
             <span class="sidebar-user-avatar" id="sidebar-user-avatar" aria-hidden="true"></span>
             <span class="sidebar-user-text">
@@ -465,7 +472,7 @@
             <div class="home-grid">
 
                 <!-- ── Quadrant 1: Pinned ── -->
-                <div class="home-slot">
+                <div class="home-slot" id="home-block-pinned">
                     <section class="home-card fill">
                         <div class="home-card-hd">
                             <svg class="home-card-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--mark)" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/></svg>
@@ -487,7 +494,7 @@
                         <span class="home-ac-icon"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3 h8 l5 5 v12 a1.5 1.5 0 0 1 -1.5 1.5 H6 a1.5 1.5 0 0 1 -1.5 -1.5 V4.5 A1.5 1.5 0 0 1 6 3 Z"/><path d="M14 3 v3.5 A1.5 1.5 0 0 0 15.5 8 H19"/></svg></span>
                         <span class="home-ac-label">New note</span>
                     </button>
-                    <button class="home-action-card chats" id="home-act-chat" type="button">
+                    <button class="home-action-card chats needs-chat" id="home-act-chat" type="button">
                         <span class="home-ac-icon"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5 a2 2 0 0 1 2 -2 h12 a2 2 0 0 1 2 2 v9 a2 2 0 0 1 -2 2 H9 l-4 3.5 V5.5 Z"/></svg></span>
                         <span class="home-ac-label">New chat</span>
                     </button>
@@ -502,7 +509,7 @@
                 </div>
 
                 <!-- ── Quadrant 3: Recent ── -->
-                <div class="home-slot">
+                <div class="home-slot" id="home-block-recent">
                     <section class="home-card fill">
                         <div class="home-card-hd">
                             <svg class="home-card-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--fg-1)" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/></svg>
@@ -515,7 +522,7 @@
                 </div>
 
                 <!-- ── Quadrant 4: Weather ── -->
-                <div class="home-slot">
+                <div class="home-slot" id="home-block-weather">
                     <section class="home-card home-wx fill" id="home-weather">
                         <div class="home-empty" style="padding:22px">Loading…</div>
                     </section>
@@ -804,6 +811,28 @@
         </div>
     </section>
 
+    <section class="dash-section">
+        <header class="section-header">
+            <div>
+                <h2 class="section-title">Model roles</h2>
+            </div>
+        </header>
+        <div class="memory-table-wrap">
+            <table class="memory-table">
+                <thead>
+                    <tr>
+                        <th class="col-content">Role</th>
+                        <th>Serving</th>
+                        <th>Failover chain</th>
+                    </tr>
+                </thead>
+                <tbody id="dash-roles-rows">
+                    <tr class="row-empty"><td colspan="3">Loading</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
     <section class="dash-section admin-only">
         <header class="section-header">
             <div>
@@ -836,6 +865,10 @@
     </section>
 
     <section id="panel-users" class="panel" hidden>
+    <div id="users-load-error" class="error" hidden>
+        <span id="users-load-error-msg"></span>
+        <button type="button" id="users-load-retry" class="btn-ghost btn-small">Retry</button>
+    </div>
     <section id="users-section" class="users-section" hidden>
         <header class="section-header">
             <div>
@@ -2139,13 +2172,10 @@
          were ambient clutter that didn't earn their persistent
          28px. The per-surface "N words / N messages" context
          readout it carried can come back as an inline indicator
-         inside the active panel later if it's missed. The setter
-         API window.familiarStatusBar.setContext() stays as a
-         no-op so existing call sites in chat.js / notes.js don't
-         break (the element they target just doesn't exist now). -->
+         inside the active panel later if it's missed. -->
 </main>
 
-<div id="toast-container" class="toast-container"></div>
+<div id="toast-container" class="toast-container" role="status" aria-live="polite"></div>
 
 <script src="/app.js?v=20260704g"></script>
 <!-- Panel modules — each one is lazy-init'd by app.js's panel

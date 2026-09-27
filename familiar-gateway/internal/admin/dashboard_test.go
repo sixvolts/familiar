@@ -621,3 +621,39 @@ func containsExact(haystack, needle string) bool {
 	}
 	return false
 }
+
+// The dashboard reads each session's LastActive while turns land on it.
+// It read the field without the session's lock; run with -race, that
+// was a detected data race (and a torn time.Time could mis-sort).
+func TestDashboardSessions_ReadLastActiveUnderTheLock(t *testing.T) {
+	h, _, _, sl, _, _ := makeDashHandler()
+	s := sl.sessions[0]
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				s.AddMessage(session.Turn{Role: "user", Content: "hi", Timestamp: time.Now()})
+			}
+		}
+	}()
+	for i := 0; i < 300; i++ {
+		for _, path := range []string{"/console/api/dashboard/overview", "/console/api/dashboard/recent_sessions"} {
+			req := httptest.NewRequest("GET", path, nil).WithContext(ctxWithAuth(context.Background(), operatorAdmin()))
+			rec := httptest.NewRecorder()
+			if path == "/console/api/dashboard/overview" {
+				h.dashboardOverview(rec, req)
+			} else {
+				h.dashboardRecentSessions(rec, req)
+			}
+		}
+		chatReq := httptest.NewRequest("GET", "/console/api/chat/sessions", nil).WithContext(ctxWithAuth(context.Background(), operatorAdmin()))
+		h.listChatSessions(httptest.NewRecorder(), chatReq)
+	}
+	close(stop)
+	<-done
+}

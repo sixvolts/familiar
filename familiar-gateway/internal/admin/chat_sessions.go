@@ -107,7 +107,7 @@ func (h *Handler) listChatSessions(w http.ResponseWriter, r *http.Request) {
 			Platform:        s.Platform(),
 			CanonicalID:     s.CanonicalID(),
 			CreatedAt:       s.CreatedAt,
-			LastActive:      s.LastActive,
+			LastActive:      s.LastActiveAt(),
 			Turns:           turns,
 			SummarizedTurns: s.SummarizedCountSnapshot(),
 			HasSummary:      strings.TrimSpace(summary) != "",

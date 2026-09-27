@@ -143,22 +143,7 @@
 
     const shells = new Map(); // tab.id -> { root, model }
 
-    // updateStatusBar pushes the notes-tab's context-sensitive
-    // status text (DESIGN.md: "N words · N backlinks").
-    // Backlinks are a future-add — the wiki surface will own
-    // that graph; for now ship 0.
-    function updateStatusBar(content) {
-        const sb = window.familiarStatusBar;
-        if (!sb || !sb.setContext) return;
-        const text = (content || "").trim();
-        const words = text === "" ? 0 : text.split(/\s+/).length;
-        sb.setContext(words + " word" + (words === 1 ? "" : "s") + " · 0 backlinks");
-    }
-
     function render(host, tab) {
-        // Push initial status; the per-tab model below pushes
-        // fresh counts on each keystroke via input handler.
-        updateStatusBar("");
         const cached = shells.get(tab.id);
         if (cached) {
             host.innerHTML = "";
@@ -692,7 +677,6 @@
             });
             tuiEditor.on("change", () => {
                 if (suppressSave) return;
-                updateStatusBar(tuiEditor.getMarkdown());
                 scheduleSave();
             });
             editor.addEventListener("keydown", (e) => {

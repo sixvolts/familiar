@@ -131,7 +131,7 @@ func (h *Handler) dashboardOverview(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			live++
-			la := s.LastActive
+			la := s.LastActiveAt()
 			if last == nil || la.After(*last) {
 				laCp := la
 				last = &laCp
@@ -197,7 +197,7 @@ func (h *Handler) dashboardRecentSessions(w http.ResponseWriter, r *http.Request
 			Platform:   s.Platform(),
 			ChannelID:  s.ChannelID,
 			Turns:      turns,
-			LastActive: s.LastActive,
+			LastActive: s.LastActiveAt(),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].LastActive.After(out[j].LastActive) })

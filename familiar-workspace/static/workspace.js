@@ -104,6 +104,7 @@
         setLayout,
         getState() { return JSON.parse(JSON.stringify(state)); },
         bindPrincipal,
+        markPanel,
         // Sign-out: drop this principal's saved tabs from the browser.
         forgetPrincipal() {
             if (storageKey) {
@@ -325,6 +326,17 @@
         const srcPanel = state.panels[tab.panelSlot];
         const dstPanel = state.panels[targetSlot];
         if (!srcPanel || !dstPanel) return;
+        // Dropped where it already is (on its own left half, or the
+        // right half of its left neighbour): nothing moves. Once the
+        // tab was spliced out it couldn't find itself to insert before,
+        // and fell through to the end of the strip.
+        if (beforeTabId === tabId && tab.panelSlot === targetSlot) {
+            srcPanel.activeTabId = tabId;
+            state.activePanelSlot = targetSlot;
+            saveState();
+            renderGrid();
+            return;
+        }
 
         // Remove from source.
         const srcIdx = srcPanel.tabIds.indexOf(tabId);
@@ -570,9 +582,54 @@
 
     // ── Rendering ──────────────────────────────────────────────
 
+    // setSidebarActive flips is-active across the three
+    // sidebar-row classes so only one shows at a time.
+    // section is "category" | "home" | "user".
+    function setSidebarActive(activeEl, section) {
+        for (const el of document.querySelectorAll(".sidebar-cat")) {
+            el.classList.toggle("is-active", section === "category" && el === activeEl);
+        }
+        const home = document.getElementById("sidebar-home-row");
+        if (home) home.classList.toggle("is-active", section === "home");
+        const user = document.getElementById("sidebar-user-row");
+        if (user) user.classList.toggle("is-active", section === "user");
+        for (const el of document.querySelectorAll("[data-panel]")) {
+            el.classList.remove("is-active");
+        }
+    }
+
+    // The app panel on screen (app.js tells us via markPanel), so the
+    // sidebar highlight can follow it and, in the workspace, the
+    // focused tab's surface.
+    let appPanel = "home";
+    function markPanel(name) {
+        appPanel = name;
+        syncSidebarActive();
+    }
+    function syncSidebarActive() {
+        if (!wired) return;
+        if (appPanel === "home") {
+            setSidebarActive(document.getElementById("sidebar-home-row"), "home");
+            return;
+        }
+        if (appPanel === "shards" || appPanel === "scheduled") {
+            setSidebarActive(document.querySelector('.sidebar-cat[data-surface="' + appPanel + '"]'), "category");
+            return;
+        }
+        if (appPanel === "workspace") {
+            const panel = state.panels[state.activePanelSlot];
+            const tab = panel && state.tabs[panel.activeTabId];
+            const surface = tab && (tab.surface === "diagram" ? "notes" : tab.surface);
+            setSidebarActive(surface ? document.querySelector('.sidebar-cat[data-surface="' + surface + '"]') : null, "category");
+            return;
+        }
+        setSidebarActive(document.getElementById("sidebar-user-row"), "user");
+    }
+
     function renderGrid() {
         const host = document.getElementById("ws-grid");
         if (!host) return;
+        syncSidebarActive();
         const layout = state.layout;
         const slots = LAYOUTS[layout].slots;
 
@@ -875,6 +932,14 @@
         btn.appendChild(trail);
 
         btn.addEventListener("click", () => switchTab(slot, tab.id));
+        // The × is a mouse target inside the tab button; from the
+        // keyboard, Delete closes the focused tab.
+        btn.addEventListener("keydown", (e) => {
+            if (e.key === "Delete") {
+                e.preventDefault();
+                closeTab(tab.id);
+            }
+        });
         btn.addEventListener("auxclick", (e) => {
             // Middle-click = close; matches browser tab convention.
             if (e.button === 1) {
@@ -1242,6 +1307,8 @@
         const category = catRow.dataset.category;
         if (!category) return;
         const wasExpanded = sidebarCatState.expanded.has(category);
+        const chevron = catRow.querySelector(".sidebar-row-chevron");
+        if (chevron) chevron.setAttribute("aria-expanded", wasExpanded ? "false" : "true");
         if (wasExpanded) {
             sidebarCatState.expanded.delete(category);
             catRow.classList.remove("is-expanded");
@@ -1465,16 +1532,27 @@
             caret.textContent = "›";
             if (isOpen) caret.classList.add("is-open");
             caret.classList.add("has-children");
-            caret.addEventListener("click", (e) => {
-                e.preventDefault();
-                e.stopPropagation();
+            const toggle = (open) => {
                 const set = getSetFor(sidebarTreeExpanded, category);
-                if (set.has(item.id)) set.delete(item.id);
-                else set.add(item.id);
+                if (open === set.has(item.id)) return;
+                if (open) set.add(item.id);
+                else set.delete(item.id);
                 // Wiki books fetch their pages lazily on demand —
                 // renderWikiChildren spots the cache miss and kicks
                 // off the fetch; we don't need to do it here.
                 refreshSidebarChildren();
+            };
+            caret.addEventListener("click", (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                toggle(!getSetFor(sidebarTreeExpanded, category).has(item.id));
+            });
+            // Keyboard: the caret is a mouse target only, so the row
+            // takes the tree pattern's keys (→ opens, ← closes).
+            row.setAttribute("aria-expanded", isOpen ? "true" : "false");
+            row.addEventListener("keydown", (e) => {
+                if (e.key === "ArrowRight") { e.preventDefault(); toggle(true); }
+                else if (e.key === "ArrowLeft") { e.preventDefault(); toggle(false); }
             });
         }
         row.appendChild(caret);
@@ -1710,12 +1788,20 @@
             const n = (byFolder.get(folder.id) || []).length;
             if (n > 0) count.textContent = String(n);
             header.append(caret, name, count);
-            header.addEventListener("click", (e) => {
+            // A plain div: make it a keyboard-operable disclosure.
+            header.tabIndex = 0;
+            header.setAttribute("role", "button");
+            header.setAttribute("aria-expanded", isOpen ? "true" : "false");
+            const toggleFolder = (e) => {
                 e.preventDefault();
                 e.stopPropagation();
                 if (expanded.has(folder.id)) expanded.delete(folder.id);
                 else expanded.add(folder.id);
                 refreshSidebarChildren();
+            };
+            header.addEventListener("click", toggleFolder);
+            header.addEventListener("keydown", (e) => {
+                if (e.key === "Enter" || e.key === " ") toggleFolder(e);
             });
             // Drop a chat onto this folder header → move it in.
             // Sentinel "_unfiled" id means uncategorized (clears
@@ -1842,8 +1928,13 @@
         document.querySelectorAll(".sidebar-ctxmenu").forEach((n) => n.remove());
         const menu = document.createElement("div");
         menu.className = "sidebar-ctxmenu";
-        menu.style.left = x + "px";
-        menu.style.top = y + "px";
+        // The zoom picker scales <html> with CSS zoom: pointer and
+        // viewport coordinates are screen pixels, but a length set here
+        // is zoomed again. At 120% the menu landed 20% further out, and
+        // the edge clamp mis-measured.
+        const z = window.familiarPageZoom ? window.familiarPageZoom() : 1;
+        menu.style.left = (x / z) + "px";
+        menu.style.top = (y / z) + "px";
         for (const it of items) {
             if (it.divider) {
                 const d = document.createElement("div");
@@ -1866,10 +1957,10 @@
         // Clamp into viewport — re-measure after attach.
         const r = menu.getBoundingClientRect();
         if (r.right > window.innerWidth) {
-            menu.style.left = Math.max(4, window.innerWidth - r.width - 4) + "px";
+            menu.style.left = Math.max(4, window.innerWidth - r.width - 4) / z + "px";
         }
         if (r.bottom > window.innerHeight) {
-            menu.style.top = Math.max(4, window.innerHeight - r.height - 4) + "px";
+            menu.style.top = Math.max(4, window.innerHeight - r.height - 4) / z + "px";
         }
         // Dismiss on outside click or Escape. Defer the click handler
         // attach so the right-click that opened the menu doesn't
@@ -1988,20 +2079,20 @@
     document.addEventListener("dragover", (e) => {
         if (!e.dataTransfer || !e.dataTransfer.types) return;
         if (!e.dataTransfer.types.includes(dndType("notes"))) return;
-        const target = e.target.closest('a.sidebar-cat[data-category="notes"]');
+        const target = e.target.closest('.sidebar-cat[data-category="notes"]');
         if (!target) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = "move";
         target.classList.add("is-drop-target");
     });
     document.addEventListener("dragleave", (e) => {
-        const target = e.target.closest && e.target.closest('a.sidebar-cat[data-category="notes"]');
+        const target = e.target.closest && e.target.closest('.sidebar-cat[data-category="notes"]');
         if (target) target.classList.remove("is-drop-target");
     });
     document.addEventListener("drop", (e) => {
         if (!e.dataTransfer || !e.dataTransfer.types) return;
         if (!e.dataTransfer.types.includes(dndType("notes"))) return;
-        const target = e.target.closest('a.sidebar-cat[data-category="notes"]');
+        const target = e.target.closest('.sidebar-cat[data-category="notes"]');
         if (!target) return;
         e.preventDefault();
         target.classList.remove("is-drop-target");
@@ -2278,22 +2369,6 @@
                 return;
             }
         }, true /* capture so we run before app.js's nav-item handler */);
-
-        // setSidebarActive flips is-active across the three
-        // sidebar-row classes so only one shows at a time.
-        // section is "category" | "home" | "user".
-        function setSidebarActive(activeEl, section) {
-            for (const el of document.querySelectorAll(".sidebar-cat")) {
-                el.classList.toggle("is-active", section === "category" && el === activeEl);
-            }
-            const home = document.getElementById("sidebar-home-row");
-            if (home) home.classList.toggle("is-active", section === "home");
-            const user = document.getElementById("sidebar-user-row");
-            if (user) user.classList.toggle("is-active", section === "user");
-            for (const el of document.querySelectorAll("[data-panel]")) {
-                el.classList.remove("is-active");
-            }
-        }
 
         // ── Sidebar resize handle ──────────────────────────────
         // Show the grab handle when any sidebar label overflows.

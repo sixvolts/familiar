@@ -71,7 +71,8 @@
     --fg-1:         var(--graphite-050);  /* primary text */
     --fg-2:         var(--graphite-200);  /* body text */
     --fg-3:         var(--graphite-400);  /* secondary text */
-    --fg-4:         var(--graphite-500);  /* tertiary, placeholders */
+    --fg-4:         var(--graphite-500);  /* placeholders, disabled, decoration ONLY: 2.2–2.5:1 on the
+                                             surfaces, below WCAG AA for text. Text uses --fg-3. */
 
     --accent:               var(--iris-500);
     --accent-hover:         var(--iris-400);
@@ -107,6 +108,11 @@
     --radius-sm:   6px;    /* inputs, icon buttons */
     --radius-md:  10px;    /* standard buttons */
     --radius-lg:  14px;    /* menus, popovers */
+    /* Component aliases. Referenced but never defined, so those
+       corners rendered square (DESIGN.md §11). */
+    --radius-card:    var(--radius-sm);
+    --radius-input:   var(--radius-sm);
+    --radius-popover: var(--radius-lg);
     --radius-xl:  18px;    /* cards (default) */
     --radius-2xl: 24px;    /* modals, large cards, command palette */
     --radius-3xl: 32px;
@@ -126,6 +132,7 @@
     --text-2xl: 22px;
     --text-3xl: 28px;
     --text-4xl: 36px;
+    --text-base: var(--text-md); /* was undefined: that text inherited its size */
 
     /* ── Shadows — low, wide, faintly purple-tinted ───────── */
     --shadow-1: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 2px 6px rgba(8, 6, 18, 0.4);
@@ -270,30 +277,18 @@ body[data-can-chat="false"] .needs-chat {
 .shard-user-popover button:hover { background: var(--bg-hover); color: var(--fg-1); }
 .shard-user-popover button.is-danger { color: var(--accent-danger, #e07070); }
 
-/* Shard sessions never manage the surfaces that mutate other users'
-   data — no user management, no shard admin, no profile editing
-   for the owner. Hide those entry points; the backend already
-   refuses them. */
-body[data-principal-type="shard"] .shard-only-hidden {
-    display: none !important;
-}
-
-/* Home panel for a shard session: hide the personal blocks
-   (pinned + today's shards). The owner's pins reference
-   conversations / notes the shard can't necessarily reach, and
-   "Today's shards" is shard-management telemetry the shard isn't
-   supposed to operate on. Recent + open splits stay because
-   they're scoped to surfaces the shard can already see. */
+/* Home panel for a shard session: the owner's pins, Recent and
+   weather are owner-scoped (loadHome doesn't fetch them for a shard,
+   so they sat on "Loading…"), and the New shard / New scheduled action
+   shortcuts are owner-only surfaces. Hide them; the greeting and the
+   surfaces the kiosk can use stay. */
 body[data-principal-type="shard"] #home-block-pinned,
-body[data-principal-type="shard"] #home-block-shards,
-body[data-principal-type="shard"] #home-block-recent {
+body[data-principal-type="shard"] #home-block-recent,
+body[data-principal-type="shard"] #home-block-weather,
+body[data-principal-type="shard"] #home-act-shard,
+body[data-principal-type="shard"] #home-act-scheduled {
     display: none !important;
 }
-
-/* Status bar removed — Sync / Vault / Rules badges were
-   ambient clutter that didn't earn their persistent 28px row.
-   window.familiarStatusBar.setContext() stays as a no-op so
-   existing call sites don't break. */
 
 /* ── Views ────────────────────────────────────────────── */
 
@@ -314,12 +309,6 @@ body[data-principal-type="shard"] #home-block-recent {
 /* Phase-4 email-keyed register form. Vertical stack of inputs
    inside the login/setup views; matches the existing label/body
    typography so the new fields don't feel bolted on.              */
-.form-stack {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    max-width: 480px;
-}
 
 .form-stack .input,
 .input {
@@ -341,11 +330,6 @@ body[data-principal-type="shard"] #home-block-recent {
     border-color: var(--accent);
     box-shadow: 0 0 0 2px var(--accent-ring);
 }
-
-.form-stack .micro {
-    margin-top: 8px;
-}
-
 /* ── Type scale ────────────────────────────────────────── */
 
 /* Eyebrow — the lone uppercase treatment in the system.
@@ -664,12 +648,17 @@ code {
 .sidebar-row-count {
     font-family: var(--font-mono);
     font-size: 10.5px;
-    color: var(--fg-4);
+    color: var(--fg-3);
     font-variant-numeric: tabular-nums;
 }
 .sidebar-row-chevron {
     color: var(--fg-4);
     font-size: 12px;
+    font-family: inherit;
+    line-height: inherit;
+    background: transparent;
+    border: 0;
+    cursor: pointer;
     transition: transform 120ms ease, color 120ms ease;
     /* Give the chevron a roomier hit-area than the glyph itself
        so the expand-only click target is reliable; padding sits
@@ -736,6 +725,20 @@ code {
 /* Category rows carry one extra column for the "+ New" button
    that sits between the count and the chevron. */
 .sidebar-cat { grid-template-columns: 18px 1fr auto auto auto; }
+/* The category row is a container, not a link: the link (glyph, label,
+   count) and the + / expand buttons are siblings, since a button
+   inside a link is invalid and unreachable by keyboard. The link spans
+   the first three columns on a subgrid, so the layout is unchanged. */
+.sidebar-cat-main {
+    grid-column: 1 / 4;
+    display: grid;
+    grid-template-columns: subgrid;
+    align-items: center;
+    height: 100%;
+    min-width: 0;
+    color: inherit;
+    text-decoration: none;
+}
 .sidebar-cat-notes  { --cat-color: var(--iris-500);  --cat-soft: rgba(106, 76, 224, 0.14); }
 .sidebar-cat-wiki   { --cat-color: var(--slate-500); --cat-soft: rgba(78, 106, 173, 0.18); }
 .sidebar-cat-chat   { --cat-color: var(--moss-500);  --cat-soft: rgba(62, 154, 106, 0.16); }
@@ -902,16 +905,16 @@ code {
 .sidebar-folder-count {
     font-family: var(--font-mono);
     font-size: 10px;
-    color: var(--fg-4);
+    color: var(--fg-3);
     font-variant-numeric: tabular-nums;
 }
 .sidebar-folder-uncategorized .sidebar-folder-name {
     font-style: italic;
-    color: var(--fg-4);
+    color: var(--fg-3);
 }
 .sidebar-folder-empty {
     padding-left: 38px;
-    color: var(--fg-4);
+    color: var(--fg-3);
     font-size: 11px;
     font-style: italic;
 }
@@ -1038,16 +1041,6 @@ code {
     overflow: hidden;
     text-overflow: ellipsis;
 }
-.sidebar-user-vault {
-    font-family: var(--font-mono);
-    font-size: 10.5px;
-    color: var(--fg-4);
-    letter-spacing: 0.03em;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
 /* ── Sidebar resize handle ───────────────────────────────
    Hidden by default. JS shows it (one-way) when any sidebar
    label overflows. Positioned on the right edge of the sidebar,
@@ -1091,18 +1084,6 @@ code {
    panel-* sections (memory, profile, sessions, etc.) styled
    reasonably until Phase 3c re-homes them inside the User
    panel. After 3c lands, this rule can come out. */
-.nav-item {
-    display: block;
-    padding: 8px 12px;
-    color: var(--fg-2);
-    font-size: var(--text-sm);
-    font-weight: 500;
-    text-decoration: none;
-    border-radius: var(--radius-sm);
-    transition: background-color 120ms ease, color 120ms ease;
-}
-.nav-item:hover { color: var(--fg-1); background: var(--bg-hover); }
-.nav-item.is-active { color: var(--accent-soft-fg); background: var(--accent-soft-bg); }
 
 .content {
     /* Full-bleed by default — every full-mode panel
@@ -1597,7 +1578,7 @@ code {
     font-family: var(--font-mono);
     font-size: var(--text-2xs);
     letter-spacing: 0.1em;
-    color: var(--fg-4);
+    color: var(--fg-3);
     flex-shrink: 0;
     width: 64px;
 }
@@ -2060,7 +2041,6 @@ code {
 
 @media (max-width: 768px) {
     .nav { padding: 0 16px; }
-    .nav-center { display: none; }
     .view { padding: 40px 24px; }
     .view-shell {
         /* Narrow window: keep the two-column shell with a slimmer
@@ -2070,10 +2050,6 @@ code {
            flex-shrink fix above it) silently stopped working below
            769px. The rail must stay a height-clamped column. */
         grid-template-columns: 200px 1fr;
-    }
-    .nav-item {
-        padding: 8px 14px;
-        white-space: nowrap;
     }
     .content { padding: 20px 16px; }
     .center-stack { margin: 32px auto; }
@@ -2297,22 +2273,6 @@ code {
 }
 
 /* ── Keyboard shortcut hint ──────────────────────────── */
-
-.kbd-hint {
-    display: inline-block;
-    padding: 1px 6px;
-    font-family: var(--font-mono);
-    font-size: var(--text-2xs);
-    color: var(--fg-3);
-    border: 1px solid var(--border-default);
-    border-bottom-width: 2px;
-    border-radius: var(--radius-xs);
-    margin-left: 8px;
-    vertical-align: middle;
-    letter-spacing: 0;
-    text-transform: none;
-}
-
 /* ── View-as-user link ───────────────────────────────── */
 
 .view-as-link {
@@ -2724,7 +2684,7 @@ code {
     font-size: var(--text-2xs);
     letter-spacing: 0.12em;
     text-transform: uppercase;
-    color: var(--fg-4);
+    color: var(--fg-3);
 }
 
 .skill-chevron {
@@ -3043,7 +3003,7 @@ code {
 }
 
 .graph-detail-pred {
-    color: var(--fg-4);
+    color: var(--fg-3);
     margin: 0 6px;
 }
 
@@ -3171,7 +3131,7 @@ code {
     font-size: var(--text-2xs);
     letter-spacing: 0.12em;
     text-transform: uppercase;
-    color: var(--fg-4);
+    color: var(--fg-3);
     margin: 0;
 }
 
@@ -3219,7 +3179,7 @@ code {
     font-size: var(--text-2xs);
     letter-spacing: 0.12em;
     text-transform: uppercase;
-    color: var(--fg-4);
+    color: var(--fg-3);
 }
 
 /* ── Entity breakdown bars ──────────────────────────────────── */
@@ -3301,7 +3261,7 @@ code {
 .dash-list-ago {
     font-family: var(--font-mono);
     font-size: var(--text-2xs);
-    color: var(--fg-4);
+    color: var(--fg-3);
 }
 .dash-list-body {
     font-size: var(--text-sm);
@@ -3317,7 +3277,7 @@ code {
 .dash-list-sub {
     font-family: var(--font-mono);
     font-size: var(--text-2xs);
-    color: var(--fg-4);
+    color: var(--fg-3);
     letter-spacing: 0.04em;
 }
 
@@ -3440,14 +3400,6 @@ code {
     display: flex;
     align-items: center;
     gap: 0;
-}
-.ws-toolbar-left {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-}
-.ws-toolbar-left .label {
-    margin: 0;
 }
 .ws-layout-name {
     font-family: var(--font-mono);
@@ -3956,7 +3908,7 @@ code {
 .chat-conv-row-meta {
     font-family: var(--font-mono);
     font-size: var(--text-2xs);
-    color: var(--fg-4);
+    color: var(--fg-3);
     letter-spacing: 0.04em;
 }
 .chat-conv-empty,
@@ -4091,7 +4043,7 @@ code {
     font-family: var(--font-sans);
     font-size: var(--text-sm);
     font-weight: 500;
-    color: var(--fg-4);
+    color: var(--fg-3);
 }
 .chat-msg-body {
     font-size: var(--text-md);
@@ -4252,7 +4204,7 @@ code {
     letter-spacing: -0.01em;
     color: var(--fg-1);
 }
-.chat-msg-system .chat-msg-head { color: var(--fg-4); }
+.chat-msg-system .chat-msg-head { color: var(--fg-3); }
 .chat-msg-tool .chat-msg-head { color: var(--mark); }
 
 /* Working signal: the pixel indicator rides the thinking line while the
@@ -4358,8 +4310,8 @@ code {
 .chat-research-card .rc-slot { width: 15px; display: flex; justify-content: center; flex: 0 0 auto; }
 .chat-research-card .rc-label { flex: 1 1 auto; min-width: 0; color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-research-card .rc-row.rc-done .rc-label { color: var(--fg-3); }
-.chat-research-card .rc-row.rc-queued .rc-label { color: var(--fg-4); }
-.chat-research-card .rc-wstate { font-size: var(--text-xs); color: var(--fg-4); font-family: var(--font-mono, ui-monospace, monospace); flex: 0 0 auto; }
+.chat-research-card .rc-row.rc-queued .rc-label { color: var(--fg-3); }
+.chat-research-card .rc-wstate { font-size: var(--text-xs); color: var(--fg-3); font-family: var(--font-mono, ui-monospace, monospace); flex: 0 0 auto; }
 .chat-research-card .rc-row.rc-active .rc-wstate { color: var(--accent-soft-fg); }
 .chat-research-card .rc-row.rc-done .rc-wstate { color: var(--moss-300, #82cfa4); }
 .chat-research-card .rc-row.rc-failed .rc-wstate { color: var(--warn, #e0a44c); }
@@ -4371,7 +4323,7 @@ code {
     font-variant-numeric: tabular-nums;
 }
 .chat-research-card .rc-m { display: flex; align-items: baseline; gap: 5px; }
-.chat-research-card .rc-k { color: var(--fg-4); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; }
+.chat-research-card .rc-k { color: var(--fg-3); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; }
 .chat-research-card .rc-m b { color: var(--accent-soft-fg); font-weight: 600; }
 .chat-research-card .rc-m-moss b { color: var(--moss-300, #82cfa4); }
 
@@ -4537,7 +4489,7 @@ code {
     font-size: var(--text-2xs);
     letter-spacing: 0.12em;
     text-transform: uppercase;
-    color: var(--fg-4);
+    color: var(--fg-3);
     padding: 6px 10px 2px;
 }
 .notes-row {
@@ -4574,7 +4526,7 @@ code {
 .notes-row.is-active .notes-row-title { color: var(--accent-soft-fg); }
 .notes-row-snippet {
     font-size: var(--text-2xs);
-    color: var(--fg-4);
+    color: var(--fg-3);
     line-height: 1.4;
     white-space: nowrap;
     overflow: hidden;
@@ -4634,7 +4586,7 @@ code {
     gap: 8px;
     font-family: var(--font-mono);
     font-size: var(--text-2xs);
-    color: var(--fg-4);
+    color: var(--fg-3);
     flex: 0 0 auto;
 }
 .notes-saved {
@@ -4854,7 +4806,7 @@ code {
     font-size: 10.5px;
     letter-spacing: 0.1em;
     text-transform: uppercase;
-    color: var(--fg-4);
+    color: var(--fg-3);
     margin-bottom: 4px;
 }
 .notes-page-link-row {
@@ -4875,7 +4827,7 @@ code {
 }
 .notes-page-link-book {
     font-size: 11px;
-    color: var(--fg-4);
+    color: var(--fg-3);
     font-family: var(--font-mono);
 }
 .notes-page-link-row.is-broken {
@@ -4888,7 +4840,7 @@ code {
 }
 .notes-page-link-row.is-broken .notes-page-link-title::after {
     content: " (not yet)";
-    color: var(--fg-4);
+    color: var(--fg-3);
     font-weight: 400;
     font-size: 11px;
 }
@@ -5217,6 +5169,7 @@ code {
     text-align: left;
     color: var(--fg-1);
     font-family: inherit;
+    font-size: inherit;
     width: 100%;
     transition: background 120ms ease, border-color 120ms ease;
 }
@@ -5237,7 +5190,7 @@ code {
 .home-rec-ago {
     font-family: var(--font-mono);
     font-size: 13px;
-    color: var(--fg-4);
+    color: var(--fg-3);
     white-space: nowrap;
 }
 .home-empty {
@@ -5398,7 +5351,7 @@ code {
     display: flex; flex-direction: column; align-items: center;
     gap: 6px; padding: 6px 4px;
 }
-.home-wx-hour .t { font-family: var(--font-mono); font-size: 12px; color: var(--fg-4); }
+.home-wx-hour .t { font-family: var(--font-mono); font-size: 12px; color: var(--fg-3); }
 .home-wx-hour .v { font-family: var(--font-mono); font-size: 14px; color: var(--fg-2); }
 .home-wx-hour.now .t { color: var(--iris-300); }
 .home-wx-hour.now .v { color: var(--fg-1); font-weight: 500; }
@@ -5482,7 +5435,7 @@ code {
     font-size: 10px;
     letter-spacing: 0.12em;
     text-transform: uppercase;
-    color: var(--fg-4);
+    color: var(--fg-3);
     padding: 4px 12px 6px;
 }
 .user-subnav-row {
@@ -5571,7 +5524,7 @@ code {
     padding: 4px 14px;
     font-family: var(--font-mono);
     font-size: 10.5px;
-    color: var(--fg-4);
+    color: var(--fg-3);
     letter-spacing: 0.04em;
 }
 /* (The legacy bottom-of-list "+ New …" button was replaced by the
@@ -5663,7 +5616,7 @@ code {
     border-top: 1px dashed var(--border-subtle);
     font-family: var(--font-mono);
     font-size: 10.5px;
-    color: var(--fg-4);
+    color: var(--fg-3);
     letter-spacing: 0.01em;
     white-space: normal;
 }
@@ -5713,7 +5666,7 @@ code {
     font-size: 10px;
     letter-spacing: 0.1em;
     text-transform: uppercase;
-    color: var(--fg-4);
+    color: var(--fg-3);
 }
 .wiki-new-page-btn {
     background: transparent;
@@ -5814,7 +5767,7 @@ code {
     font-size: 10.5px;
     letter-spacing: 0.12em;
     text-transform: uppercase;
-    color: var(--fg-4);
+    color: var(--fg-3);
     margin-bottom: 6px;
 }
 .wiki-splash-title {
@@ -5855,7 +5808,7 @@ code {
     font-size: 10.5px;
     letter-spacing: 0.1em;
     text-transform: uppercase;
-    color: var(--fg-4);
+    color: var(--fg-3);
     padding: 0 4px 4px;
 }
 .wiki-splash-list {
@@ -5899,7 +5852,7 @@ code {
 }
 .wiki-splash-row-desc {
     font-size: 11.5px;
-    color: var(--fg-4);
+    color: var(--fg-3);
     margin-top: 2px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -5908,7 +5861,7 @@ code {
 .wiki-splash-row-meta {
     font-family: var(--font-mono);
     font-size: 10.5px;
-    color: var(--fg-4);
+    color: var(--fg-3);
 }
 .wiki-splash-empty {
     color: var(--fg-3);
@@ -6006,7 +5959,7 @@ code {
 }
 .wiki-empty-tile-meta {
     font-size: 11.5px;
-    color: var(--fg-4);
+    color: var(--fg-3);
     font-family: var(--font-mono);
     letter-spacing: 0.02em;
 }
@@ -6123,7 +6076,7 @@ code {
     display: block;
     font-family: var(--font-sans);
     font-size: 10.5px;
-    color: var(--fg-4);
+    color: var(--fg-3);
     margin-top: 2px;
 }
 .wiki-members-role {
@@ -6168,7 +6121,7 @@ code {
 }
 .wiki-members-add-hint {
     font-size: 11px;
-    color: var(--fg-4);
+    color: var(--fg-3);
 }
 .wiki-members-typeahead {
     position: relative;
@@ -6217,11 +6170,11 @@ code {
 .wiki-members-suggestion-meta {
     font-family: var(--font-mono);
     font-size: 11px;
-    color: var(--fg-4);
+    color: var(--fg-3);
 }
 .wiki-members-suggestion-empty {
     padding: 10px;
-    color: var(--fg-4);
+    color: var(--fg-3);
     font-size: var(--text-sm);
     text-align: center;
 }

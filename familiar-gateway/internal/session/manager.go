@@ -170,6 +170,15 @@ func (s *Session) RecentFacts() []string {
 // otherwise the raw platform SenderID. Callers that need to key profile
 // storage, memory scope, or fact attribution should use this instead of
 // reading SenderID directly.
+// LastActiveAt reads LastActive under the session's lock. Turns write
+// it as they land (AddMessage, CompactSummary); reading the field
+// directly from another goroutine races them.
+func (s *Session) LastActiveAt() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.LastActive
+}
+
 func (s *Session) UserID() string {
 	if s == nil {
 		return ""

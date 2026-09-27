@@ -55,13 +55,17 @@ test("the launchpad renders all four quadrants with live data", async ({ stack, 
             timeout: 10_000,
         });
 
-        // Recent quadrant feeds off pipeline activity (extracted
-        // memories + chat sessions), which a fresh user has none of —
-        // the contract here is that it SETTLES on the empty state
-        // instead of hanging on "Loading…" when both feeds are empty.
-        await expect(page.locator("#home-recent-list")).toContainText("Nothing yet", {
-            timeout: 10_000,
-        });
+        // Recent lists documents (notes and chats), and a row opens
+        // its own document. It used to list memory snippets and session
+        // ids, and every click created a new, empty note or chat.
+        const recentRow = page.locator("#home-recent-list .home-rec-item", { hasText: "Pinned Landmark" });
+        await expect(recentRow).toBeVisible({ timeout: 10_000 });
+        const pagesBefore = (await (await request.get(`${stack.workspaceURL}/console/api/books/personal/pages`, { headers: authed(user) })).json()).items.length;
+        await recentRow.click();
+        await expect(page.locator(".ws-tab-label", { hasText: "Pinned Landmark" })).toBeVisible({ timeout: 10_000 });
+        const pagesAfter = (await (await request.get(`${stack.workspaceURL}/console/api/books/personal/pages`, { headers: authed(user) })).json()).items.length;
+        expect(pagesAfter, "opening a Recent row created a page").toBe(pagesBefore);
+        await page.evaluate(() => (window as any).appSwitchPanel("home"));
 
         // Weather quadrant: this user has no stored location, the
         // endpoint answers {"error":"no_location"}, and headless
@@ -131,6 +135,22 @@ test("a pinned-quadrant row routes to its surface on click", async ({ stack, bro
         await expect(page.locator("#panel-workspace")).toBeVisible({ timeout: 10_000 });
         const editor = page.locator(".notes-shell .toastui-editor-ww-container .ProseMirror").first();
         await expect(editor).toContainText("click me from home", { timeout: 10_000 });
+    } finally {
+        await ctx.close();
+    }
+});
+
+// With nothing to show, Recent settles on its empty state instead of
+// hanging on "Loading…".
+test("Recent settles on its empty state for a new user", async ({ stack, browser }) => {
+    const user = await createTestUser();
+    const ctx = await browser.newContext();
+    await attachSession(ctx, stack.workspaceURL, user);
+    const page = await ctx.newPage();
+    try {
+        await page.goto(stack.workspaceURL);
+        await expect(page.locator("#panel-home")).toBeVisible({ timeout: 15_000 });
+        await expect(page.locator("#home-recent-list")).toContainText("Nothing yet", { timeout: 10_000 });
     } finally {
         await ctx.close();
     }

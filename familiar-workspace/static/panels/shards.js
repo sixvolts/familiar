@@ -831,12 +831,16 @@
         if (!shardsState.currentShard) return;
         const input = document.getElementById("shard-passkey-label-input");
         input.value = "";
-        document.getElementById("shard-passkey-label-modal").hidden = false;
+        const modal = document.getElementById("shard-passkey-label-modal");
+        modal.hidden = false;
+        if (window.familiarDialog) window.familiarDialog.show(modal, closePasskeyLabelModal);
         setTimeout(() => input.focus(), 0);
     }
 
     function closePasskeyLabelModal() {
-        document.getElementById("shard-passkey-label-modal").hidden = true;
+        const modal = document.getElementById("shard-passkey-label-modal");
+        modal.hidden = true;
+        if (window.familiarDialog) window.familiarDialog.hide(modal);
     }
 
     async function enrollShardPasskey() {
@@ -917,6 +921,7 @@
         const valueEl = document.getElementById("token-modal-value");
         valueEl.textContent = plaintext;
         modal.hidden = false;
+        if (window.familiarDialog) window.familiarDialog.show(modal, closeTokenModal);
     }
 
     function closeTokenModal() {
@@ -924,6 +929,7 @@
         const valueEl = document.getElementById("token-modal-value");
         valueEl.textContent = "";
         modal.hidden = true;
+        if (window.familiarDialog) window.familiarDialog.hide(modal);
     }
 
     async function copyTokenModalValue() {

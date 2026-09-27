@@ -95,7 +95,6 @@ type Handler struct {
 	profiles           ProfileStore                                              // optional; wired via AttachProfileStore (user profile panel)
 	chatSessions       ChatSessionLister                                         // optional; wired via AttachChatSessionLister (sessions panel)
 	conversations      *ConversationStore                                        // optional; wired via AttachConversationStore (workspace chat)
-	notes              *NotesStore                                               // optional; wired via AttachNotesStore (workspace notes)
 	wiki               *WikiStore                                                // optional; wired via AttachWikiStore (books + wiki pages)
 	shardPasskeys      *ShardPasskeyStore                                        // optional; wired via AttachShardPasskeyStore (SHARD-AUTH-SPEC)
 	weather            *weather.Skill                                            // optional; wired via AttachWeather (Home weather widget)

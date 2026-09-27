@@ -528,14 +528,11 @@ func main() {
 	// time adminH is nil, but the skill only dereferences it on
 	// the first tool invocation — by then the pool block has run.
 	//
-	// The notes skill used to register here too, backed by
-	// admin.NotesStore directly. Phase 1 step 6 retires it: the
-	// notes table is post-migration backup only, and the wiki
-	// skill (with include_personal=true on list_books) now covers
-	// every tool the model used to reach via search_notes /
-	// read_note / create_note / update_note / append_to_note /
-	// patch_note. The notes skill package is left in the repo for
-	// git history; nothing wires it.
+	// Notes are pages of the personal book: the wiki skill (with
+	// include_personal=true on list_books) covers them. The old
+	// notes skill wrote the legacy notes table, which nothing reads;
+	// it, its store and the one-off notes migration were removed
+	// (git history has them).
 	var adminH *admin.Handler
 
 	// Wiki skill — same lazy-resolve pattern. The closure returns

@@ -153,13 +153,6 @@ func runHTTPAdapter(ctx context.Context, d httpAdapterDeps, adminHOut **admin.Ha
 					adminH.AttachConversationStore(convStore)
 					log.Printf("[admin] conversation store attached")
 				}
-				// Workspace notes store (FAMILIAR-WORKSPACE-SPEC
-				// Phase 2a). Same shared pool. The notes skill
-				// switches over to this in Phase 2c.
-				if notesStore := admin.NewNotesStore(sharedPool); notesStore != nil {
-					adminH.AttachNotesStore(notesStore)
-					log.Printf("[admin] notes store ready")
-				}
 				// Weather skill powers the Home weather widget
 				// (/console/api/home/weather). Same instance the
 				// LLM tools use, so the TTL cache is shared.

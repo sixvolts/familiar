@@ -378,6 +378,27 @@ func isUniqueViolation(err error) bool {
 	return errors.As(err, &pqErr) && pqErr.Code == "23505"
 }
 
+const snippetMaxRunes = 120
+
+// snippetFromContent is a page's list-row preview: its first line of
+// text, with the simplest markdown noise (leading #, list markers,
+// blockquote bullets) stripped, cut to snippetMaxRunes.
+func snippetFromContent(content string) string {
+	c := strings.TrimSpace(content)
+	if c == "" {
+		return ""
+	}
+	c = strings.TrimLeft(c, "# >-*+ \t")
+	if i := strings.IndexByte(c, '\n'); i >= 0 {
+		c = c[:i]
+	}
+	runes := []rune(c)
+	if len(runes) > snippetMaxRunes {
+		return string(runes[:snippetMaxRunes-1]) + "…"
+	}
+	return c
+}
+
 // uniquePageSlug picks a slug that isn't already taken WITHIN the
 // given book. On collision, appends a short random hex suffix. The
 // check and the write aren't atomic: writers retry on

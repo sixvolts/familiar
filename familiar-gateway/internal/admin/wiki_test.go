@@ -397,3 +397,22 @@ func TestParseLinks_Forms(t *testing.T) {
 // before touching SQL. Coverage for the 409 path lives in the
 // integration suite. The pure parsing of the If-Match header is
 // inspected at review.
+
+func TestSnippetFromContent(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"", ""},
+		{"hello world", "hello world"},
+		{"# Heading\nbody", "Heading"},
+		{"> quoted line\nrest", "quoted line"},
+		{"- list item\n- second", "list item"},
+		{strings.Repeat("a", 200), strings.Repeat("a", snippetMaxRunes-1) + "…"},
+	}
+	for _, tc := range cases {
+		got := snippetFromContent(tc.in)
+		if got != tc.want {
+			t.Errorf("snippetFromContent(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

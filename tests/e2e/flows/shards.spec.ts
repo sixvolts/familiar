@@ -100,11 +100,12 @@ test("token mint shows the plaintext once; the list only ever has the prefix", a
     const mint = await minted.json();
     expect(mint.plaintext, "mint must return the plaintext exactly once").toMatch(/^shard_/);
 
-    // The list never re-exposes the secret — only the 8-char prefix.
+    // The list never re-exposes the secret — only the prefix ("shard_"
+    // plus 10 characters).
     const tokens = await (await request.get(`${base}/${id}/tokens`, { headers: authed(user) })).json();
     expect(tokens.items).toHaveLength(1);
     const row = tokens.items[0];
-    expect(row.token_prefix).toBe(mint.plaintext.slice(0, 8));
+    expect(row.token_prefix).toBe(mint.plaintext.slice(0, 16));
     expect(JSON.stringify(row)).not.toContain(mint.plaintext);
 
     // Revoke marks the row, second revoke stays idempotent.

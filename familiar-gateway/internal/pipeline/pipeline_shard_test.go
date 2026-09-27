@@ -48,6 +48,41 @@ func TestOverridesForShard_CopiesBookAccess(t *testing.T) {
 	}
 }
 
+// The stored shard settings reach the envelope as the owner set them:
+// temperature 0 is deterministic sampling (it became the provider's
+// default), an allowlisted web_search is granted (it was refused on
+// every turn of a pinned shard), and an ephemeral shard runs no tool
+// that writes (a wiki page could be rewritten by a prompt injection).
+func TestOverridesForShard_TemperatureSearchAndWrites(t *testing.T) {
+	sh := &shards.Shard{
+		ID:             "lookup",
+		Persistence:    shards.PersistenceEphemeral,
+		Visibility:     shards.VisibilityIsolated,
+		ToolAllowlist:  []string{"web_search", "read_page", "update_page", "save_fact"},
+		TierPreference: "tier3",
+		Temperature:    0,
+	}
+	ov := OverridesForShard(sh)
+	if ov.Temperature == nil || *ov.Temperature != 0 {
+		t.Errorf("Temperature = %v, want a pointer to 0", ov.Temperature)
+	}
+	if ov.SearchBudget <= 0 {
+		t.Errorf("SearchBudget = %d, want a grant for the allowlisted web_search", ov.SearchBudget)
+	}
+	if strings.Join(ov.ToolAllowlist, ",") != "web_search,read_page" {
+		t.Errorf("ephemeral allowlist = %v, want the write tools dropped", ov.ToolAllowlist)
+	}
+	sh.Persistence = shards.PersistencePersistent
+	sh.ToolAllowlist = []string{"read_page", "update_page"}
+	ov = OverridesForShard(sh)
+	if strings.Join(ov.ToolAllowlist, ",") != "read_page,update_page" {
+		t.Errorf("persistent allowlist = %v, want it unchanged", ov.ToolAllowlist)
+	}
+	if ov.SearchBudget != 0 {
+		t.Errorf("SearchBudget = %d without web_search allowlisted", ov.SearchBudget)
+	}
+}
+
 // assertMessagesContainSystem returns the content of the system message
 // in the recorded request, or the empty string if none is present.
 func recordedSystemMsg(msgs []testutil.RecordedMessage) string {

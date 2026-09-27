@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -142,8 +143,10 @@ func (f *fakeShardStore) RevokeToken(_ context.Context, id string) error {
 }
 
 // Unused by the role-gated handlers — panic on accidental use.
-func (f *fakeShardStore) UpdateShard(context.Context, *shards.Shard) error {
-	panic("UpdateShard not used")
+func (f *fakeShardStore) UpdateShard(_ context.Context, sh *shards.Shard) error {
+	cp := *sh
+	f.shards[sh.ID] = &cp
+	return nil
 }
 func (f *fakeShardStore) DisableShard(context.Context, string) error { panic("DisableShard not used") }
 func (f *fakeShardStore) EnableShard(context.Context, string) error  { panic("EnableShard not used") }
@@ -458,3 +461,58 @@ func TestRevokeToken_UserCannotRevokeOthers(t *testing.T) {
 // FAMILIAR-WORKSPACE-SPEC Phase 0 (the gateway is API-only now;
 // bookmarks land on the workspace's hostname). The corresponding
 // regression test lives at familiar-workspace/cmd/workspace/main_test.go.
+
+// Temperature 0 on create is kept (it was coerced to 0.7 unless the
+// input schema carried a sentinel); absent means the 0.7 default.
+func TestCreateShard_TemperatureZeroKept(t *testing.T) {
+	store := newFakeShardStore()
+	h := makeShardsHandler(t, store)
+	create := func(id, extra string) *shards.Shard {
+		body := `{"id":"` + id + `","name":"` + id + `","persistence":"ephemeral","visibility":"isolated",
+			"scope_tag":"shard:` + id + `","system_prompt":"extract","tool_allowlist":[],"max_tokens":256` + extra + `}`
+		req := httptest.NewRequest("POST", "/console/api/shards", strings.NewReader(body)).WithContext(
+			ctxWithAuth(context.Background(), alisonUser()))
+		req = req.WithContext(context.WithValue(req.Context(), ContextKeyUserID, "alison"))
+		rec := httptest.NewRecorder()
+		h.createShard(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create %s = %d (%s)", id, rec.Code, rec.Body.String())
+		}
+		return store.shards[id]
+	}
+	if got := create("deterministic", `,"temperature":0`); got.Temperature != 0 {
+		t.Errorf("temperature 0 stored as %v", got.Temperature)
+	}
+	if got := create("default-temp", ``); got.Temperature != 0.7 {
+		t.Errorf("absent temperature stored as %v, want 0.7", got.Temperature)
+	}
+}
+
+// A session TTL override and the schemas can be cleared: nil read as
+// "unchanged", so once set they stayed for good.
+func TestPatchShard_ClearsTTLAndSchemas(t *testing.T) {
+	store := newFakeShardStore()
+	h := makeShardsHandler(t, store)
+	ttl := 1800
+	store.shards["kiosk"] = &shards.Shard{
+		ID: "kiosk", OwnerID: "alison", Name: "Kiosk", SystemPrompt: "p",
+		Persistence: shards.PersistencePersistent, Visibility: shards.VisibilityIsolated,
+		ScopeTag: "shard:kiosk", MaxTokens: 256, Temperature: 0.7,
+		SessionMaxAge: &ttl, InputSchema: []byte(`{"type":"object"}`), OutputSchema: []byte(`{"type":"string"}`),
+		ChatEnabled: true, APIEnabled: true,
+	}
+	req := httptest.NewRequest("PATCH", "/console/api/shards/kiosk",
+		strings.NewReader(`{"session_max_age":0,"input_schema":"","output_schema":{}}`)).WithContext(
+		ctxWithAuth(context.Background(), alisonUser()))
+	req = req.WithContext(context.WithValue(req.Context(), ContextKeyUserID, "alison"))
+	req.SetPathValue("id", "kiosk")
+	rec := httptest.NewRecorder()
+	h.patchShard(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch = %d (%s)", rec.Code, rec.Body.String())
+	}
+	got := store.shards["kiosk"]
+	if got.SessionMaxAge != nil || len(got.InputSchema) != 0 || len(got.OutputSchema) != 0 {
+		t.Errorf("after clearing: ttl=%v input=%s output=%s", got.SessionMaxAge, got.InputSchema, got.OutputSchema)
+	}
+}

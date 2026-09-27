@@ -62,10 +62,11 @@ func (s *Sender) SendDM(ctx context.Context, slackUserID, text string) error {
 }
 
 // SendProactive posts `text` to `channelID`. This is the method the
-// scheduled-actions Slack deliverer calls. Long messages are sent as
-// a single post — the slack-go client splits at the API level if
-// needed. We do not use the 4k truncation the adapter applies to
-// interactive replies because proactive briefings are commonly long.
+// scheduled-actions Slack deliverer calls. Proactive briefings are
+// commonly long: past proactiveMaxLen they go as several posts (split
+// like interactive replies, at a larger size). They were sent as one
+// post on the belief that slack-go splits long messages; it doesn't,
+// and Slack truncates text past 40,000 characters without an error.
 func (s *Sender) SendProactive(ctx context.Context, channelID, text string) error {
 	if channelID == "" {
 		return fmt.Errorf("slack sender: empty channel_id")
@@ -78,15 +79,21 @@ func (s *Sender) SendProactive(ctx context.Context, channelID, text string) erro
 	// / "**" / "---" shows literally. Convert before posting — the
 	// interactive adapter already does this on its own path.
 	text = toMrkdwn(text)
-	_, _, err := s.api.PostMessageContext(ctx, channelID,
-		slack.MsgOptionText(text, false),
-		slack.MsgOptionDisableLinkUnfurl(),
-	)
-	if err != nil {
-		return fmt.Errorf("slack post to %s: %w", channelID, err)
+	for _, chunk := range splitMessage(text, proactiveMaxLen) {
+		_, _, err := s.api.PostMessageContext(ctx, channelID,
+			slack.MsgOptionText(chunk, false),
+			slack.MsgOptionDisableLinkUnfurl(),
+		)
+		if err != nil {
+			return fmt.Errorf("slack post to %s: %w", channelID, err)
+		}
 	}
 	return nil
 }
+
+// proactiveMaxLen is the largest proactive post, in bytes: under
+// Slack's 40,000-character limit whatever the characters.
+const proactiveMaxLen = 35000
 
 // IsUserOrDMID reports a Slack id that names a person (U…, W…) or a DM
 // (D…) rather than a channel. chat.postMessage accepts a user id as

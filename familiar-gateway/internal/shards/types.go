@@ -10,8 +10,9 @@
 //     allowlist, and a persistence/visibility mode.
 //
 //   - Tokens are 1:1 with shards. A token's plaintext is returned exactly
-//     once from CreateToken; the store keeps a bcrypt hash and an 8-char
-//     prefix for UI disambiguation only. ValidateToken re-derives the
+//     once from CreateToken; the store keeps a bcrypt hash and a prefix
+//     ("shard_" plus 10 characters; 8 in all for tokens minted before)
+//     for lookup and UI disambiguation. ValidateToken re-derives the
 //     prefix, looks up candidate rows, and bcrypt-compares.
 //
 //   - The store enforces a small set of integrity rules the DB alone
@@ -193,28 +194,37 @@ func ValidateScopeTag(tag string) error {
 // knowledge rows ("book:<id>"). Shards may not use it.
 const ReservedBookScopePrefix = "book:"
 
-// writeCapableMemoryTools are the tool names that mutate memory. An
-// ephemeral shard's allowlist is rejected if it contains any of these.
-// Names are bare (matching the globally-unique convention the skill
-// registry enforces — see internal/skills.Registry.Register), not
-// dotted <skill>.<tool> form; the admin UI may display them dotted
-// for readability but storage and dispatch use bare names.
+// writeCapableTools are the tool names that write: memory, and the wiki
+// and notes pages. An ephemeral shard's allowlist is rejected if it
+// contains any of these, and they are dropped from one at run time
+// (pipeline.OverridesForShard). Only the memory tools were listed, so
+// an "ephemeral" shard (the UI promising no side effects) could still
+// rewrite a wiki page through a prompt injection. Names are bare
+// (matching the globally-unique convention the skill registry
+// enforces — see internal/skills.Registry.Register), not dotted
+// <skill>.<tool> form.
 //
 // Kept in this package (rather than pulled from the skill registry) so
-// validation is a pure data check with no import cycle. If the memory
-// skill ever adds a new write-capable tool, update this list in
-// lockstep — ephemeral-shard safety depends on it being complete.
-var writeCapableMemoryTools = map[string]bool{
-	"save_fact":    true, // persists a fact to long-term memory
-	"remember":     true, // explicit user-requested remember
-	"forget_fact":  true, // deletes a memory
-	"correct_fact": true, // updates an existing memory
+// validation is a pure data check with no import cycle. A new tool
+// that writes must be added here; ephemeral-shard safety depends on it
+// being complete. Tools composed at run time (skill packages) aren't
+// covered.
+var writeCapableTools = map[string]bool{
+	"save_fact":      true, // persists a fact to long-term memory
+	"remember":       true, // explicit user-requested remember
+	"forget_fact":    true, // deletes a memory
+	"correct_fact":   true, // updates an existing memory
+	"create_page":    true,
+	"update_page":    true,
+	"append_to_page": true,
+	"patch_page":     true,
+	"pin_page":       true,
 }
 
-// IsWriteCapable reports whether a tool name is known to mutate memory.
+// IsWriteCapable reports whether a tool name is known to write.
 // Exported so the admin UI can surface the same answer the backend
 // uses (checkbox disabling for ephemeral shards).
-func IsWriteCapable(tool string) bool { return writeCapableMemoryTools[tool] }
+func IsWriteCapable(tool string) bool { return writeCapableTools[tool] }
 
 // ValidateAllowlist enforces:
 //   - no duplicates (gives a clearer error than a UNIQUE constraint ever could)
@@ -233,7 +243,7 @@ func ValidateAllowlist(tools []string, persistence PersistenceMode, known map[st
 			return fmt.Errorf("shards: duplicate tool in allowlist: %q", t)
 		}
 		seen[t] = struct{}{}
-		if persistence == PersistenceEphemeral && writeCapableMemoryTools[t] {
+		if persistence == PersistenceEphemeral && writeCapableTools[t] {
 			return fmt.Errorf("%w: %q", ErrWriteToolOnEph, t)
 		}
 		if known != nil && !known[t] {

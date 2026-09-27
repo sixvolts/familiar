@@ -244,8 +244,8 @@ type mintTokenResponse struct {
 
 // shardCreateBody matches the frontend's create form. Every field is
 // required except model/tier preference (one or neither) and the
-// optional schema blobs. Temperature defaults to 0.7 when zero to
-// match the DB default.
+// optional schema blobs. Temperature defaults to 0.7 (the DB default)
+// when absent; 0 is kept (deterministic sampling).
 type shardCreateBody struct {
 	ID              string          `json:"id"`
 	Name            string          `json:"name"`
@@ -260,7 +260,7 @@ type shardCreateBody struct {
 	InputSchema     json.RawMessage `json:"input_schema"`
 	OutputSchema    json.RawMessage `json:"output_schema"`
 	MaxTokens       int             `json:"max_tokens"`
-	Temperature     float32         `json:"temperature"`
+	Temperature     *float32        `json:"temperature"`
 	// SHARD-AUTH-SPEC Phase 1 scoping fields. All optional on
 	// create — defaults match the DB column defaults
 	// (console_access=false, chat_enabled=true, api_enabled=true).
@@ -521,14 +521,13 @@ func (h *Handler) createShard(w http.ResponseWriter, r *http.Request) {
 	if body.MaxTokens == 0 {
 		body.MaxTokens = 2048
 	}
-	if body.Temperature == 0 && !strings.Contains(string(body.InputSchema), "temperature_zero") {
-		// Match the DB default. Callers who genuinely want 0.0 get it
-		// by submitting the shard twice (create then PATCH) — the
-		// form UI in Phase 1 doesn't expose 0.0 explicitly. This is
-		// a known rough edge tracked with the "temperature_zero"
-		// sentinel above; it's acceptable for Phase 1 ephemeral
-		// extractors whose authors set e.g. 0.1.
-		body.Temperature = 0.7
+	// Absent means the DB default; an explicit 0 is kept. It was
+	// coerced to 0.7 (unless the input schema carried a
+	// "temperature_zero" sentinel), and 0 set later by PATCH was then
+	// ignored at run time.
+	temperature := float32(0.7)
+	if body.Temperature != nil {
+		temperature = *body.Temperature
 	}
 
 	// Default the scoping toggles to the DB column defaults so an
@@ -562,7 +561,7 @@ func (h *Handler) createShard(w http.ResponseWriter, r *http.Request) {
 		InputSchema:     body.InputSchema,
 		OutputSchema:    body.OutputSchema,
 		MaxTokens:       body.MaxTokens,
-		Temperature:     body.Temperature,
+		Temperature:     temperature,
 		ConsoleAccess:   consoleAccess,
 		ConsolePanels:   body.ConsolePanels,
 		BookAccess:      body.BookAccess,
@@ -663,11 +662,14 @@ func (h *Handler) patchShard(w http.ResponseWriter, r *http.Request) {
 	if body.TierPreference != nil {
 		merged.TierPreference = *body.TierPreference
 	}
+	// A schema of "" or {} clears it (JSON null reads as "unchanged"
+	// here, so it can't); without a way to clear, a removed schema
+	// stayed in the DB and the API for good.
 	if body.InputSchema != nil {
-		merged.InputSchema = *body.InputSchema
+		merged.InputSchema = clearableSchema(*body.InputSchema)
 	}
 	if body.OutputSchema != nil {
-		merged.OutputSchema = *body.OutputSchema
+		merged.OutputSchema = clearableSchema(*body.OutputSchema)
 	}
 	if body.MaxTokens != nil {
 		merged.MaxTokens = *body.MaxTokens
@@ -690,8 +692,14 @@ func (h *Handler) patchShard(w http.ResponseWriter, r *http.Request) {
 	if body.APIEnabled != nil {
 		merged.APIEnabled = *body.APIEnabled
 	}
+	// 0 clears the override (back to the gateway default); there was
+	// no way to, once set.
 	if body.SessionMaxAge != nil {
-		merged.SessionMaxAge = body.SessionMaxAge
+		if *body.SessionMaxAge == 0 {
+			merged.SessionMaxAge = nil
+		} else {
+			merged.SessionMaxAge = body.SessionMaxAge
+		}
 	}
 
 	// Re-validate the allowlist against the updated persistence mode.
@@ -1032,4 +1040,13 @@ func (h *Handler) canRevokeToken(ctx context.Context, au AuthUser, tokenID strin
 		}
 	}
 	return false, nil
+}
+
+// clearableSchema is a PATCHed schema blob: "" or {} means none.
+func clearableSchema(raw json.RawMessage) json.RawMessage {
+	switch strings.TrimSpace(string(raw)) {
+	case `""`, `{}`, "null", "":
+		return nil
+	}
+	return raw
 }

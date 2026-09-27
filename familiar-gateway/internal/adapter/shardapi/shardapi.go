@@ -14,8 +14,11 @@
 //   - ignore model / tools / temperature / max_tokens / user in the
 //     body — the shard is the capability envelope, the caller cannot
 //     expand it;
-//   - never run the router, the Familiar tiered prompt store, the
-//     preamble path, or pre-execution tool orchestration;
+//   - never run the Familiar tiered prompt store, the preamble path,
+//     or pre-execution tool orchestration; a shard pinned to a model
+//     or tier skips the classifier too, while an unpinned one is
+//     classified like a trusted turn (its web_search is granted by its
+//     allowlist either way, not by the classifier);
 //   - skip memory retrieval entirely (shards see the shard prompt +
 //     prior session turns, nothing else);
 //   - tag all downstream writes (pipeline commit, extracted facts,
@@ -34,7 +37,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -566,11 +568,18 @@ func (h *Handler) handleStreaming(
 	// the final JSON; routing metadata is out of band (logs).
 	_, info, err := h.pipe.HandleShardStream(ctx, sess, userMsg, overrides, onChunk, nil, nil)
 	if err != nil {
+		// Same as the non-streaming path: the detail goes to the log,
+		// the caller gets a generic error, as an error event (the
+		// OpenAI shape) and no "stop" finish. The error text was sent as
+		// reply content (upstream URLs, model ids) and the stream then
+		// finished "stop", reading as a successful completion.
 		log.Printf("[shards] invoke failed: shard=%s err=%v", shardID, err)
-		send(choice{
-			Index: 0,
-			Delta: &invokeMessage{Content: fmt.Sprintf("\n\n[error: %v]", err)},
-		})
+		mu.Lock()
+		_, _ = io.WriteString(w, `data: {"error":{"message":"invocation failed","type":"server_error"}}`+"\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		flusher.Flush()
+		mu.Unlock()
+		return
 	}
 
 	finish := "stop"

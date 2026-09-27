@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/familiar/gateway/internal/config"
 	"github.com/familiar/gateway/internal/engine"
@@ -623,31 +624,53 @@ func (a *SlackAdapter) channelAllowed(channel string) bool {
 	return false
 }
 
-// splitMessage breaks text into chunks of at most maxLen characters,
-// preferring to split at newline boundaries.
+// splitMessage breaks text into chunks of at most maxLen bytes,
+// preferring to split at a newline, then at a space. A chunk never
+// ends inside a UTF-8 character (a 4,000-byte cut could halve an "é"
+// into two invalid bytes) or inside a <url|text> link, and a code
+// fence cut in two is closed at the end of one chunk and reopened at
+// the start of the next, so both halves render as code.
 func splitMessage(text string, maxLen int) []string {
-	if len(text) <= maxLen {
-		return []string{text}
-	}
-
 	var chunks []string
-	for len(text) > 0 {
-		if len(text) <= maxLen {
-			chunks = append(chunks, text)
-			break
+	for len(text) > maxLen {
+		cut := splitPoint(text, maxLen)
+		chunk, rest := text[:cut], text[cut:]
+		if strings.Count(chunk, "```")%2 == 1 {
+			// Inside a fence: leave room to close it here.
+			cut = splitPoint(text, maxLen-len("\n```"))
+			chunk, rest = text[:cut]+"\n```", "```\n"+text[cut:]
 		}
-
-		// Find the last newline within the limit.
-		cutPoint := maxLen
-		if idx := strings.LastIndex(text[:maxLen], "\n"); idx > 0 {
-			cutPoint = idx + 1
-		}
-
-		chunks = append(chunks, text[:cutPoint])
-		text = text[cutPoint:]
+		chunks = append(chunks, chunk)
+		text = rest
 	}
+	return append(chunks, text)
+}
 
-	return chunks
+// splitPoint is where to end a chunk of at most maxLen bytes of text.
+func splitPoint(text string, maxLen int) int {
+	window := text[:maxLen]
+	cut := 0
+	if i := strings.LastIndex(window, "\n"); i > 0 {
+		cut = i + 1
+	} else if i := strings.LastIndexAny(window, " \t"); i > 0 {
+		cut = i + 1
+	} else {
+		cut = maxLen
+		for cut > 0 && !utf8.RuneStart(text[cut]) {
+			cut--
+		}
+	}
+	// Not inside a <url|text> link.
+	if lt := strings.LastIndex(text[:cut], "<"); lt > 0 && !strings.Contains(text[lt:cut], ">") {
+		cut = lt
+	}
+	if cut <= 0 {
+		cut = maxLen
+		for cut > 1 && !utf8.RuneStart(text[cut]) {
+			cut--
+		}
+	}
+	return cut
 }
 
 // truncate shortens a string for logging.

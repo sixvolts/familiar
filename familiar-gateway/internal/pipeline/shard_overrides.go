@@ -23,16 +23,39 @@ func OverridesForShard(sh *shards.Shard) *ShardOverrides {
 		TierHint:      sh.TierPreference,
 		MaxTokens:     sh.MaxTokens,
 	}
-	if sh.Temperature != 0 {
-		t := sh.Temperature
-		ov.Temperature = &t
+	// The stored temperature is what the owner set, 0 included: 0 means
+	// deterministic sampling, and treating it as "unset" ran the
+	// provider's default (0.7-0.8) instead.
+	t := sh.Temperature
+	ov.Temperature = &t
+	// An allowlisted web_search is a grant: shard turns are stamped
+	// SearchNone (no classifier) or classified like trusted turns, and
+	// either way web_search was refused or left to the classifier.
+	for _, tool := range sh.ToolAllowlist {
+		if tool == "web_search" {
+			ov.SearchBudget = shardWebSearchBudget
+		}
 	}
 	if sh.Persistence == shards.PersistenceEphemeral {
 		ov.SkipSessionHydration = true
 		ov.SkipCommit = true
+		// Ephemeral means no side effects: no tool that writes. Saving
+		// refuses them; a shard saved before a tool was known to write
+		// still lists it, so it's dropped here too.
+		kept := make([]string, 0, len(ov.ToolAllowlist))
+		for _, tool := range ov.ToolAllowlist {
+			if !shards.IsWriteCapable(tool) {
+				kept = append(kept, tool)
+			}
+		}
+		ov.ToolAllowlist = kept
 	}
 	return ov
 }
+
+// shardWebSearchBudget is how many web_search calls a turn of a shard
+// that allowlists web_search may make.
+const shardWebSearchBudget = 4
 
 // EphemeralOverrides is the scheduled-actions "ephemeral" envelope:
 // nothing but the prompt. No system prompt, no memory retrieval, no

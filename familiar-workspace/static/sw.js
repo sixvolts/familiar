@@ -4,7 +4,7 @@
 // caching is wasted complexity. The shell precache is just enough
 // to skip a white flash on cold launch.
 
-const CACHE = 'familiar-v10';
+const CACHE = 'familiar-v11';
 
 // Shell assets precached on install. Cache-busting query params on
 // the CSS/JS <link>/<script> tags in mobile.html bypass these
@@ -159,5 +159,35 @@ self.addEventListener('notificationclick', (e) => {
       }
     }
     if (self.clients.openWindow) await self.clients.openWindow(target);
+  })());
+});
+
+// The browser replaced or dropped the push subscription (expiry, key
+// rotation on the push service). Subscribe again with the same options
+// and tell the gateway, or notifications silently stop until the user
+// happens to toggle them off and on.
+self.addEventListener('pushsubscriptionchange', (e) => {
+  e.waitUntil((async () => {
+    const old = e.oldSubscription;
+    let sub = e.newSubscription;
+    if (!sub && old && old.options) {
+      sub = await self.registration.pushManager.subscribe(old.options);
+    }
+    if (!sub) return;
+    const j = sub.toJSON();
+    await fetch('/console/api/push/subscribe', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ endpoint: j.endpoint, keys: j.keys }),
+    });
+    if (old && old.endpoint && old.endpoint !== j.endpoint) {
+      await fetch('/console/api/push/subscribe', {
+        method: 'DELETE',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ endpoint: old.endpoint }),
+      }).catch(() => {});
+    }
   })());
 });

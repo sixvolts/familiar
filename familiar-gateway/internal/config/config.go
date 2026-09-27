@@ -206,6 +206,9 @@ type AdminConfig struct {
 	Enabled       bool   `toml:"enabled"`
 	RPDisplayName string `toml:"rp_display_name"`
 	SessionMaxAge int    `toml:"session_max_age"` // seconds
+	// SessionMaxLifetime caps a session however active it stays (seconds;
+	// 0 = 7 days). session_max_age is the idle window it renews within.
+	SessionMaxLifetime int `toml:"session_max_lifetime"`
 
 	// FirstUserID is the canonical_id assigned to the first WebAuthn
 	// credential registered on a fresh deploy. Pre-OWNER-MIGRATION

@@ -22,7 +22,7 @@ type UserManager interface {
 	ListIdentitiesForUser(ctx context.Context, userID string) ([]identity.IdentityLink, error)
 	SetUserStatus(ctx context.Context, userID string, status identity.UserStatus, approver string) error
 	LinkIdentity(ctx context.Context, userID, platform, platformID, displayName string) error
-	UnlinkIdentity(ctx context.Context, platform, platformID string) error
+	UnlinkIdentity(ctx context.Context, userID, platform, platformID string) error
 	// Phase-2 additions — role plumbing and the last-admin guardrail.
 	SetUserRole(ctx context.Context, userID, role string) error
 	SetUserDisplayName(ctx context.Context, userID, displayName string) error
@@ -150,10 +150,14 @@ func (h *Handler) lookupUsers(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// Emails go to admins, or to a caller who already typed the whole
+	// address. Any signed-in user can call this, and prefix-matched
+	// emails made it a directory of every account's address.
+	au, _ := AuthUserFrom(r.Context())
 	items := make([]lookupUserDTO, 0, len(users))
 	for _, u := range users {
 		out := lookupUserDTO{ID: u.ID, DisplayName: u.DisplayName}
-		if u.Email != nil {
+		if u.Email != nil && (au.IsAdmin() || strings.EqualFold(*u.Email, strings.TrimSpace(q))) {
 			out.Email = *u.Email
 		}
 		items = append(items, out)
@@ -532,7 +536,9 @@ func (h *Handler) ensureNotLastAdmin(ctx context.Context, targetID string) error
 		// downstream call report the real error.
 		return nil
 	}
-	if target.Role != "admin" {
+	// Only an approved admin being demoted or disabled lowers the count
+	// of admins who can still sign in.
+	if target.Role != "admin" || target.Status != identity.StatusApproved {
 		return nil
 	}
 	n, err := h.users.CountAdmins(ctx)
@@ -566,6 +572,15 @@ func (h *Handler) setUserStatus(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid body: "+err.Error())
 		return
 	}
+	// Disabling, denying or un-approving the last approved admin (their
+	// own row included) would leave no one able to approve anyone, and
+	// first-run registration stays closed once a passkey exists.
+	if body.Status != string(identity.StatusApproved) {
+		if err := h.ensureNotLastAdmin(r.Context(), id); err != nil {
+			writeJSONError(w, http.StatusConflict, err.Error())
+			return
+		}
+	}
 	approver, _ := r.Context().Value(ContextKeyUserID).(string)
 	err := h.users.SetUserStatus(r.Context(), id, identity.UserStatus(body.Status), approver)
 	if errors.Is(err, identity.ErrUserNotFound) {
@@ -581,6 +596,13 @@ func (h *Handler) setUserStatus(w http.ResponseWriter, r *http.Request) {
 	// cookie until natural TTL expiry, and /api/chat (which
 	// doesn't run authRequired) would keep accepting it.
 	h.revokeSessionsIfNotApproved(r.Context(), id, body.Status)
+	// Outstanding enrollment links go too: they would still add a
+	// passkey to the account.
+	if body.Status != string(identity.StatusApproved) && h.enrollTokens != nil {
+		if _, err := h.enrollTokens.RevokeActive(r.Context(), id); err != nil {
+			log.Printf("[admin] warning: revoke enrollment links for %s: %v", id, err)
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "id": id, "new_status": body.Status})
 }
 
@@ -657,7 +679,12 @@ func (h *Handler) unlinkIdentity(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "platform and platform_id required")
 		return
 	}
-	if err := h.users.UnlinkIdentity(r.Context(), platform, platformID); err != nil {
+	err := h.users.UnlinkIdentity(r.Context(), r.PathValue("id"), platform, platformID)
+	if errors.Is(err, identity.ErrLinkNotFound) {
+		writeJSONError(w, http.StatusNotFound, "this user has no such link (it may have moved)")
+		return
+	}
+	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

@@ -387,3 +387,43 @@ test("MOBILE: an overlapping edit offers use-theirs / keep-mine", async ({ stack
         .toContain("the phone's version");
     await expect(bar).toBeHidden();
 });
+
+// Pull-to-refresh refreshes the service worker instead of unregistering
+// it: unregistering also ends the worker's push subscription, so each
+// pull silently turned notifications off.
+test("MOBILE: pull-to-refresh keeps the service worker (and its push subscription)", async ({ stack, page, context }) => {
+    const user = await createTestUser();
+    await attachSession(context, stack.workspaceURL, user);
+    await page.addInitScript(() => {
+        const reg: any = {
+            scope: "/",
+            update: async () => { sessionStorage.setItem("sw", (sessionStorage.getItem("sw") || "") + "update;"); },
+            unregister: async () => { sessionStorage.setItem("sw", (sessionStorage.getItem("sw") || "") + "unregister;"); return true; },
+            pushManager: { getSubscription: async () => null },
+        };
+        Object.defineProperty(navigator, "serviceWorker", {
+            configurable: true,
+            value: { getRegistration: async () => reg, getRegistrations: async () => [reg], register: async () => reg, ready: Promise.resolve(reg) },
+        });
+    });
+    await page.goto(stack.workspaceURL);
+    await expect(page.locator("#mob-app")).toBeVisible({ timeout: 15_000 });
+    const header = page.locator(".mob-home-header:visible, .mob-title-header:visible").first();
+    await expect(header).toBeVisible();
+
+    // Drag down 150px from the header, past the 70px threshold.
+    await header.evaluate((el) => {
+        const r = el.getBoundingClientRect();
+        const at = (y: number) => [new Touch({ identifier: 1, target: el, clientX: r.left + 10, clientY: y })];
+        const y0 = r.top + 5;
+        el.dispatchEvent(new TouchEvent("touchstart", { touches: at(y0), bubbles: true, cancelable: true }));
+        el.dispatchEvent(new TouchEvent("touchmove", { touches: at(y0 + 150), bubbles: true, cancelable: true }));
+        el.dispatchEvent(new TouchEvent("touchend", { touches: [], bubbles: true, cancelable: true }));
+    });
+    // The refresh reloads the page (?_r=…); sessionStorage survives it.
+    await page.waitForURL(/_r=/, { timeout: 10_000 });
+    await expect(page.locator("#mob-app")).toBeVisible({ timeout: 15_000 });
+    const calls = await page.evaluate(() => sessionStorage.getItem("sw") || "");
+    expect(calls).toContain("update;");
+    expect(calls).not.toContain("unregister");
+});

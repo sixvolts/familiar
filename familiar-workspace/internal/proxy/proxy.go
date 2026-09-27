@@ -9,7 +9,7 @@
 // proxy rewrites Host to "localhost:8000" before forwarding, the
 // gateway sees the wrong origin and rejects every login. So we
 // override httputil.NewSingleHostReverseProxy's default Director
-// to keep the inbound Host as the gateway sees it.
+// to keep the inbound Host as the gateway sees it (see New's Rewrite).
 //
 // Cookies set by the gateway (admin session, pending-ceremony)
 // flow back through the proxy to the browser unmodified. Because
@@ -45,62 +45,50 @@ func New(targetURL string) (http.Handler, error) {
 		return nil, fmt.Errorf("proxy: target must include scheme and host, got %q", targetURL)
 	}
 
-	rp := httputil.NewSingleHostReverseProxy(target)
+	rp := &httputil.ReverseProxy{
+		// Flush SSE events immediately — without this, the proxy buffers
+		// the entire response body and streaming doesn't work.
+		FlushInterval: -1,
+		// Rewrite, not Director. ReverseProxy strips hop-by-hop headers
+		// and any client-sent X-Forwarded-* before Rewrite runs, so what
+		// the gateway sees is what this sets. With a Director the strip
+		// ran after it: a client's "Connection: X-Forwarded-Host" deleted
+		// the value set here, and X-Forwarded-For got the client's
+		// ip:port and then the IP again.
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.SetURL(target)
+			// Keep the browser-visible Host: the gateway's WebAuthn
+			// checks match it against the RP origins, and fail on
+			// "localhost:8000".
+			pr.Out.Host = pr.In.Host
+			// X-Forwarded-For (the client's IP), -Host and -Proto, from
+			// this hop only: the workspace is the edge, so nothing a
+			// client sends in them is trusted.
+			pr.SetXForwarded()
 
-	// Flush SSE events immediately — without this, the proxy buffers
-	// the entire response body and streaming doesn't work.
-	rp.FlushInterval = -1
-
-	// Single Director that:
-	//   1. Captures the browser-visible Host BEFORE httputil's
-	//      default rewrites it to target.Host. WebAuthn RP-origin
-	//      checks fail without this — the gateway would see
-	//      "localhost:8000" and reject against its rp_origins list.
-	//   2. Snapshots the client's IP + scheme for X-Forwarded-*
-	//      headers so the gateway's logs name the real client, not
-	//      the proxy.
-	//   3. Runs httputil's default Director (rewrites scheme + host).
-	//   4. Restores Host + sets the X-Forwarded headers.
-	originalDirector := rp.Director
-	rp.Director = func(r *http.Request) {
-		inboundHost := r.Host
-		clientIP := r.RemoteAddr
-		scheme := "http"
-		if r.TLS != nil {
-			scheme = "https"
-		}
-		originalDirector(r)
-		r.Host = inboundHost
-		if prior := r.Header.Get("X-Forwarded-For"); prior != "" {
-			r.Header.Set("X-Forwarded-For", prior+", "+clientIP)
-		} else {
-			r.Header.Set("X-Forwarded-For", clientIP)
-		}
-		r.Header.Set("X-Forwarded-Proto", scheme)
-		r.Header.Set("X-Forwarded-Host", inboundHost)
-
-		// Strip client-supplied identity headers before forwarding.
-		// The gateway's /api/chat handler historically accepted
-		// X-User-Email as a caller identity. Allowing browsers /
-		// curl users to set this header through the public proxy
-		// is an authentication bypass — the gateway only resolves
-		// "is this email approved?", never "did this caller prove
-		// ownership of the email?". The session cookie is the
-		// trusted identity signal through this proxy; identity
-		// headers are scrubbed so the gateway must rely on it.
-		// Direct-to-gateway callers (CLI / dev) are unaffected
-		// because they bypass this proxy.
-		for _, h := range []string{
-			"X-User-Email",
-			"X-User-Id",
-			"X-User-ID",
-			"X-Sender-Id",
-			"X-Sender-ID",
-			"X-Familiar-User",
-			"X-Familiar-Sender",
-		} {
-			r.Header.Del(h)
-		}
+			// Strip client-supplied identity headers before forwarding.
+			// The gateway's /api/chat handler historically accepted
+			// X-User-Email as a caller identity. Allowing browsers /
+			// curl users to set this header through the public proxy
+			// is an authentication bypass — the gateway only resolves
+			// "is this email approved?", never "did this caller prove
+			// ownership of the email?". The session cookie is the
+			// trusted identity signal through this proxy; identity
+			// headers are scrubbed so the gateway must rely on it.
+			// Direct-to-gateway callers (CLI / dev) are unaffected
+			// because they bypass this proxy.
+			for _, h := range []string{
+				"X-User-Email",
+				"X-User-Id",
+				"X-User-ID",
+				"X-Sender-Id",
+				"X-Sender-ID",
+				"X-Familiar-User",
+				"X-Familiar-Sender",
+			} {
+				pr.Out.Header.Del(h)
+			}
+		},
 	}
 
 	// ErrorHandler runs when the gateway is unreachable or returns a

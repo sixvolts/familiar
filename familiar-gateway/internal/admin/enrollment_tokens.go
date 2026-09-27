@@ -6,9 +6,10 @@ package admin
 // generate a short-lived single-use token bound to their canonical
 // ID and a target RP (e.g. familiar.wiki). Opening the enrollment
 // link on the target origin walks them through a fresh WebAuthn
-// registration ceremony for the target RP. Tokens auto-expire after
-// 15 minutes and are consumed atomically on successful registration
-// so a stolen URL has a narrow exposure window.
+// registration ceremony for the target RP. Tokens expire after
+// EnrollmentTokenTTL (48h), are consumed before the credential is
+// stored (one link, one passkey), and can be revoked: by an admin, and
+// automatically when the user stops being approved.
 //
 // Admin users can issue tokens on behalf of any other user — useful
 // for onboarding a teammate's new device without round-tripping
@@ -195,6 +196,23 @@ func (s *EnrollmentTokenStore) Consume(ctx context.Context, tok string) error {
 	return nil
 }
 
+// RevokeActive ends every unused, unexpired token for canonicalID: an
+// admin sent a link to the wrong place, or the user was disabled.
+// Returns how many it ended.
+func (s *EnrollmentTokenStore) RevokeActive(ctx context.Context, canonicalID string) (int, error) {
+	res, err := s.pool.ExecContext(ctx, `
+		UPDATE passkey_enrollment_tokens
+		   SET consumed_at = NOW()
+		 WHERE canonical_id = $1
+		   AND consumed_at IS NULL
+		   AND expires_at > NOW()`, canonicalID)
+	if err != nil {
+		return 0, fmt.Errorf("enrollment token: revoke: %w", err)
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
 // CountActive returns how many unconsumed, unexpired tokens are
 // outstanding for canonicalID. Drives the rate-limit check.
 func (s *EnrollmentTokenStore) CountActive(ctx context.Context, canonicalID string) (int, error) {
@@ -221,9 +239,8 @@ func (s *EnrollmentTokenStore) sweepExpired(ctx context.Context) {
 }
 
 // randomEnrollmentToken returns 32 bytes of crypto-strong entropy
-// base64url-encoded (43 chars, URL-safe). 256 bits is overkill for
-// a 15-minute single-use credential but keeps us comfortably below
-// any guessing concern.
+// base64url-encoded (43 chars, URL-safe): comfortably beyond guessing
+// for a single-use link that lives EnrollmentTokenTTL.
 func randomEnrollmentToken() (string, error) {
 	var buf [32]byte
 	if _, err := rand.Read(buf[:]); err != nil {

@@ -225,6 +225,7 @@ func scanShardPasskey(sc rowScanner) (StoredShardPasskey, error) {
 	}
 	p.CredID = encodeCredentialID(credID)
 	p.SignCount = uint32(signCount)
+	p.Credential.Authenticator.SignCount = p.SignCount // see scanCredential
 	p.Transports = []string(transports)
 	if lastUsed.Valid {
 		t := lastUsed.Time

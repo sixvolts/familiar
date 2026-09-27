@@ -908,6 +908,7 @@ func runHTTPAdapter(ctx context.Context, d httpAdapterDeps, adminHOut **admin.Ha
 
 				adapter.SetAdminHandler(adminH.Mux(nil))
 				adapter.SetSessionReader(adminH)
+				adapter.SetRequestGuard(adminH.CSRFGuard)
 				// Gate client-supplied conversation_id on ownership
 				// before it's bound to a session (EXTERNAL-READINESS
 				// P0). Guarded on non-nil so a typed-nil store never

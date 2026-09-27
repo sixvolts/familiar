@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/familiar/workspace/internal/config"
 	"github.com/familiar/workspace/internal/proxy"
@@ -99,11 +100,29 @@ func main() {
 	log.Printf("[workspace] static_dir=%s gateway=%s", staticDir, cfg.GatewayURL)
 	log.Printf("[workspace] listening on %s tls=%v", cfg.ListenAddr, cfg.TLS.Enabled())
 
-	srv := &http.Server{Addr: cfg.ListenAddr, Handler: mux}
+	srv := newServer(cfg.ListenAddr, mux)
 	if cfg.TLS.Enabled() {
 		log.Fatal(srv.ListenAndServeTLS(cfg.TLS.Cert, cfg.TLS.Key))
 	} else {
 		log.Fatal(srv.ListenAndServe())
+	}
+}
+
+// newServer builds the public listener (the only one: the gateway binds
+// loopback). A client that dribbles its request headers, or opens
+// keep-alive connections and leaves them idle, used to hold a connection
+// and a file descriptor forever.
+//
+// Deliberately no ReadTimeout or WriteTimeout. This server proxies
+// long-lived streams (page events, chat SSE, turns that run for many
+// minutes): a write deadline cuts them, and a read deadline reached
+// while a handler is still streaming cancels the request's context.
+func newServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 }
 
@@ -229,6 +248,15 @@ func makeStaticHandler(staticDir string, stamper *assetStamper) http.HandlerFunc
 		// right SPA — mobile or desktop based on UA.
 		info, err := os.Stat(full)
 		if err == nil && !info.IsDir() {
+			// An HTML file asked for by name (/mobile.html, /enroll.html)
+			// is a shell like any other: same CSP, frame-ancestors and
+			// nosniff, same asset stamping. Plain ServeFile sent it bare.
+			if strings.EqualFold(filepath.Ext(full), ".html") {
+				docSecurityHeaders(w)
+				w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+				stamper.serveShell(w, r, full)
+				return
+			}
 			http.ServeFile(w, r, full)
 			return
 		}

@@ -268,6 +268,11 @@ func scanCredential(r rowScanner) (StoredCredential, error) {
 		return sc, fmt.Errorf("admin: unmarshal credential %s: %w", sc.ID, err)
 	}
 	sc.SignCount = uint32(signCount)
+	// The blob holds the counter from registration; the column holds
+	// the latest. FinishLogin compares against the credential's own
+	// copy, so without this its clone check saw the registration value
+	// forever.
+	sc.Credential.Authenticator.SignCount = sc.SignCount
 	if lastUsed.Valid {
 		t := lastUsed.Time
 		sc.LastUsed = &t

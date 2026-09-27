@@ -4,13 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"net/url"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/lib/pq"
+
+	"github.com/familiar/gateway/internal/testdsn"
 )
 
 // freshSchema is the scratch schema TestMigrateFreshDatabase builds in.
@@ -82,11 +82,7 @@ func TestMigrateFreshDatabase(t *testing.T) {
 		_, _ = admin.ExecContext(context.Background(), "DROP SCHEMA IF EXISTS "+freshSchema+" CASCADE")
 	})
 
-	sep := "?"
-	if strings.Contains(dsn, "?") {
-		sep = "&"
-	}
-	scoped := dsn + sep + "options=" + url.QueryEscape("-csearch_path="+freshSchema+",public")
+	scoped := testdsn.Scoped(t, dsn, freshSchema)
 	pool, err := Open(scoped)
 	if err != nil {
 		t.Fatalf("db.Open (scoped): %v", err)
@@ -275,11 +271,7 @@ func scratchPools(t *testing.T, schema string) (admin, pool *Pool) {
 	t.Cleanup(func() {
 		_, _ = admin.ExecContext(context.Background(), "DROP SCHEMA IF EXISTS "+schema+" CASCADE")
 	})
-	sep := "?"
-	if strings.Contains(dsn, "?") {
-		sep = "&"
-	}
-	pool, err = Open(dsn + sep + "options=" + url.QueryEscape("-csearch_path="+schema+",public"))
+	pool, err = Open(testdsn.Scoped(t, dsn, schema))
 	if err != nil {
 		t.Fatalf("db.Open (scoped): %v", err)
 	}

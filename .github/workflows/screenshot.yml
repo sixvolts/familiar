@@ -1,14 +1,15 @@
 # Keep docs/screenshot.png (the README hero) in sync with the real UI.
 #
-# Runs ONLY when the frontend changes, regenerates the screenshot from a
-# live gateway+workspace stack via the Playwright generator
+# Meant to run when the frontend changes (that trigger is off for now: see
+# BRING-UP STATE below; manual dispatch only). Regenerates the screenshot
+# from a live gateway+workspace stack via the Playwright generator
 # (tests/e2e/screenshot/), and commits the refreshed PNG back. This is the
 # only place Node/Playwright touches the screenshot — local builds and the
 # Makefile stay pure Go.
 #
-# No loop: the trigger watches familiar-workspace/static/**, but the
-# commit only changes docs/screenshot.png (+ '[skip ci]'), which isn't a
-# trigger path.
+# No loop, once the trigger is back: it would watch
+# familiar-workspace/static/**, and the commit only changes
+# docs/screenshot.png (+ '[skip ci]'), which isn't a trigger path.
 
 name: screenshot
 

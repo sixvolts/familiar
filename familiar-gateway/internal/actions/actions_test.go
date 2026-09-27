@@ -12,7 +12,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -24,6 +23,7 @@ import (
 	"github.com/familiar/gateway/internal/pipeline"
 	"github.com/familiar/gateway/internal/session"
 	"github.com/familiar/gateway/internal/shards"
+	"github.com/familiar/gateway/internal/testdsn"
 )
 
 // storeForTest migrates into a dedicated `actions_test` schema (the
@@ -48,11 +48,7 @@ func storeForTest(t *testing.T) *Store {
 		t.Fatalf("create actions_test schema: %v", err)
 	}
 
-	sep := "?"
-	if strings.Contains(dsn, "?") {
-		sep = "&"
-	}
-	pool, err := db.Open(dsn + sep + "options=" + url.QueryEscape("-csearch_path=actions_test,public"))
+	pool, err := db.Open(testdsn.Scoped(t, dsn, "actions_test"))
 	if err != nil {
 		t.Fatalf("db.Open (actions_test schema): %v", err)
 	}

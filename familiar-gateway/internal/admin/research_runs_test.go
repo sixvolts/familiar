@@ -3,12 +3,11 @@ package admin
 import (
 	"context"
 	"errors"
-	"net/url"
 	"os"
-	"strings"
 	"testing"
 
 	"github.com/familiar/gateway/internal/db"
+	"github.com/familiar/gateway/internal/testdsn"
 	"github.com/familiar/gateway/internal/testutil"
 )
 
@@ -29,11 +28,7 @@ func runStoreForTest(t *testing.T) (*ResearchRunStore, string) {
 	if _, err := adminPool.ExecContext(ctx, `CREATE SCHEMA IF NOT EXISTS research_run_test`); err != nil {
 		t.Fatalf("create schema: %v", err)
 	}
-	sep := "?"
-	if strings.Contains(dsn, "?") {
-		sep = "&"
-	}
-	pool, err := db.Open(dsn + sep + "options=" + url.QueryEscape("-csearch_path=research_run_test,public"))
+	pool, err := db.Open(testdsn.Scoped(t, dsn, "research_run_test"))
 	if err != nil {
 		t.Fatalf("db.Open (scoped): %v", err)
 	}

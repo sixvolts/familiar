@@ -9,7 +9,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/familiar/gateway/internal/db"
+	"github.com/familiar/gateway/internal/testdsn"
 )
 
 const sampleSkill = `---
@@ -146,11 +146,7 @@ func storeForTest(t *testing.T) *Store {
 	if _, err := adminPool.ExecContext(ctx, `CREATE SCHEMA IF NOT EXISTS skillpkg_test`); err != nil {
 		t.Fatalf("create schema: %v", err)
 	}
-	sep := "?"
-	if strings.Contains(dsn, "?") {
-		sep = "&"
-	}
-	pool, err := db.Open(dsn + sep + "options=" + url.QueryEscape("-csearch_path=skillpkg_test,public"))
+	pool, err := db.Open(testdsn.Scoped(t, dsn, "skillpkg_test"))
 	if err != nil {
 		t.Fatalf("db.Open scoped: %v", err)
 	}

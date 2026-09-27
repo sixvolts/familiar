@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/familiar/gateway/internal/db"
 	"github.com/familiar/gateway/internal/identity"
+	"github.com/familiar/gateway/internal/testdsn"
 	"github.com/familiar/gateway/internal/testutil"
 	"github.com/go-webauthn/webauthn/webauthn"
 )
@@ -38,11 +38,7 @@ func privateAuthPool(t *testing.T) *db.Pool {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _, _ = adminPool.ExecContext(context.Background(), "DROP SCHEMA IF EXISTS "+schema+" CASCADE") })
-	sep := "?"
-	if strings.Contains(dsn, "?") {
-		sep = "&"
-	}
-	pool, err := db.Open(dsn + sep + "options=" + url.QueryEscape("-csearch_path="+schema+",public"))
+	pool, err := db.Open(testdsn.Scoped(t, dsn, schema))
 	if err != nil {
 		t.Fatal(err)
 	}

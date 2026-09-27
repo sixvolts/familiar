@@ -20,28 +20,7 @@
 import { test as base, expect } from "@playwright/test";
 import { start, GatewayStack } from "../fixtures/gateway";
 import { createTestUser, TestUser } from "../fixtures/user";
-
-const MODEL_URL = process.env.FAMILIAR_TEST_CHAT_MODEL_URL || "http://127.0.0.1:8090";
-// Deadline for a scheduled/research run to finish. Configurable because the
-// right value depends entirely on the backend: production furnace answers far
-// faster than icecube's local MLX model, where a single run measured ~230s
-// against this 120s default. Left hardcoded, model-backed specs fail, Playwright
-// retries them twice (retries: 2 in CI), and three ~4min attempts per test
-// exhausted the job's 60min budget — which is how the last two runs on
-// ci/consolidate died without producing a verdict.
-//
-// Default stays tight so a real slowdown still shows up locally; CI raises it
-// explicitly in e2e.yml, where the value is visible rather than buried.
-const RUN_TIMEOUT = Number(process.env.FAMILIAR_E2E_RUN_TIMEOUT ?? 120_000);
-
-async function modelIsUp(): Promise<boolean> {
-    try {
-        const resp = await fetch(`${MODEL_URL}/health`, { signal: AbortSignal.timeout(2_000) });
-        return resp.ok;
-    } catch {
-        return false;
-    }
-}
+import { MODEL_URL, RUN_TIMEOUT, gateOnModel } from "../helpers/model";
 
 const test = base.extend<{}, { stack: GatewayStack }>({
     stack: [
@@ -56,9 +35,7 @@ const test = base.extend<{}, { stack: GatewayStack }>({
 
 test.describe.configure({ mode: "serial" });
 
-test.beforeEach(async () => {
-    test.skip(!(await modelIsUp()), `no inference server at ${MODEL_URL} — scheduled-wiki specs need a live model`);
-});
+gateOnModel(test, "scheduled-wiki specs", RUN_TIMEOUT);
 
 function authed(user: TestUser) {
     return { Cookie: user.cookieHeader, "Content-Type": "application/json" };
@@ -164,6 +141,9 @@ test("a wiki-scoped shard action prunes the grocery list and leaves emptied sect
     stack,
     request,
 }) => {
+    // pollRun waits up to RUN_TIMEOUT, which means nothing unless the test
+    // itself outlives it; Playwright's default (60s) used to cut it short.
+    expect(test.info().timeout).toBeGreaterThan(RUN_TIMEOUT);
     const user = await createTestUser();
 
     // Two books with a unique slug suffix (the shared test DB has a

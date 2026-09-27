@@ -10,18 +10,9 @@
 import { test as base, expect } from "@playwright/test";
 import { start, GatewayStack } from "../fixtures/gateway";
 import { createTestUser, TestUser } from "../fixtures/user";
+import { MODEL_URL, gateOnModel } from "../helpers/model";
 
-const MODEL_URL = process.env.FAMILIAR_TEST_CHAT_MODEL_URL || "http://127.0.0.1:8090";
 const TURN_TIMEOUT = 120_000;
-
-async function modelIsUp(): Promise<boolean> {
-    try {
-        const resp = await fetch(`${MODEL_URL}/health`, { signal: AbortSignal.timeout(2_000) });
-        return resp.ok;
-    } catch {
-        return false;
-    }
-}
 
 const test = base.extend<{}, { stack: GatewayStack }>({
     stack: [
@@ -36,9 +27,7 @@ const test = base.extend<{}, { stack: GatewayStack }>({
 });
 
 test.describe.configure({ mode: "serial" });
-test.beforeEach(async () => {
-    test.skip(!(await modelIsUp()), `no inference server at ${MODEL_URL} — wiki-prompt specs need a live model`);
-});
+gateOnModel(test, "wiki-prompt specs", TURN_TIMEOUT);
 
 function authed(user: TestUser) {
     return { Cookie: user.cookieHeader, "Content-Type": "application/json" };
@@ -105,8 +94,9 @@ test("the recipe → grocery list wiki flow works under the real prompts", async
     // Outcome: the grocery list gained the ingredients, kept its
     // existing item, and the recipe was read (not rewritten).
     const groceryNow = (await pageContent(request, stack, user, "personal", grocery.id)).toLowerCase();
+    // Whole words: "butter" must not be satisfied by "buttermilk".
     for (const ing of INGREDIENTS) {
-        expect(groceryNow, `grocery list should mention ${ing}`).toContain(ing);
+        expect(groceryNow, `grocery list should mention ${ing}`).toMatch(new RegExp(`\\b${ing}\\b`));
     }
     expect(groceryNow, "append must not clobber existing items").toContain("paper towels");
     const recipeNow = await pageContent(request, stack, user, "personal", recipe.id);

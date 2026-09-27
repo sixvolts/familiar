@@ -3,7 +3,6 @@ package admin
 import (
 	"context"
 	"errors"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -11,6 +10,7 @@ import (
 	"time"
 
 	"github.com/familiar/gateway/internal/db"
+	"github.com/familiar/gateway/internal/testdsn"
 	"github.com/familiar/gateway/internal/testutil"
 )
 
@@ -31,11 +31,7 @@ func wikiStoreForTest(t *testing.T) (*WikiStore, string) {
 	if _, err := admin.ExecContext(ctx, `CREATE SCHEMA IF NOT EXISTS wiki_conc_test`); err != nil {
 		t.Fatalf("create schema: %v", err)
 	}
-	sep := "?"
-	if strings.Contains(dsn, "?") {
-		sep = "&"
-	}
-	pool, err := db.Open(dsn + sep + "options=" + url.QueryEscape("-csearch_path=wiki_conc_test,public"))
+	pool, err := db.Open(testdsn.Scoped(t, dsn, "wiki_conc_test"))
 	if err != nil {
 		t.Fatalf("db.Open (scoped): %v", err)
 	}

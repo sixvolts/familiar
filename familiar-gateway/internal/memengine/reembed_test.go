@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -15,6 +14,7 @@ import (
 
 	"github.com/familiar/gateway/internal/db"
 	"github.com/familiar/gateway/internal/llm"
+	"github.com/familiar/gateway/internal/testdsn"
 	"github.com/familiar/gateway/internal/testutil"
 )
 
@@ -124,11 +124,7 @@ func setupReembedTest(t *testing.T) *MemEngine {
 		_, _ = admin.ExecContext(context.Background(), "DROP SCHEMA IF EXISTS "+schema+" CASCADE")
 	})
 
-	sep := "?"
-	if strings.Contains(dsn, "?") {
-		sep = "&"
-	}
-	scoped := dsn + sep + "options=" + url.QueryEscape("-csearch_path="+schema+",public")
+	scoped := testdsn.Scoped(t, dsn, schema)
 	pool, err := db.Open(scoped)
 	if err != nil {
 		t.Fatalf("db.Open (scoped): %v", err)

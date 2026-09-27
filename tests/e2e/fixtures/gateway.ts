@@ -208,8 +208,8 @@ function runGoBuild(cwd: string, pkg: string, out: string) {
 
 // Minimal gateway.toml for tests: in-process memengine, no sidecar,
 // no models that actually resolve. The dummy model entry is required
-// by Config.Validate (at least one model). Chat tests will need a
-// real model wired in a future phase.
+// by Config.Validate (at least one model). Model-backed specs pass
+// chatModelURL, which adds a real model (test/gemma) at that endpoint.
 //
 // When admin is true, the [admin] block is enabled with a relying
 // party bound to the workspace origin so the WebAuthn ceremony
@@ -382,7 +382,14 @@ async function freePort(): Promise<number> {
     });
 }
 
-async function waitForUrl(
+// exited reports whether child has ended. A child killed by a signal
+// (jetsam under memory pressure, say) has exitCode null and signalCode
+// set, so exitCode alone reads it as still running.
+function exited(child: ChildProcess): boolean {
+    return child.exitCode !== null || child.signalCode !== null;
+}
+
+export async function waitForUrl(
     url: string,
     timeoutMs: number,
     child: ChildProcess,
@@ -391,8 +398,8 @@ async function waitForUrl(
     const deadline = Date.now() + timeoutMs;
     let lastErr: unknown = null;
     while (Date.now() < deadline) {
-        if (child.exitCode !== null) {
-            throw new Error(`${label} exited with code ${child.exitCode} before responding at ${url}`);
+        if (exited(child)) {
+            throw new Error(`${label} exited (${child.exitCode ?? child.signalCode}) before responding at ${url}`);
         }
         try {
             const resp = await fetch(url, { signal: AbortSignal.timeout(2_000) });
@@ -406,16 +413,16 @@ async function waitForUrl(
     throw new Error(`${label} never came up at ${url} (last error: ${lastErr})`);
 }
 
-async function stopChild(child: ChildProcess): Promise<void> {
-    if (child.exitCode !== null) return;
+export async function stopChild(child: ChildProcess): Promise<void> {
+    if (exited(child)) return;
+    // Listen before signalling, and once: 'exit' fires a single time,
+    // and a listener added after it has fired waits forever.
+    const exit = new Promise<"exit">((resolve) => child.once("exit", () => resolve("exit")));
     child.kill("SIGTERM");
-    const settled = await Promise.race([
-        new Promise<"exit">((resolve) => child.once("exit", () => resolve("exit"))),
-        sleep(3_000).then(() => "timeout" as const),
-    ]);
+    const settled = await Promise.race([exit, sleep(3_000).then(() => "timeout" as const)]);
     if (settled === "timeout") {
         child.kill("SIGKILL");
-        await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+        await exit;
     }
 }
 

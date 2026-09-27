@@ -116,3 +116,24 @@ export async function setUserStatus(userID: string, status: string): Promise<voi
         await client.end();
     }
 }
+
+// seedCredential plants a minimal webauthn_credentials row. The blob is
+// opaque to everything that only counts rows (the registration gate,
+// the boot screen's choice between login and first-run setup); only a
+// real login ceremony would unmarshal it.
+export async function seedCredential(userID: string): Promise<void> {
+    const dsn = process.env.FAMILIAR_TEST_DSN;
+    if (!dsn) throw new Error("seedCredential: FAMILIAR_TEST_DSN is required");
+    const client = new Client({ connectionString: dsn });
+    await client.connect();
+    try {
+        await client.query(
+            `INSERT INTO webauthn_credentials (id, credential_blob, user_id, display_name, webauthn_user_handle)
+             VALUES ($1, $2, $3, 'seeded', $3)
+             ON CONFLICT (id) DO NOTHING`,
+            [`e2e-cred-${userID}`, Buffer.from("{}"), userID],
+        );
+    } finally {
+        await client.end();
+    }
+}

@@ -18,7 +18,7 @@
 
 import { test as base, expect } from "@playwright/test";
 import { start, GatewayStack } from "../fixtures/gateway";
-import { createTestUser, attachSession } from "../fixtures/user";
+import { createTestUser, attachSession, seedCredential } from "../fixtures/user";
 
 const test = base.extend<{}, { stack: GatewayStack }>({
     stack: [
@@ -41,10 +41,15 @@ const SHOT = {
 
 const isMobile = (name: string) => name === "mobile";
 
+// The login screen. Which screen an unauthenticated boot shows depends
+// on the database: login once any passkey exists, first-run setup on an
+// empty table. This seeds one, so the baseline doesn't depend on which
+// specs ran before it (or on a Go tier having truncated the table).
 test("the unauthenticated boot screen is visually stable", async ({
     stack,
     page,
 }, testInfo) => {
+    await seedCredential((await createTestUser()).id);
     await page.goto(stack.workspaceURL);
 
     if (isMobile(testInfo.project.name)) {
@@ -53,16 +58,13 @@ test("the unauthenticated boot screen is visually stable", async ({
         await expect(page.locator("#mob-auth-loading")).toBeHidden({
             timeout: 15_000,
         });
-        await expect(
-            page.locator("#mob-auth-login:visible, #mob-auth-setup:visible").first(),
-        ).toBeVisible();
+        await expect(page.locator("#mob-auth-login")).toBeVisible();
     } else {
-        // Desktop serves the SPA index. NOT waitForLoadState("networkidle"):
-        // the app holds an SSE stream open for notes-sync, so the network
-        // is never idle and that wait can only ever time out. Wait for the
-        // document to be interactive instead.
-        await page.waitForLoadState("domcontentloaded");
-        await expect(page.locator("body")).toBeVisible();
+        // NOT waitForLoadState("networkidle"): the app holds an SSE stream
+        // open for notes-sync, so the network is never idle and that wait
+        // can only ever time out. Wait for the boot view to hand over.
+        await expect(page.locator("#view-loading")).toBeHidden({ timeout: 15_000 });
+        await expect(page.locator("#view-login")).toBeVisible();
     }
 
     await expect(page).toHaveScreenshot("boot-unauthenticated.png", SHOT);
@@ -90,26 +92,20 @@ test("the authenticated app shell is visually stable", async ({
 
 // The checkbox case specifically. §5's example regression was a
 // task-list checkbox whose background tiled into a grid over the label
-// text — rendered markdown, not a native control. This asserts the
-// rendered surface rather than the editor, because that's where the
-// break showed.
+// text. It showed in a note: TOAST UI renders a task-list item's box as
+// a background image on `.toastui-editor-contents .task-list-item::before`,
+// and mobile.css pads that pseudo-element out to a 44px tap target,
+// re-declaring the background properties the vendor shorthand resets.
+// So the baseline is a real note in the real editor, not a hand-built
+// list: only that has the selector the fix (and the regression) lives on.
 test("rendered task-list checkboxes are visually stable", async ({
     stack,
     page,
     context,
+    request,
 }, testInfo) => {
     const user = await createTestUser();
     await attachSession(context, stack.workspaceURL, user);
-    await page.goto(stack.workspaceURL);
-
-    const shell = isMobile(testInfo.project.name)
-        ? page.locator("#mob-app")
-        : page.locator("#view-dashboard");
-    await expect(shell).toBeVisible({ timeout: 15_000 });
-
-    // Render a task list through the app's own markdown pipeline rather
-    // than asserting against a hand-built DOM, so the baseline covers
-    // the real renderer + CSS, which is what regressed.
     const md = [
         "## Checklist",
         "",
@@ -117,44 +113,40 @@ test("rendered task-list checkboxes are visually stable", async ({
         "- [ ] an open item with a reasonably long label",
         "- [ ] a third item",
     ].join("\n");
+    const note = await (
+        await request.post(`${stack.workspaceURL}/console/api/books/personal/pages`, {
+            headers: { Cookie: user.cookieHeader, "Content-Type": "application/json" },
+            data: { title: "Checklist", content: md },
+        })
+    ).json();
 
-    const host = await page.evaluateHandle((markdown) => {
-        const el = document.createElement("div");
-        el.id = "visual-md-probe";
-        el.style.cssText =
-            "position:fixed;inset:0;z-index:99999;background:var(--bg,#fff);padding:24px;overflow:auto;";
-        // Prefer the app's own renderer when it exposes one; fall back
-        // to a minimal task-list DOM that still exercises the CSS.
-        const w = window as unknown as Record<string, any>;
-        const render = w.renderMarkdown || w.md?.render?.bind(w.md);
-        if (typeof render === "function") {
-            el.innerHTML = render(markdown);
-        } else {
-            el.innerHTML =
-                '<h2>Checklist</h2><ul class="contains-task-list">' +
-                markdown
-                    .split("\n")
-                    .filter((l) => l.startsWith("- ["))
-                    .map(
-                        (l) =>
-                            '<li class="task-list-item"><input type="checkbox" ' +
-                            (l.includes("[x]") ? "checked " : "") +
-                            "disabled> " +
-                            l.slice(6) +
-                            "</li>",
-                    )
-                    .join("") +
-                "</ul>";
-        }
-        document.body.appendChild(el);
-        return el;
-    }, md);
+    let editor;
+    if (isMobile(testInfo.project.name)) {
+        await page.goto(`${stack.workspaceURL}/#notes/${note.id}`);
+        editor = page.locator("#mob-note-body .toastui-editor-ww-container .ProseMirror").first();
+    } else {
+        await page.goto(stack.workspaceURL);
+        await expect(page.locator("#view-dashboard")).toBeVisible({ timeout: 15_000 });
+        await page.locator(".sidebar-cat-notes").click();
+        const shell = page.locator(".notes-shell").first();
+        await expect(shell).toBeVisible({ timeout: 10_000 });
+        await page.evaluate((id) => {
+            window.dispatchEvent(new CustomEvent("familiar:openDoc", { detail: { surface: "notes", id } }));
+        }, note.id);
+        editor = shell.locator(".toastui-editor-ww-container .ProseMirror").first();
+    }
+    await expect(editor).toContainText("a third item", { timeout: 15_000 });
+    // The surface the CSS targets, or this baseline guards nothing.
+    await expect(editor.locator(".task-list-item")).toHaveCount(3);
+    expect(await editor.evaluate((el) => el.classList.contains("toastui-editor-contents"))).toBe(true);
 
-    await expect(page.locator("#visual-md-probe")).toBeVisible();
-    await expect(page.locator("#visual-md-probe")).toHaveScreenshot(
-        "task-list-checkboxes.png",
-        SHOT,
-    );
-
-    await host.dispose();
+    // Just the list and a margin round it: the ::before box reaches
+    // past the item's edges, and in a shot of the whole editor a tiled
+    // checkbox is too few pixels to clear maxDiffPixelRatio.
+    const box = (await editor.locator("ul").first().boundingBox())!;
+    const pad = 16;
+    await expect(page).toHaveScreenshot("task-list-checkboxes.png", {
+        ...SHOT,
+        clip: { x: Math.max(0, box.x - pad), y: Math.max(0, box.y - pad), width: box.width + 2 * pad, height: box.height + 2 * pad },
+    });
 });

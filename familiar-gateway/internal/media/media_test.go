@@ -12,14 +12,13 @@ import (
 	"image"
 	"image/color"
 	"image/png"
-	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/familiar/gateway/internal/db"
+	"github.com/familiar/gateway/internal/testdsn"
 )
 
 func storeForTest(t *testing.T) *Store {
@@ -37,11 +36,7 @@ func storeForTest(t *testing.T) *Store {
 	if _, err := adminPool.ExecContext(ctx, `CREATE SCHEMA IF NOT EXISTS media_test`); err != nil {
 		t.Fatalf("create schema: %v", err)
 	}
-	sep := "?"
-	if strings.Contains(dsn, "?") {
-		sep = "&"
-	}
-	pool, err := db.Open(dsn + sep + "options=" + url.QueryEscape("-csearch_path=media_test,public"))
+	pool, err := db.Open(testdsn.Scoped(t, dsn, "media_test"))
 	if err != nil {
 		t.Fatalf("db.Open scoped: %v", err)
 	}

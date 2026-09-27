@@ -40,7 +40,6 @@
     var MD_CDN = {
         marked:    '/vendor/marked/marked.min.js',
         dompurify: '/vendor/dompurify/purify.min.js',
-        hljsJS:    '/vendor/highlight/core.min.js',
         hljsCSS:   '/vendor/highlight/atom-one-dark.min.css',
     };
     var mdDepsPromise = null;
@@ -64,14 +63,10 @@
                 document.head.appendChild(css);
                 // DOMPurify normally comes from the shell (mobile.html).
                 await Promise.all([loadScript(MD_CDN.marked), window.DOMPurify ? null : loadScript(MD_CDN.dompurify)]);
-                await loadScript(MD_CDN.hljsJS);
                 if (window.marked && window.marked.use) {
-                    // NOT gated on window.hljs: the vendored highlight core is
-                    // a CommonJS build that never sets the global, so gating
-                    // the whole override on it silently dropped the research-
-                    // card hook too (cards rendered as raw fenced text). hljs
-                    // use is guarded per-call; highlighting degrades to plain
-                    // escaped code when it's absent.
+                    // Renders the research-card fence as an inline card; other
+                    // code is escaped into a .hljs block (colors only: the
+                    // vendored highlight.js core threw on every load).
                     window.marked.use({
                         renderer: {
                             code: function (code, infostring) {
@@ -79,13 +74,6 @@
                                 // Inline completed-research card (research-blocks.js).
                                 if (lang === 'research-card' && window.familiarResearchCard) {
                                     return window.familiarResearchCard.html(code);
-                                }
-                                if (lang && window.hljs && window.hljs.getLanguage && window.hljs.getLanguage(lang)) {
-                                    try {
-                                        return '<pre><code class="hljs language-' + lang + '">'
-                                            + window.hljs.highlight(code, { language: lang }).value
-                                            + '</code></pre>';
-                                    } catch (_) { /* fall through */ }
                                 }
                                 return '<pre><code class="hljs">' + escapeHTML(code) + '</code></pre>';
                             },
@@ -429,6 +417,15 @@
         // letting the raw hash navigate to an unrecognized route. Delegated
         // once so it covers live-appended and reloaded message links.
         document.addEventListener('click', async function (ev) {
+            // A web link in a reply opens outside the app. In place, it
+            // replaced the app (installed, there is no back button) and
+            // tore down a reply still streaming.
+            var ext = ev.target.closest && ev.target.closest('#mob-thread-scroll a[href]');
+            if (ext && /^https?:/i.test(ext.getAttribute('href') || '')) {
+                ev.preventDefault();
+                window.open(ext.href, '_blank', 'noopener,noreferrer');
+                return;
+            }
             var a = ev.target.closest && ev.target.closest('a[href^="#note/"]');
             if (!a) return;
             ev.preventDefault();
@@ -561,6 +558,9 @@
         function isDisplayableMsg(m) {
             if (!m || m.role === 'tool') return false;
             if (m.role === 'assistant' && !String(m.content || '').trim()) return false;
+            // A tool-calling row's prose is also in the turn's final reply
+            // (the gateway merges it): showing it repeated the text.
+            if (m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length) return false;
             return true;
         }
 
@@ -1086,6 +1086,23 @@
             // path) — appended to the message as a tappable link below.
             var researchNote = null;
             var aborted = false; // user tapped stop
+            // Tokens render once per animation frame, not per token (which
+            // rebuilt the whole message each time: quadratic, and the
+            // reply trailed the model). flushRender draws now and drops a
+            // pending frame so it can't redraw over the final text.
+            var renderFrame = 0;
+            var scheduleRender = function () {
+                if (renderFrame) return;
+                renderFrame = requestAnimationFrame(function () {
+                    renderFrame = 0;
+                    aBubble.innerHTML = renderMD(assistantText);
+                    follow();
+                });
+            };
+            var flushRender = function () {
+                if (renderFrame) { cancelAnimationFrame(renderFrame); renderFrame = 0; }
+                aBubble.innerHTML = renderMD(assistantText);
+            };
             var streamFailed = false; // server refusal, error frame, or a dropped stream
             // CHAT-REARCH §"Phase 0" — native /api/chat protocol.
             // Send the new user message and the conversation it belongs
@@ -1108,10 +1125,17 @@
                     // A refusal (429 busy, 403, 409) is the server's answer,
                     // not a dropped connection: show it rather than polling
                     // for a reply that will never come.
+                    // The gateway's error is {"error":{"message":…}}: reading
+                    // .error as a string threw, and the TypeError took the
+                    // "connection lost" path after all.
                     var errText = await resp.text().catch(function () { return ''; });
-                    var msg = errText;
-                    try { msg = (JSON.parse(errText) || {}).error || errText; } catch (_) { /* plain text */ }
-                    var refused = new Error(msg ? msg.slice(0, 200) : 'HTTP ' + resp.status);
+                    var msg = '';
+                    try {
+                        var eb = JSON.parse(errText) || {};
+                        msg = (eb.error && (eb.error.message || (typeof eb.error === 'string' ? eb.error : ''))) || '';
+                    } catch (_) { msg = errText; }
+                    if (resp.status === 401) handleUnauthorized();
+                    var refused = new Error(msg ? String(msg).slice(0, 200) : 'HTTP ' + resp.status);
                     refused.inBand = true;
                     throw refused;
                 }
@@ -1134,8 +1158,7 @@ var reader = resp.body.getReader();
                         if (tFirstToken == null) tFirstToken = performance.now();
                         dropThinkPx(); // real output began — hand motion to the text
                         assistantText += c;
-                        aBubble.innerHTML = renderMD(assistantText);
-                        follow();
+                        scheduleRender();
                     } else if (kind === 'reasoning') {
                         var c2 = (payload && payload.chunk) || '';
                         if (!c2) return;
@@ -1166,10 +1189,8 @@ var reader = resp.body.getReader();
                         // can include reasoning the gateway's formatter split
                         // out afterwards. Mobile showed the raw stream (and
                         // saved it, when it saved the reply). Mirrors chat.js.
-                        if (payload && typeof payload.content === 'string' && payload.content !== assistantText) {
-                            assistantText = payload.content;
-                            aBubble.innerHTML = renderMD(assistantText);
-                        }
+                        if (payload && typeof payload.content === 'string') assistantText = payload.content;
+                        flushRender();
                         if (payload && typeof payload.reasoning_content === 'string' && payload.reasoning_content) {
                             reasoningText = reasoningText.trim()
                                 ? reasoningText + '\n' + payload.reasoning_content
@@ -1221,6 +1242,7 @@ var reader = resp.body.getReader();
                     }
                 }
             } catch (e) {
+                flushRender();
                 // User hit stop → keep the partial answer; other errors show.
                 if (e.name === 'AbortError') { aborted = true; }
                 else if (e && e.inBand) {
@@ -1239,6 +1261,8 @@ var reader = resp.body.getReader();
                     streamFailed = true;
                 }
             } finally {
+                if (renderFrame) { cancelAnimationFrame(renderFrame); renderFrame = 0; }
+                if (!streamFailed) aBubble.innerHTML = renderMD(assistantText);
                 state.streaming = false;
                 state.currentAbort = null;
                 state.currentSessionId = null;

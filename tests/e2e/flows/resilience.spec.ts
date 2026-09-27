@@ -54,7 +54,9 @@ test("a 5xx from the model surfaces a chat error and frees the composer", async 
         await shell.locator(".chat-input").fill("hello there");
         await shell.locator(".chat-send-btn").click();
 
-        await expect(shell.locator(".chat-error")).toBeVisible({ timeout: 10_000 });
+        // The server's reason, not a misreported "Connection lost".
+        await expect(shell.locator(".chat-error")).toContainText("model unavailable", { timeout: 10_000 });
+        await expect(shell.locator(".chat-messages")).not.toContainText("Connection lost");
         // The composer must recover — a stuck "…" button is the worst
         // outcome (user thinks the app is wedged).
         const sendBtn = shell.locator(".chat-send-btn");

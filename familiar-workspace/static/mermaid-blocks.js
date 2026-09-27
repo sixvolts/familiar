@@ -93,9 +93,9 @@
             el.textContent = src;
             return;
         }
+        var id = "familiar-mmd-" + (++seq);
         try {
-            var id = "familiar-mmd-" + (++seq);
-            var out = await window.mermaid.render(id, src);
+            var out = await exclusive(function () { return window.mermaid.render(id, src); });
             el.innerHTML = out.svg;
             el.classList.add("is-rendered");
             el.classList.remove("is-error");
@@ -104,8 +104,11 @@
             el.classList.remove("is-rendered");
             el.classList.add("is-error");
             el.title = String((e && e.message) || e);
-            var stray = document.getElementById("familiar-mmd-" + seq);
-            if (stray) stray.remove();
+            // This render's own leftovers: its SVG and mermaid's wrapper
+            // (d<id>), which a parse error leaves in the body. It removed
+            // "familiar-mmd-" + seq, the latest id, which by then was
+            // another block's render in progress: that diagram failed too.
+            removeStray(id);
         }
     }
 
@@ -183,6 +186,68 @@
         };
     }
 
+    // ── Render queue ────────────────────────────────────────────
+    // Every mermaid.render goes through here, one at a time, so a render
+    // that changes mermaid's global config (rasterize) can't have
+    // another render start under that config.
+    var renderQueue = Promise.resolve();
+    function exclusive(fn) {
+        var run = renderQueue.then(fn, fn);
+        renderQueue = run.catch(function () {});
+        return run;
+    }
+
+    // removeStray drops what a failed render leaves in the document: its
+    // SVG and mermaid's wrapper div (d<id>).
+    function removeStray(id) {
+        ["d" + id, id].forEach(function (x) {
+            var n = document.getElementById(x);
+            if (n) n.remove();
+        });
+    }
+
+    // ── Fences ──────────────────────────────────────────────────
+    // mermaidFences lists the mermaid code blocks in markdown, in order,
+    // as the editor's parser sees them: ``` or ~~~ fences of any length,
+    // the language matched without case, and nothing inside another code
+    // block counted. Each is {start, end, bodyStart, bodyEnd, body}. The
+    // diagram tab and the share renders counted regex matches of
+    // "```mermaid" instead, so on a page showing mermaid syntax in a
+    // ````markdown example, Save overwrote the example.
+    function mermaidFences(md) {
+        md = String(md || "");
+        var out = [];
+        var lines = md.split("\n");
+        var pos = 0;
+        var open = null;
+        for (var i = 0; i < lines.length; i++) {
+            var line = lines[i];
+            var lineEnd = pos + line.length;
+            var m = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+            if (!open) {
+                // A backtick fence's info string may not contain a backtick.
+                if (m && !(m[1].charAt(0) === "`" && m[2].indexOf("`") >= 0)) {
+                    var lang = (m[2].trim().split(/\s+/)[0] || "").toLowerCase();
+                    open = { ch: m[1].charAt(0), len: m[1].length, mermaid: lang === "mermaid",
+                        start: pos, bodyStart: Math.min(lineEnd + 1, md.length) };
+                }
+            } else if (m && m[1].charAt(0) === open.ch && m[1].length >= open.len && m[2].trim() === "") {
+                if (open.mermaid) {
+                    out.push({ start: open.start, end: lineEnd, bodyStart: open.bodyStart,
+                        bodyEnd: pos, body: md.slice(open.bodyStart, pos) });
+                }
+                open = null;
+            }
+            pos = lineEnd + 1;
+        }
+        // An unclosed fence runs to the end of the document.
+        if (open && open.mermaid) {
+            out.push({ start: open.start, end: md.length, bodyStart: open.bodyStart,
+                bodyEnd: md.length, body: md.slice(open.bodyStart) });
+        }
+        return out;
+    }
+
     // ── Share pre-renders (MEDIA-DIAGRAMS) ──────────────────────
     // The public share page ships NO script, so diagrams must arrive
     // as bitmaps. syncShareRenders rasterizes each fence to a PNG
@@ -203,28 +268,37 @@
         if (!ensureInit()) return null;
         // Canvas export requires foreignObject-FREE SVG (foreignObject
         // taints canvases), and mermaid only honors htmlLabels:false
-        // at securityLevel "loose". Safe in THIS path only: the SVG
-        // never enters the live page — it goes straight through
-        // <img> → canvas → inert PNG bitmap. Strict config is
-        // restored in finally for all interactive rendering.
-        window.mermaid.initialize(Object.assign(strictConfig(), {
-            securityLevel: "loose",
-            htmlLabels: false,
-            flowchart: { htmlLabels: false },
-        }));
+        // at securityLevel "loose". Loose is set, used and put back
+        // inside one turn of the render queue: set around an await
+        // outside it, the next queued interactive render (a preview
+        // re-rendering while the page saved) ran under loose, which
+        // skips mermaid's sanitizing of the SVG and its click hrefs.
+        var id = "familiar-share-" + (++seq);
         var out;
         try {
-            out = await window.mermaid.render("familiar-share-" + (++seq), srcText);
-        } finally {
-            window.mermaid.initialize(strictConfig());
+            out = await exclusive(async function () {
+                window.mermaid.initialize(Object.assign(strictConfig(), {
+                    securityLevel: "loose",
+                    htmlLabels: false,
+                    flowchart: { htmlLabels: false },
+                }));
+                try {
+                    return await window.mermaid.render(id, srcText);
+                } finally {
+                    window.mermaid.initialize(strictConfig());
+                }
+            });
+        } catch (e) {
+            removeStray(id);
+            throw e;
         }
-        // Give the SVG explicit pixel dimensions from its viewBox so
-        // the Image decodes at natural size (mermaid emits width
-        // attributes in percent).
-        var holder = document.createElement("div");
-        holder.innerHTML = out.svg;
-        var svgEl = holder.querySelector("svg");
-        if (!svgEl) return null;
+        // Parsed into an inert document (DOMParser), never the page's:
+        // innerHTML on a page-owned element is live. Give the SVG
+        // explicit pixel dimensions from its viewBox so the Image
+        // decodes at natural size (mermaid emits width attributes in
+        // percent).
+        var svgEl = new DOMParser().parseFromString(out.svg, "image/svg+xml").documentElement;
+        if (!svgEl || svgEl.nodeName.toLowerCase() !== "svg") return null;
         var vb = svgEl.viewBox && svgEl.viewBox.baseVal;
         var w = (vb && vb.width) || 800;
         var hgt = (vb && vb.height) || 600;
@@ -253,10 +327,7 @@
 
     async function syncShareRenders(pageCtx, content) {
         if (!window.crypto || !crypto.subtle || !pageCtx || !pageCtx.pageId) return;
-        var fences = [];
-        var re = /```mermaid[^\n]*\n([\s\S]*?)```/g;
-        var m;
-        while ((m = re.exec(content || ""))) fences.push(m[1]);
+        var fences = mermaidFences(content).map(function (f) { return f.body; });
         var base = "/console/api/books/" + encodeURIComponent(pageCtx.bookSlug) +
             "/page-by-id/" + encodeURIComponent(pageCtx.pageId) + "/media";
 
@@ -307,5 +378,6 @@
         observe: observe,
         editorPlugin: editorPlugin,
         syncShareRenders: syncShareRenders,
+        fences: mermaidFences,
     };
 })();

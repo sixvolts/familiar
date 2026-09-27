@@ -70,12 +70,13 @@
     const CDN = {
         marked:   "/vendor/marked/marked.min.js",
         dompurify:"/vendor/dompurify/purify.min.js",
-        hljsJS:   "/vendor/highlight/core.min.js",
+        // Code-block colors (the .hljs class). There is no highlighter:
+        // the vendored highlight.js core was a CommonJS build that threw
+        // "module is not defined" on every load and never highlighted.
         hljsCSS:  "/vendor/highlight/atom-one-dark.min.css",
     };
 
-    // ensureMarkdownDeps loads marked + DOMPurify + highlight.js
-    // exactly once. Returns a promise that resolves with a renderer
+    // ensureMarkdownDeps loads marked + DOMPurify exactly once. Returns a promise that resolves with a renderer
     // function `(md) => safeHTML`. On any load failure the renderer
     // falls back to <pre>-wrapped escaped text — the chat does not
     // hard-fail because a CDN went down.
@@ -92,21 +93,10 @@
                 // DOMPurify normally comes from the shell (index.html); a
                 // second copy would replace the sanitizer the editor uses.
                 await Promise.all([loadScript(CDN.marked), window.DOMPurify ? null : loadScript(CDN.dompurify)]);
-                await loadScript(CDN.hljsJS);
-                // Register a few common languages so codeblocks
-                // syntax-highlight without bloating the bundle.
-                // hljs.core ships no languages; each is loaded
-                // separately. We'll lazy-load on first use too.
                 if (window.marked && window.marked.use) {
                     // marked extension hook for code blocks — renders the
-                    // research-card fence as an inline card and runs hljs
-                    // against any language tag it recognizes. NOT gated on
-                    // window.hljs: the vendored highlight core is a CommonJS
-                    // build that never sets the global, so gating the whole
-                    // override on it silently dropped the research-card hook
-                    // too (cards rendered as raw fenced text). hljs use is
-                    // guarded per-call instead; highlighting degrades to
-                    // plain escaped code when it's absent.
+                    // research-card fence as an inline card; other code is
+                    // escaped into a .hljs block.
                     window.marked.use({
                         renderer: {
                             code(code, infostring) {
@@ -116,13 +106,6 @@
                                 // falls through to a code block if unloaded.
                                 if (lang === "research-card" && window.familiarResearchCard) {
                                     return window.familiarResearchCard.html(code);
-                                }
-                                if (lang && window.hljs && window.hljs.getLanguage && window.hljs.getLanguage(lang)) {
-                                    try {
-                                        return '<pre><code class="hljs language-' + lang + '">'
-                                            + window.hljs.highlight(code, { language: lang }).value
-                                            + '</code></pre>';
-                                    } catch (e) { /* fall through */ }
                                 }
                                 return '<pre><code class="hljs">' + escapeHTML(code) + '</code></pre>';
                             },
@@ -259,26 +242,10 @@
         // ── Shell DOM ─────────────────────────────────────────
         const root = document.createElement("div");
         root.className = "chat-shell";
-
-        const left = document.createElement("aside");
-        left.className = "chat-left";
-        const leftHead = document.createElement("div");
-        leftHead.className = "chat-left-head";
-        const leftTitle = document.createElement("div");
-        leftTitle.className = "label";
-        leftTitle.textContent = "Conversations";
-        const newBtn = document.createElement("button");
-        newBtn.type = "button";
-        newBtn.className = "chat-new-btn";
-        newBtn.textContent = "+ New";
-        newBtn.title = "Start a new conversation (Cmd+N coming soon)";
-        leftHead.append(leftTitle, newBtn);
-        left.appendChild(leftHead);
-
-        const convList = document.createElement("div");
-        convList.className = "chat-conv-list";
-        left.appendChild(convList);
-        root.appendChild(left);
+        // Aborted when the tab closes (dispose): drops document-level
+        // listeners and stops a recovery poll, which kept the closed
+        // tab's whole DOM reachable.
+        const shellAbort = new AbortController();
 
         const right = document.createElement("section");
         right.className = "chat-right";
@@ -287,6 +254,7 @@
         header.className = "chat-header";
         const titleEl = document.createElement("input");
         titleEl.className = "chat-conv-title";
+        titleEl.setAttribute("aria-label", "Conversation title");
         titleEl.value = "New conversation";
         titleEl.placeholder = "Untitled";
         titleEl.spellcheck = false;
@@ -299,12 +267,27 @@
         overflowBtn.className = "notes-overflow-btn";
         overflowBtn.textContent = "⋯";
         overflowBtn.title = "More actions";
-        overflowBtn.addEventListener("click", (e) => {
-            e.stopPropagation();
-            overflow.classList.toggle("is-open");
-        });
+        overflowBtn.setAttribute("aria-label", "More actions");
+        overflowBtn.setAttribute("aria-haspopup", "menu");
+        overflowBtn.setAttribute("aria-expanded", "false");
         const overflowMenu = document.createElement("div");
         overflowMenu.className = "notes-overflow-menu";
+        overflowMenu.setAttribute("role", "menu");
+        function setOverflowOpen(open) {
+            overflow.classList.toggle("is-open", open);
+            overflowBtn.setAttribute("aria-expanded", open ? "true" : "false");
+        }
+        overflowBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            setOverflowOpen(!overflow.classList.contains("is-open"));
+        });
+        overflow.addEventListener("keydown", (e) => {
+            if (e.key === "Escape" && overflow.classList.contains("is-open")) {
+                e.stopPropagation();
+                setOverflowOpen(false);
+                overflowBtn.focus();
+            }
+        });
 
         function currentConv() {
             if (!localState.conversationId) return null;
@@ -314,10 +297,11 @@
         const pinItem = document.createElement("button");
         pinItem.type = "button";
         pinItem.className = "notes-overflow-item";
+        pinItem.setAttribute("role", "menuitem");
         pinItem.textContent = "Pin chat";
         pinItem.addEventListener("click", async (e) => {
             e.stopPropagation();
-            overflow.classList.remove("is-open");
+            setOverflowOpen(false);
             if (!localState.conversationId) return;
             const conv = currentConv();
             const nextPinned = !(conv && conv.pinned);
@@ -329,7 +313,6 @@
                 });
                 const idx = localState.conversations.findIndex((x) => x.id === c.id);
                 if (idx >= 0) localState.conversations[idx] = c;
-                renderConvList();
                 window.dispatchEvent(new CustomEvent("familiar:pinsChanged"));
             } catch (err) {
                 notifyErr("Couldn't pin: " + (err.message || String(err)));
@@ -340,10 +323,11 @@
         const deleteItem = document.createElement("button");
         deleteItem.type = "button";
         deleteItem.className = "notes-overflow-item danger";
+        deleteItem.setAttribute("role", "menuitem");
         deleteItem.textContent = "Delete chat";
         deleteItem.addEventListener("click", async (e) => {
             e.stopPropagation();
-            overflow.classList.remove("is-open");
+            setOverflowOpen(false);
             if (!localState.conversationId) return;
             const title = titleEl.value || "this chat";
             if (!confirm('Delete "' + title + '"? This cannot be undone.')) return;
@@ -377,9 +361,7 @@
         });
 
         // Close overflow menu when clicking elsewhere.
-        document.addEventListener("click", () => {
-            overflow.classList.remove("is-open");
-        });
+        document.addEventListener("click", () => setOverflowOpen(false), { signal: shellAbort.signal });
 
         // Shard chip — visible only on shard-bound conversations so
         // it's never ambiguous which brain is answering
@@ -420,6 +402,20 @@
 
         const messagesEl = document.createElement("div");
         messagesEl.className = "chat-messages";
+        // The transcript is a log (navigable as one), not announced token
+        // by token: a finished reply or an error is announced once through
+        // liveEl. Nothing was announced before.
+        messagesEl.setAttribute("role", "log");
+        messagesEl.setAttribute("aria-live", "off");
+        const liveEl = document.createElement("div");
+        liveEl.className = "sr-only";
+        liveEl.setAttribute("role", "status");
+        liveEl.setAttribute("aria-live", "polite");
+        function announce(text) {
+            liveEl.textContent = "";
+            // A fresh node change so a repeated message is re-announced.
+            setTimeout(() => { liveEl.textContent = text; }, 30);
+        }
         // Track the user's scroll position continuously so we can
         // restore it after a re-render (workspace.js's renderGrid
         // detaches + re-attaches our cached shell on every layout
@@ -475,6 +471,15 @@
         // page. Delegated so it covers both live-appended links and links
         // re-rendered from persisted message markdown on reload.
         messagesEl.addEventListener("click", (e) => {
+            // A web link opens in a new tab. In this one it replaced the
+            // whole workspace (every tab and layout), and a reply still
+            // streaming was torn down with the page.
+            const ext = e.target.closest && e.target.closest('a[href]');
+            if (ext && /^https?:/i.test(ext.getAttribute("href") || "")) {
+                e.preventDefault();
+                window.open(ext.href, "_blank", "noopener,noreferrer");
+                return;
+            }
             const a = e.target.closest && e.target.closest('a[href^="#note/"]');
             if (!a) return;
             e.preventDefault();
@@ -509,6 +514,7 @@
         empty.textContent = "Send a message to start.";
         messagesEl.appendChild(empty);
         right.appendChild(messagesEl);
+        right.appendChild(liveEl);
 
         // Persistent "research in progress" card (RESEARCH-SKILL-SPEC
         // §6.7). Pinned just above the composer, rebuilt purely from
@@ -517,10 +523,10 @@
         const researchCard = document.createElement("div");
         researchCard.className = "chat-research-card";
         researchCard.hidden = true;
-        // Clickable so a user who closed the right pane can reopen the
-        // live evidence view. Re-opens for the run the card is showing.
-        researchCard.setAttribute("role", "button");
-        researchCard.tabIndex = 0;
+        // Clicking the card reopens the live evidence view (for a user who
+        // closed the right pane); its Open button does the same from the
+        // keyboard. The card was role=button, which made the Stop button
+        // inside it presentational: a screen reader couldn't reach it.
         researchCard.title = "Open the live research view";
         function reopenResearchPane() {
             const run = localState.researchLastRun;
@@ -540,13 +546,6 @@
         researchCard.addEventListener("click", (e) => {
             if (e.target.closest(".rc-stop")) { e.stopPropagation(); cancelResearchRun(); return; }
             reopenResearchPane();
-        });
-        researchCard.addEventListener("keydown", (e) => {
-            if (e.target.closest(".rc-stop")) return; // the button handles its own Enter/Space
-            if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                reopenResearchPane();
-            }
         });
         right.appendChild(researchCard);
 
@@ -578,7 +577,18 @@
                 sendBtn.removeAttribute("aria-label");
                 sendBtn.removeAttribute("title");
             }
-            sendBtn.disabled = false;
+            sendBtn.disabled = !on && !!localState.recovering;
+        }
+        // While a turn from before is still running on the server (a
+        // dropped stream, a reload mid-reply), Send stays disabled: a
+        // message sent then starts a second turn alongside it.
+        function setRecovering(on) {
+            localState.recovering = on;
+            if (!localState.streaming) {
+                sendBtn.disabled = on;
+                if (on) sendBtn.title = "Waiting for the previous reply to finish";
+                else sendBtn.removeAttribute("title");
+            }
         }
         // Clicking the button while streaming stops generation. We fire a
         // server-side stop (cuts the model's generation and commits the
@@ -633,41 +643,15 @@
             input.style.height = Math.min(input.scrollHeight, max) + "px";
         }
 
+        // The conversation list backs pin state and shard lookups (the
+        // in-panel list that once showed it was removed; the sidebar and
+        // the splash list conversations).
         async function refreshConversations() {
             try {
                 const resp = await apiJSON("/console/api/conversations?limit=50");
                 localState.conversations = (resp && resp.items) || [];
-                renderConvList();
             } catch (e) {
-                // Network or backend down — show a tiny error
-                // chip without blocking the surface.
-                convList.innerHTML = '<div class="chat-conv-error">' + escapeHTML(e.message || String(e)) + '</div>';
-            }
-        }
-
-        function renderConvList() {
-            convList.innerHTML = "";
-            if (localState.conversations.length === 0) {
-                const stub = document.createElement("div");
-                stub.className = "chat-conv-empty";
-                stub.textContent = "No conversations yet — click New.";
-                convList.appendChild(stub);
-                return;
-            }
-            for (const c of localState.conversations) {
-                const row = document.createElement("button");
-                row.type = "button";
-                row.className = "chat-conv-row";
-                if (c.id === localState.conversationId) row.classList.add("is-active");
-                const t = document.createElement("div");
-                t.className = "chat-conv-row-title";
-                t.textContent = c.title || "Untitled";
-                const m = document.createElement("div");
-                m.className = "chat-conv-row-meta";
-                m.textContent = (c.model || "familiar") + " · " + agoOrDate(c.updated_at);
-                row.append(t, m);
-                row.addEventListener("click", () => loadConversation(c.id));
-                convList.appendChild(row);
+                console.warn("chat: couldn't list conversations", e);
             }
         }
 
@@ -824,6 +808,7 @@
             let delay = 1500;
             while (Date.now() < deadline) {
                 await new Promise((r) => setTimeout(r, delay));
+                if (shellAbort.signal.aborted) return false; // the tab closed
                 delay = Math.min(delay * 1.6, 5000);
 
                 let running = null;
@@ -879,6 +864,7 @@
         // isn't a switch, so it must not cancel one the user started
         // meanwhile (a New chat whose create is still pending).
         async function loadConversation(id, opts) {
+            if (id !== localState.conversationId) flushRename();
             exitSplash();
             const nav = opts && opts.refresh ? localState.navSeq : ++localState.navSeq;
             localState.conversationId = id;
@@ -886,7 +872,6 @@
             // Scope the research poll to the conversation now open —
             // replaces any poll left running for a previous one.
             startResearchPoll(id);
-            renderConvList();
             try {
                 const resp = await apiJSON("/console/api/conversations/" + encodeURIComponent(id));
                 if (localState.navSeq !== nav) return; // the user has moved on
@@ -907,7 +892,6 @@
                 // dead-end error tab, and drop the ghost row.
                 if (/not found|HTTP 404/i.test(e.message || "")) {
                     localState.conversations = localState.conversations.filter((c) => c.id !== id);
-                    renderConvList();
                     enterSplash();
                     return;
                 }
@@ -1255,7 +1239,8 @@
                 '<span class="rc-m rc-m-moss"><span class="rc-k">areas</span> <b data-rc="areas">' + doneN + "/" + (total || "?") + "</b></span>" +
                 '<span class="rc-m"><span class="rc-k">tokens</span> <b data-rc="tokens">' + compactTokens(tokens) + "</b></span>";
 
-            const stop = '<button class="rc-stop" type="button" title="Stop research" aria-label="Stop research"><span class="chat-stop-oct" aria-hidden="true"></span></button>';
+            const stop = '<button class="rc-open" type="button">Open</button>' +
+                '<button class="rc-stop" type="button" title="Stop research" aria-label="Stop research"><span class="chat-stop-oct" aria-hidden="true"></span></button>';
             researchCard.className = "chat-research-card" + (synth ? " rc-synth" : "");
             researchCard.innerHTML =
                 '<div class="rc-head">' +
@@ -1285,7 +1270,6 @@
                     body: JSON.stringify({ title: "", model: shardID ? "shard:" + shardID : "familiar" }),
                 });
                 localState.conversations.unshift(c);
-                renderConvList();
                 // Opened something else while this was being created:
                 // stay there; the new chat is in the list.
                 if (localState.navSeq === nav) loadConversation(c.id);
@@ -1312,18 +1296,41 @@
             await newConversation(shardID);
         }
 
+        // A title edit waiting for its debounce: which conversation, and
+        // what title. Sent when the debounce fires, the title loses
+        // focus, or another conversation opens.
+        let renameTimer = null;
+        let pendingRename = null;
+        function flushRename() {
+            if (renameTimer) { clearTimeout(renameTimer); renameTimer = null; }
+            const r = pendingRename;
+            pendingRename = null;
+            if (!r || !r.id || !r.title.trim()) return;
+            apiJSON("/console/api/conversations/" + encodeURIComponent(r.id), {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ title: r.title.trim() }),
+            }).then(() => refreshConversations())
+                .catch((e) => console.warn("chat: rename failed", e));
+        }
+
         // A persisted message is worth painting only when it's actual
         // conversation, not agentic plumbing. The gateway persists the
         // whole tool loop so a restart can replay it to the model:
         //   • role="tool" — tool-result rows.
         //   • assistant turns that carried ONLY tool calls — these persist
         //     with empty content (the spawn_research_workers kickoff, etc.).
-        // Neither is a reply. We no longer paint a "tools: X" chip, so
+        //   • assistant turns that called tools with prose alongside:
+        //     that prose is part of the turn's final reply too (the
+        //     gateway merges it), so painting the call's row repeated it
+        //     (a digest appeared twice on reload).
+        // None is a reply. We no longer paint a "tools: X" chip, so
         // rendering them just leaves bare "Familiar" bubbles with nothing
-        // under them. Skip both; m.tool_calls stays persisted regardless.
+        // under them. Skip them; m.tool_calls stays persisted regardless.
         function isDisplayableMessage(m) {
             if (!m || m.role === "tool") return false;
             if (m.role === "assistant" && !String(m.content || "").trim()) return false;
+            if (m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length) return false;
             return true;
         }
 
@@ -1348,14 +1355,39 @@
             // reply. Surface that instead of a conversation that looks
             // silently broken. (Full regenerate needs a gateway affordance
             // — tracked separately; this at least explains the state.)
-            const lastReal = [...localState.messages].reverse().find((m) => m.role !== "tool");
-            if (lastReal && lastReal.role === "user" && !localState.streaming) {
+            //
+            // But ask first: the turn may still be running on the server
+            // (a reload mid-reply), and "send a message to continue"
+            // invited a second turn to run alongside it.
+            const lastReal = [...localState.messages].reverse().find(isDisplayableMessage);
+            if (lastReal && lastReal.role === "user" && !localState.streaming && !localState.recovering) {
                 const note = document.createElement("div");
                 note.className = "chat-interrupted-note";
-                note.textContent = "The previous reply was interrupted. Send a message to continue.";
+                note.textContent = "Checking whether the reply is still being written\u2026";
                 messagesEl.appendChild(note);
+                checkPendingTurn(localState.conversationId, note);
             }
             messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+
+        // checkPendingTurn settles a conversation that ends on a user
+        // message: a turn still running is waited for (Send stays
+        // disabled, as it would during the stream); otherwise the reply
+        // was interrupted.
+        async function checkPendingTurn(convID, note) {
+            let running = false;
+            try {
+                const st = await apiJSON("/api/chat/status?conversation_id=" + encodeURIComponent(convID));
+                running = !!(st && st.running);
+            } catch (_) { /* unknown: treat as not running */ }
+            if (localState.conversationId !== convID) return;
+            if (!running) {
+                note.textContent = "The previous reply was interrupted. Send a message to continue.";
+                return;
+            }
+            note.textContent = "The reply is still being written on the server; it will appear here when it's done.";
+            setRecovering(true);
+            recoverInterruptedTurn(convID, note, null).catch(() => {}).finally(() => setRecovering(false));
         }
 
         function renderMessage(m, renderMD) {
@@ -1425,7 +1457,7 @@
         }
 
         async function send() {
-            if (localState.streaming) return;
+            if (localState.streaming || localState.recovering) return;
             const prompt = input.value.trim();
             if (!prompt) return;
 
@@ -1455,7 +1487,6 @@
                     startResearchPoll(c.id);
                     titleEl.value = c.title || "Conversation";
                     localState.conversations.unshift(c);
-                    renderConvList();
                     // Surface the just-created thread in the sidebar rail
                     // now, not only after the reply auto-titles it — the
                     // deferred autoTitle refresh still fires, this just closes
@@ -1629,6 +1660,29 @@
             // the note + append a durable link to the message.
             let researchNote = null;
             let aborted = false; // user hit stop
+            // Tokens render once per animation frame. Rendering on every
+            // token re-parsed, re-sanitized and rebuilt the whole message
+            // (quadratic in its length): the other pane janked, the reply
+            // arrived at about half the model's speed, and links and text
+            // selection in the growing bubble didn't work.
+            let renderFrame = 0;
+            const scheduleRender = () => {
+                if (renderFrame) return;
+                renderFrame = requestAnimationFrame(() => {
+                    renderFrame = 0;
+                    body.innerHTML = renderMD(assistantText);
+                    autoscrollIfStuck();
+                });
+            };
+            // flushRender draws what arrived now, and drops a pending
+            // frame (which would otherwise redraw over the final text).
+            const flushRender = () => {
+                if (renderFrame) {
+                    cancelAnimationFrame(renderFrame);
+                    renderFrame = 0;
+                }
+                body.innerHTML = renderMD(assistantText);
+            };
 
             try {
                 // conversation_id doubles as the in-memory session
@@ -1651,8 +1705,26 @@
                     }),
                 });
                 if (!resp.ok || !resp.body) {
-                    const text = await resp.text();
-                    throw new Error("HTTP " + resp.status + ": " + text.slice(0, 200));
+                    // The gateway refused the message (409 shard disabled,
+                    // 429 too many turns, 400 too large, 401 signed out).
+                    // No turn is running, so this is terminal: show the
+                    // reason. It was treated as a dropped connection
+                    // ("Connection lost…") and the reason never shown.
+                    const text = await resp.text().catch(() => "");
+                    let reason = "";
+                    try {
+                        const b = JSON.parse(text);
+                        reason = (b && b.error && (b.error.message || (typeof b.error === "string" ? b.error : ""))) || "";
+                    } catch (_) {
+                        // A short plain-text body (a proxy's) is the reason as is.
+                        if (text.trim().length <= 200 && !/<[a-z!]/i.test(text)) reason = text.trim();
+                    }
+                    if (resp.status === 401 && helpers && helpers.handleUnauthorized) helpers.handleUnauthorized();
+                    const err = new Error(reason
+                        ? "Couldn't send: " + reason
+                        : "Couldn't send (HTTP " + resp.status + ").");
+                    err.inBand = true;
+                    throw err;
                 }
 // Native SSE: events come as `event: <kind>\ndata: <json>\n\n`.
                 // Kinds emitted by the gateway: session, token, reasoning,
@@ -1737,8 +1809,7 @@
                         if (tFirstToken == null) tFirstToken = performance.now();
                         dropIndicator(); // real output began — hand motion to the text
                         assistantText += chunk;
-                        body.innerHTML = renderMD(assistantText);
-                        autoscrollIfStuck();
+                        scheduleRender();
                         return;
                     }
                     if (kind === "done") {
@@ -1754,10 +1825,8 @@
                         // that may differ from the streamed tokens (e.g.
                         // untagged reasoning stripped). Replace what was
                         // streamed with the clean version.
-                        if (p && typeof p.content === "string" && p.content !== assistantText) {
-                            assistantText = p.content;
-                            body.innerHTML = renderMD(assistantText);
-                        }
+                        if (p && typeof p.content === "string") assistantText = p.content;
+                        flushRender();
                         // Post-hoc reasoning (from formatters that split
                         // untagged chain-of-thought). Populate the
                         // thinking bubble if reasoning wasn't streamed.
@@ -1807,6 +1876,7 @@
                     }
                 }
             } catch (e) {
+                flushRender();
                 // User hit stop → keep the partial answer and finalize
                 // normally (fall through). Any other error is surfaced.
                 if (e && e.inBand) {
@@ -1822,6 +1892,9 @@
                     localState.currentAbort = null;
                     setComposerStreaming(false);
                     renderError(e.message);
+                    announce(e.message);
+                    // A bubble with nothing in it goes (the send was refused).
+                    if (!assistantText.trim() && assistantBubble.parentNode) assistantBubble.remove();
                     return;
                 }
                 if (e.name !== "AbortError") {
@@ -1833,16 +1906,20 @@
                     assistantBubble.classList.remove("chat-msg-streaming");
                     localState.streaming = false;
                     localState.currentAbort = null;
+                    setRecovering(true);
                     setComposerStreaming(false);
                     const notice = renderError(
                         "Connection lost. Checking whether the turn finished on the server\u2026");
-                    recoverInterruptedTurn(convId, notice, localState.turnSessionId).catch(() => {});
+                    announce(notice.textContent);
+                    recoverInterruptedTurn(convId, notice, localState.turnSessionId).catch(() => {})
+                        .finally(() => setRecovering(false));
                     return;
                 }
                 aborted = true;
                 dropIndicator(); // aborted — keep partial text, fall through
             }
 
+            flushRender();
             assistantBubble.classList.remove("chat-msg-streaming");
 
             // Research note delivered this turn (inline quick/standard
@@ -1875,7 +1952,7 @@
                 localState.streaming = false;
                 localState.currentAbort = null;
                 setComposerStreaming(false);
-                input.focus();
+                refocusComposer();
                 return;
             }
 
@@ -1990,7 +2067,17 @@
             localState.streaming = false;
             localState.currentAbort = null;
             setComposerStreaming(false);
-            input.focus();
+            if (stillHere() && assistantText.trim()) announce("Familiar: " + assistantText);
+            refocusComposer();
+        }
+
+        // refocusComposer puts focus back in the composer after a turn,
+        // unless the user has moved on to something outside this chat
+        // (the note in the other pane): focus jumped mid-sentence, and
+        // the next Enter sent the rest as a message.
+        function refocusComposer() {
+            const a = document.activeElement;
+            if (!a || a === document.body || root.contains(a)) input.focus();
         }
 
         // autoTitle generates a 1-3 word title for a freshly-created
@@ -2064,7 +2151,9 @@
                 // composition (e.isComposing) suppresses the
                 // send so dictation / Asian input methods can
                 // commit a candidate without firing the message.
-                if (e.key !== "Enter" || e.isComposing) return;
+                // Safari sends the Enter that commits an IME candidate
+                // with isComposing false and keyCode 229.
+                if (e.key !== "Enter" || e.isComposing || e.keyCode === 229) return;
                 if (e.shiftKey) return; // Shift+Enter → newline
                 e.preventDefault();
                 send();
@@ -2073,37 +2162,26 @@
                 e.preventDefault();
                 send();
             });
-            newBtn.addEventListener("click", newConversation);
 
             // Rename conversation on title input change (debounced).
-            let renameTimer = null;
             titleEl.addEventListener("input", () => {
                 if (!localState.conversationId) return;
                 // Update tab label live as user types.
                 if (window.FamiliarWorkspace && window.FamiliarWorkspace.updateTabTitle) {
                     window.FamiliarWorkspace.updateTabTitle(tab.id, titleEl.value || "Conversation");
                 }
+                // The rename belongs to the conversation being edited, not
+                // whichever is open when the debounce fires: switching
+                // within half a second renamed the next one (or lost it).
+                pendingRename = { id: localState.conversationId, title: titleEl.value };
                 if (renameTimer) clearTimeout(renameTimer);
-                renameTimer = setTimeout(async () => {
-                    renameTimer = null;
-                    const newTitle = titleEl.value.trim();
-                    if (!newTitle) return;
-                    try {
-                        await apiJSON("/console/api/conversations/" + encodeURIComponent(localState.conversationId), {
-                            method: "PATCH",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ title: newTitle }),
-                        });
-                        refreshConversations();
-                    } catch (e) {
-                        console.warn("chat: rename failed", e);
-                    }
-                }, 500);
+                renameTimer = setTimeout(flushRename, 500);
             });
 
             // Refresh sidebar list on blur so renamed titles appear
             // without a page refresh.
             titleEl.addEventListener("blur", () => {
+                flushRename();
                 if (localState.conversationId) {
                     refreshConversations();
                     window.dispatchEvent(new Event("familiar:sidebarRefresh"));
@@ -2129,19 +2207,24 @@
         // the deleted conversation open, it falls back to the splash.
         function dropConversation(id) {
             if (!id) return;
-            const before = localState.conversations.length;
             localState.conversations = localState.conversations.filter((c) => c.id !== id);
             if (localState.conversationId === id) {
-                enterSplash(); // also clears state + re-renders the list
-                return;
+                enterSplash(); // also clears state
             }
-            if (localState.conversations.length !== before) renderConvList();
         }
 
         // Expose loadConversation + newConversation so sidebar
         // child-clicks can drive the shell from outside the
         // closure (Phase 3e openDoc events).
-        return { root, init, refreshConversations, loadConversation, newConversation, openShardChat, restoreScroll, enterSplash, dropConversation, stopResearchPoll };
+        // dispose releases the shell when its tab closes: document-level
+        // listeners, the research poll and any recovery poll.
+        function dispose() {
+            flushRename();
+            shellAbort.abort();
+            stopResearchPoll();
+        }
+
+        return { root, init, refreshConversations, loadConversation, newConversation, openShardChat, restoreScroll, enterSplash, dropConversation, stopResearchPoll, dispose };
     }
 
     // ── Helpers ───────────────────────────────────────────────
@@ -2268,9 +2351,10 @@
         const d = ev.detail || {};
         if (d.surface !== "chat") return;
         const entry = shells.get(d.tabId);
-        // Stop the research poller so a closed tab leaves no timer
-        // firing against a conversation nobody's looking at.
-        if (entry && entry.model.stopResearchPoll) entry.model.stopResearchPoll();
+        // Stop the research poller and any recovery poll, and drop the
+        // shell's document listeners, so a closed tab leaves nothing
+        // running and nothing holding its DOM.
+        if (entry && entry.model.dispose) entry.model.dispose();
         shells.delete(d.tabId);
     });
 

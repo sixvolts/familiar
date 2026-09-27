@@ -3836,92 +3836,6 @@ code {
     color: var(--fg-1);
 }
 
-/* ── Left: conversation list ───────────────────────────── */
-
-.chat-left {
-    display: flex;
-    flex-direction: column;
-    background: var(--bg-surface);
-    border-right: 1px solid var(--border-subtle);
-    min-height: 0;
-}
-.chat-left-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 10px 12px;
-    border-bottom: 1px solid var(--border-subtle);
-}
-.chat-new-btn {
-    background: transparent;
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    padding: 4px 8px;
-    color: var(--fg-2);
-    font-family: var(--font-mono);
-    font-size: var(--text-2xs);
-    cursor: pointer;
-    transition: background 0.12s ease, color 0.12s ease;
-}
-.chat-new-btn:hover {
-    background: var(--bg-hover);
-    color: var(--fg-1);
-}
-
-.chat-conv-list {
-    flex: 1 1 auto;
-    overflow-y: auto;
-    padding: 6px;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-}
-.chat-conv-row {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    padding: 8px 10px;
-    background: transparent;
-    border: 0;
-    border-radius: var(--radius-sm);
-    text-align: left;
-    cursor: pointer;
-    color: var(--fg-2);
-    transition: background 0.12s ease;
-}
-.chat-conv-row:hover { background: var(--bg-hover); }
-.chat-conv-row.is-active {
-    background: var(--accent-soft-bg);
-    color: var(--accent-soft-fg);
-}
-.chat-conv-row-title {
-    font-size: var(--text-sm);
-    line-height: 1.3;
-    color: var(--fg-1);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-.chat-conv-row.is-active .chat-conv-row-title {
-    color: var(--accent-soft-fg);
-}
-.chat-conv-row-meta {
-    font-family: var(--font-mono);
-    font-size: var(--text-2xs);
-    color: var(--fg-3);
-    letter-spacing: 0.04em;
-}
-.chat-conv-empty,
-.chat-conv-error {
-    padding: 12px;
-    color: var(--fg-3);
-    font-size: var(--text-2xs);
-    line-height: 1.5;
-}
-.chat-conv-error {
-    color: var(--danger);
-}
-
 /* ── Right: message stream + input ─────────────────────── */
 
 .chat-right {
@@ -4088,6 +4002,15 @@ code {
    box instead of widening the message column (see the overflow fix above).
    width:max-content lets narrow tables stay narrow rather than being stretched
    to the panel, while still allowing wide ones to scroll. */
+/* Images, video and canvases in a reply (a wiki image echoed back, a pasted
+   data: image) fit the column; a 2400px image pushed the panel sideways. */
+.chat-msg-body img,
+.chat-msg-body video,
+.chat-msg-body canvas {
+    max-width: 100%;
+    height: auto;
+}
+
 .chat-msg-body table {
     display: block;
     /* Same circular-width fix as .chat-msg-body pre: width:0 keeps the table's
@@ -4292,6 +4215,16 @@ code {
 .chat-research-card .rc-topic { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-research-card .rc-s { color: var(--fg-3); font-size: var(--text-xs); margin-top: 2px; }
 
+/* Open button on the card header — reopens the live research view (the
+   card itself is clickable too, but a button is what the keyboard and a
+   screen reader reach). */
+.chat-research-card .rc-open {
+    flex: 0 0 auto; background: transparent; border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm); padding: 2px 8px; margin-left: 6px; cursor: pointer;
+    color: var(--fg-2); font-size: var(--text-xs);
+}
+.chat-research-card .rc-open:hover { background: var(--bg-hover); color: var(--fg-1); }
+
 /* Stop button on the card header — cancels the run. */
 .chat-research-card .rc-stop {
     flex: 0 0 auto; background: transparent; border: 0; cursor: pointer;
@@ -4402,19 +4335,6 @@ code {
        button rides the textarea as it grows multi-line. */
     height: 40px;
     align-self: end;
-}
-
-/* ── Responsive ───────────────────────────────────────── */
-
-@media (max-width: 720px) {
-    /* Inside a panel that's narrower than 720px, collapse the
-       conversation list to a thin sidebar. Real mobile support is
-       a Phase 6 polish concern. */
-    .chat-shell { grid-template-columns: 56px 1fr; }
-    .chat-conv-row-title { display: none; }
-    .chat-conv-row-meta { display: none; }
-    .chat-new-btn { font-size: 10px; padding: 4px 6px; }
-    .chat-left-head .label { display: none; }
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -5530,15 +5450,12 @@ code {
 /* (The legacy bottom-of-list "+ New …" button was replaced by the
    .sidebar-cat-new affordance next to the category-row chevron.) */
 
-/* Hide the in-panel left rails. The chat surface's conversation
-   list and the notes surface's file tree both move into the
-   sidebar's category children per DESIGN.md:
-   "no internal sub-sidebar with `Search notes…` and `New`."
-   The DOM construction stays in chat.js / notes.js for now;
-   this rule just removes them from the view. Phase 6 polish
-   strips the construction code itself. */
+/* No in-panel left rails. The chat surface's conversation list
+   and the notes surface's file tree live in the sidebar's category
+   children per DESIGN.md: "no internal sub-sidebar with
+   `Search notes…` and `New`." The chat rail is no longer built; the
+   notes tree is still built and this rule hides it. */
 .chat-shell { grid-template-columns: 1fr; }
-.chat-left  { display: none; }
 
 .notes-shell { grid-template-columns: 1fr; }
 .notes-left  { display: none; }
@@ -5729,7 +5646,6 @@ code {
 .chat-shell.is-splash {
     grid-template-columns: 1fr;
 }
-.chat-shell.is-splash .chat-left,
 .chat-shell.is-splash .chat-right > .chat-header,
 .chat-shell.is-splash .chat-right > .chat-messages,
 .chat-shell.is-splash .chat-right > .chat-input-wrap {
@@ -6824,3 +6740,16 @@ code {
 /* Fragment widths in the markdown preview render as inline style;
    keep previews from overflowing regardless. */
 .toastui-editor-md-preview img { max-width: 100%; }
+
+/* Visually hidden, still read by screen readers (live regions). */
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}

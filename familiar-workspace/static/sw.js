@@ -4,7 +4,7 @@
 // caching is wasted complexity. The shell precache is just enough
 // to skip a white flash on cold launch.
 
-const CACHE = 'familiar-v11';
+const CACHE = 'familiar-v12';
 
 // Shell assets precached on install. Cache-busting query params on
 // the CSS/JS <link>/<script> tags in mobile.html bypass these
@@ -28,12 +28,30 @@ const SHELL = [
 ];
 
 self.addEventListener('install', (e) => {
+  // cache: 'reload' goes past the HTTP cache: the static server sends no
+  // Cache-Control, so a heuristic-fresh old copy could otherwise be
+  // precached again under the new CACHE name.
   e.waitUntil(
     caches.open(CACHE)
-      .then((c) => c.addAll(SHELL))
+      .then((c) => c.addAll(SHELL.map((u) => new Request(u, { cache: 'reload' }))))
       .then(() => self.skipWaiting())
   );
 });
+
+// putAsset caches a response. A stamped asset (?v=<content hash>)
+// replaces the other copies of its path: every deploy that changed
+// mobile.js or mobile.css used to add another full copy, never evicted.
+async function putAsset(request, response) {
+  const c = await caches.open(CACHE);
+  const url = new URL(request.url);
+  if (url.searchParams.has('v')) {
+    for (const k of await c.keys()) {
+      const ku = new URL(k.url);
+      if (ku.pathname === url.pathname && ku.search !== url.search) await c.delete(k);
+    }
+  }
+  await c.put(request, response);
+}
 
 self.addEventListener('activate', (e) => {
   // Purge old caches when CACHE bumps. Bump on UI updates that
@@ -75,34 +93,48 @@ self.addEventListener('fetch', (e) => {
   // regression). Familiar is inherently online; fetch the document
   // and fall back to cache only when the network is unreachable.
   if (e.request.mode === 'navigate' || e.request.destination === 'document') {
+    // Cached by path, without the query: /?_r=<time> (pull-to-refresh)
+    // and ?ui=mobile each added a copy of the shell.
+    const key = url.origin + url.pathname;
     e.respondWith(
       fetch(e.request)
         .then((resp) => {
           if (resp.ok && url.origin === self.location.origin) {
             const clone = resp.clone();
-            caches.open(CACHE).then((c) => c.put(e.request, clone));
+            caches.open(CACHE).then((c) => c.put(key, clone));
           }
           return resp;
         })
-        .catch(() => caches.match(e.request).then((c) => c || caches.match('/')))
+        .catch(() => caches.match(key).then((c) => c || caches.match('/')))
     );
     return;
   }
 
-  // Static assets: cache-first with network fallback. Cache
-  // misses (new asset, post-purge fetch) populate the cache for
-  // next time.
+  // Stamped assets (?v=<content hash>) never change under their URL:
+  // cache-first. Anything unversioned (vendor scripts, lazy-loaded
+  // libraries) is served from cache but revalidated in the background,
+  // so a replaced file (a DOMPurify security fix, say) reaches installed
+  // apps on their next load instead of never.
+  const stamped = url.searchParams.has('v');
+  // Keeps the worker alive for the background revalidate and cache
+  // write (waitUntil has to be called while the event is dispatched).
+  let settle;
+  e.waitUntil(new Promise((resolve) => { settle = resolve; }));
   e.respondWith(
     caches.match(e.request).then((cached) => {
-      if (cached) return cached;
-      return fetch(e.request).then((resp) => {
+      if (cached && stamped) { settle(); return cached; }
+      const network = fetch(e.request, stamped ? undefined : { cache: 'no-cache' }).then((resp) => {
         if (resp.ok && url.origin === self.location.origin) {
-          const clone = resp.clone();
-          caches.open(CACHE).then((c) => c.put(e.request, clone));
+          putAsset(e.request, resp.clone()).finally(settle);
+        } else {
+          settle();
         }
         return resp;
-      });
-    })
+      }, (err) => { settle(); throw err; });
+      if (!cached) return network;
+      network.catch(() => {});
+      return cached;
+    }, (err) => { settle(); throw err; })
   );
 });
 
@@ -122,6 +154,9 @@ self.addEventListener('push', (e) => {
   e.waitUntil(self.registration.showNotification(title, {
     body: data.body || '',
     tag: data.tag || undefined, // collapse repeats from the same action
+    // A tagged notification replacing an unread one alerts again;
+    // without it, today's digest silently replaced yesterday's.
+    renotify: !!data.tag,
     data: { url: data.url || '/' },
     icon: '/icon-192.png',
     badge: '/icon-192.png',

@@ -44,6 +44,10 @@
     --bg-canvas: #0B0B0F;
     --bg-card: #1B1B23;
     --bg-raised: #15151B;
+    --bg-surface: var(--graphite-900); /* as app.css; was undefined here */
+    /* Link color in the note/wiki editor. app.css defines it and
+       mobile.html doesn't load app.css, so links rendered as plain text. */
+    --info-soft-fg: var(--slate-300);
     --fg-1: #F4F4F7;
     --fg-2: #C9C9D1;
     --fg-3: #7A7A86;
@@ -1137,14 +1141,16 @@ button { font-family: inherit; }
 }
 .mob-thread-input {
     display: flex;
-    align-items: center;
+    align-items: flex-end;
     gap: 8px;
     background: var(--bg-card);
     border: 1px solid var(--border-default);
-    border-radius: 999px;
+    border-radius: 20px;
     padding: 6px 6px 6px 14px;
 }
-.mob-thread-input input {
+/* A textarea, so pasted code and stack traces keep their newlines (an
+   <input> strips them). It grows with its content up to a cap. */
+.mob-thread-input textarea {
     flex: 1 1 0;
     border: 0;
     background: transparent;
@@ -1154,7 +1160,12 @@ button { font-family: inherit; }
        below 16px — keep this at 16 to suppress the zoom. */
     font-size: 16px;
     font-family: inherit;
+    line-height: 1.35;
     min-width: 0;
+    resize: none;
+    padding: 5px 0;
+    max-height: 160px;
+    overflow-y: auto;
 }
 .mob-thread-send {
     height: 30px;
@@ -1488,6 +1499,11 @@ button { font-family: inherit; }
     background: var(--bg-canvas);
     color: var(--fg-1);
 }
+/* Markdown mode's editor is 13px in the vendor sheet: raise it to 16px
+   for the same iOS focus-zoom reason (WYSIWYG is raised below). */
+.mob-note-body .toastui-editor-md-container .ProseMirror {
+    font-size: 16px;
+}
 .mob-note-body .toastui-editor-contents {
     color: var(--fg-1);
     font-family: var(--font-sans);
@@ -1519,7 +1535,9 @@ button { font-family: inherit; }
 .mob-note-body .toastui-editor-contents a {
     color: var(--info-soft-fg);
     cursor: pointer;
-    text-decoration: none;
+    /* Underlined: color alone doesn't mark a link for everyone. */
+    text-decoration: underline;
+    text-underline-offset: 2px;
 }
 .mob-note-body .toastui-editor-contents a:hover,
 .mob-note-body .toastui-editor-contents a:focus {
@@ -2115,10 +2133,12 @@ body[data-principal-type="shard"] [data-owner-only] { display: none !important; 
     font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
     color: var(--fg-3); font-weight: 600; margin: 14px 2px 8px; display: block;
 }
+/* 16px: iOS zooms the whole app into any focused field smaller than
+   that, and in a standalone app doesn't zoom back out. */
 .mob-sa-input, .mob-sa-textarea {
     width: 100%; background: var(--bg-raised); border: 1px solid var(--border-default);
     border-radius: 12px; padding: 12px 13px; color: var(--fg-1);
-    font-family: inherit; font-size: 14px; line-height: 1.5;
+    font-family: inherit; font-size: 16px; line-height: 1.5;
     -webkit-appearance: none; appearance: none;
 }
 .mob-sa-input:focus, .mob-sa-textarea:focus { outline: none; border-color: var(--teal-soft-border); }
@@ -2279,4 +2299,22 @@ select.mob-sa-input {
     background-repeat: no-repeat;
     background-size: 18px 18px;
     background-position: 50%;
+}
+
+/* [hidden] must win over these classes' display rules. */
+.mob-search-pill[hidden],
+.mob-icon-btn[hidden] { display: none; }
+
+/* 44pt touch targets, without changing how the controls look: the
+   visible buttons are 30–34px (the research Stop 25px), and taps on a
+   moving bus land beside them. */
+.mob-icon-btn,
+.mob-thread-send,
+.mob-research-strip .rc-stop { position: relative; }
+.mob-icon-btn::after,
+.mob-thread-send::after,
+.mob-research-strip .rc-stop::after {
+    content: '';
+    position: absolute;
+    inset: -7px;
 }

@@ -140,6 +140,28 @@ func (f *fakeMem) DeleteMemoriesBySource(_ context.Context, st, sr, sg string) (
 
 type fakeRel struct {
 	upserts [][]memory.Relationship
+	// replaces records ReplacePageLinks: the page's whole link set.
+	replaces []linkReplace
+}
+
+type linkReplace struct {
+	subject, userID, scopeTag string
+	objects                   []string
+}
+
+// ReplacePageLinks records the call and, for the tests that look at
+// links_to rows, the triples it stands for.
+func (f *fakeRel) ReplacePageLinks(_ context.Context, subject, userID, scopeTag string, objects []string) error {
+	f.replaces = append(f.replaces, linkReplace{subject, userID, scopeTag, append([]string(nil), objects...)})
+	if len(objects) == 0 {
+		return nil
+	}
+	batch := make([]memory.Relationship, 0, len(objects))
+	for _, o := range objects {
+		batch = append(batch, memory.Relationship{Subject: subject, Predicate: "links_to", Object: o, UserID: userID, ScopeTag: scopeTag, Confidence: 1.0})
+	}
+	f.upserts = append(f.upserts, batch)
+	return nil
 }
 
 func (f *fakeRel) UpsertRelationships(_ context.Context, rels []memory.Relationship) error {
@@ -412,6 +434,24 @@ func TestOnPageSaved_BrokenLinkSkipped(t *testing.T) {
 				t.Errorf("broken-link-only event emitted a links_to triple: %+v", r)
 			}
 		}
+	}
+	// The page's link set is still replaced — with nothing — so edges
+	// from links it used to have go (it kept them before).
+	if len(rel.replaces) != 1 || len(rel.replaces[0].objects) != 0 {
+		t.Errorf("replaces = %+v, want one call with no links", rel.replaces)
+	}
+}
+
+// A page saved with no links at all clears its link set: the edges from
+// links it used to have don't outlive them.
+func TestOnPageSaved_NoLinksClearsTheSet(t *testing.T) {
+	rel := &fakeRel{}
+	p := newPipelineWith(nil, nil, nil, rel)
+	evt := sampleEvent()
+	evt.Links = nil
+	p.OnPageSaved(context.Background(), evt)
+	if len(rel.replaces) != 1 || len(rel.replaces[0].objects) != 0 || rel.replaces[0].subject != "page:engineering/deploy-process" {
+		t.Errorf("replaces = %+v, want the page's set replaced with nothing", rel.replaces)
 	}
 }
 

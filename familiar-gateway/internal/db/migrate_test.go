@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -244,6 +245,63 @@ func TestMigrateNilPool(t *testing.T) {
 	}
 	if err := Migrate(context.Background(), &Pool{}); err == nil {
 		t.Fatal("Migrate(&Pool{}) returned nil error")
+	}
+}
+
+// The scrub migration's probe looked for working_context in every
+// schema: another schema's user_profiles carrying it (public, on a
+// database whose own schema is migrated separately) made the migration
+// update and drop a column the migrated schema doesn't have, and
+// Migrate aborted.
+func TestMigrate_ScrubProbeStaysInItsSchema(t *testing.T) {
+	dsn := os.Getenv("FAMILIAR_TEST_DSN")
+	if dsn == "" {
+		t.Skip("skipping: FAMILIAR_TEST_DSN not set")
+	}
+	ctx := context.Background()
+	admin, err := Open(dsn)
+	if err != nil {
+		t.Fatalf("db.Open (admin): %v", err)
+	}
+	t.Cleanup(func() { _ = admin.Close() })
+	const other, fresh = "migrate_probe_other", "migrate_probe_fresh"
+	for _, sch := range []string{other, fresh} {
+		if _, err := admin.ExecContext(ctx, "DROP SCHEMA IF EXISTS "+sch+" CASCADE; CREATE SCHEMA "+sch); err != nil {
+			t.Fatalf("schema %s: %v", sch, err)
+		}
+		sch := sch
+		t.Cleanup(func() { _, _ = admin.ExecContext(context.Background(), "DROP SCHEMA IF EXISTS "+sch+" CASCADE") })
+	}
+	if _, err := admin.ExecContext(ctx, "CREATE TABLE "+other+".user_profiles (user_id TEXT PRIMARY KEY, working_context JSONB)"); err != nil {
+		t.Fatal(err)
+	}
+	pool, err := Open(testdsn.Scoped(t, dsn, fresh))
+	if err != nil {
+		t.Fatalf("db.Open (scoped): %v", err)
+	}
+	t.Cleanup(func() { _ = pool.Close() })
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatalf("Migrate with another schema's working_context present: %v", err)
+	}
+	var n int
+	if err := admin.QueryRowContext(ctx, `SELECT count(*) FROM information_schema.columns
+		WHERE table_schema = $1 AND table_name = 'user_profiles' AND column_name = 'working_context'`, other).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Error("the migration reached into another schema's table")
+	}
+}
+
+// A malformed DSN's error quoted it whole, password included, and the
+// error is logged.
+func TestOpen_ErrorDoesNotQuoteThePassword(t *testing.T) {
+	_, err := Open("postgresql://familiar:s3cr%zzet@localhost:5432/familiar")
+	if err == nil {
+		t.Fatal("a malformed DSN opened")
+	}
+	if strings.Contains(err.Error(), "s3cr") {
+		t.Errorf("error leaks the password: %v", err)
 	}
 }
 

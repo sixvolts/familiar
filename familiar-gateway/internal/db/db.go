@@ -30,7 +30,7 @@ type Pool struct {
 func Open(dsn string) (*Pool, error) {
 	sqlDB, err := sql.Open("postgres", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("db: open postgres: %w", err)
+		return nil, fmt.Errorf("db: open postgres: %s", SanitizeDSN(err.Error()))
 	}
 
 	sqlDB.SetMaxOpenConns(5)
@@ -41,7 +41,10 @@ func Open(dsn string) (*Pool, error) {
 	defer cancel()
 	if err := sqlDB.PingContext(ctx); err != nil {
 		sqlDB.Close()
-		return nil, fmt.Errorf("db: ping postgres: %w", err)
+		// The driver's errors can quote the DSN (a malformed URL's parse
+		// error carries it whole), password included, and this ends up
+		// in the log.
+		return nil, fmt.Errorf("db: ping postgres: %s", SanitizeDSN(err.Error()))
 	}
 
 	log.Printf("[memory] connected to pgvector at %s", SanitizeDSN(dsn))
@@ -56,14 +59,18 @@ func (p *Pool) Close() error {
 	return p.DB.Close()
 }
 
-// SanitizeDSN strips the password from a Postgres DSN for logging.
-// URL form (postgres://user:pass@host/db) is rewritten to mask the
-// password segment; DSNs without a `user:pass@` block pass through
-// unchanged, and key-value form `password=...` is also masked.
+// SanitizeDSN strips the password from a Postgres DSN, or from text
+// that quotes one, for logging. URL form (postgres://user:pass@host/db)
+// is rewritten to mask the password segment, up to the last @ before
+// whitespace (a password can contain one); DSNs without a `user:pass@`
+// block pass through unchanged, and key-value form `password=...` is
+// also masked, quoted values with spaces whole.
 func SanitizeDSN(dsn string) string {
-	urlRe := regexp.MustCompile(`(postgres(?:ql)?://[^:@/]+):[^@]*@`)
-	out := urlRe.ReplaceAllString(dsn, "${1}:***@")
-	kvRe := regexp.MustCompile(`password=[^\s]+`)
-	out = kvRe.ReplaceAllString(out, "password=***")
-	return out
+	out := dsnURLPassword.ReplaceAllString(dsn, "${1}:***@")
+	return dsnKVPassword.ReplaceAllString(out, "password=***")
 }
+
+var (
+	dsnURLPassword = regexp.MustCompile(`(postgres(?:ql)?://[^:@/\s]+):\S*@`)
+	dsnKVPassword  = regexp.MustCompile(`password\s*=\s*(?:'(?:[^'\\]|\\.)*'|[^\s]+)`)
+)

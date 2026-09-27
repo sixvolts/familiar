@@ -56,14 +56,18 @@ CREATE TABLE IF NOT EXISTS user_profiles (
 		// those are facts and re-accrete as memory rows going forward.
 		// Wrapped in a DO block so it's idempotent across boots: the
 		// second run finds working_context already gone and just
-		// ensures the typed column exists.
+		// ensures the typed column exists. The probe is confined to the
+		// schema being migrated: another schema's user_profiles (public,
+		// on a database migrated into a separate schema) made it try to
+		// drop a column this one doesn't have.
 		name: "user_profiles_scrub_working_context",
 		ddl: `
 DO $$
 BEGIN
     IF EXISTS (
         SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'user_profiles' AND column_name = 'working_context'
+        WHERE table_schema = current_schema()
+          AND table_name = 'user_profiles' AND column_name = 'working_context'
     ) THEN
         ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS user_prompt TEXT NOT NULL DEFAULT '';
         UPDATE user_profiles
@@ -284,7 +288,7 @@ CREATE INDEX IF NOT EXISTS idx_admin_sessions_expires_at
 		//
 		// user_id follows the same visibility rule as memories: NULL is
 		// global, non-NULL is owned by one canonical user. The unique
-		// index on (subject, predicate, user_id_key) lets UpsertRelationships
+		// keys (relationships_links_multi, below) let UpsertRelationships
 		// do ON CONFLICT DO UPDATE when the object changes (IP moved,
 		// version bumped, etc.); user_id_key collapses NULL to '' so
 		// Postgres treats global rows as a single conflict class.
@@ -302,8 +306,6 @@ CREATE TABLE IF NOT EXISTS relationships (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_rel_subject_pred_user
-    ON relationships (subject, predicate, user_id_key);
 CREATE INDEX IF NOT EXISTS idx_rel_subject ON relationships (subject);
 CREATE INDEX IF NOT EXISTS idx_rel_object  ON relationships (object);
 CREATE INDEX IF NOT EXISTS idx_rel_user    ON relationships (user_id) WHERE user_id IS NOT NULL;`,
@@ -1341,9 +1343,11 @@ CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user
 		// (tool_call_id referenced before tool_ids_seen is built).
 		//
 		// A BIGSERIAL seq column gives a globally monotonic insertion
-		// order independent of timestamp collisions. Backfill existing
-		// rows by created_at then id so historical conversations keep
-		// a stable (if approximate) order.
+		// order independent of timestamp collisions. Rows that existed
+		// when the column was added got their seq in physical (heap)
+		// order, not by created_at: on a database where deleted rows'
+		// space was reused, some older conversations can hydrate out of
+		// order. Rows written since are in insertion order.
 		name: "messages_seq_ordering",
 		ddl: `
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS seq BIGSERIAL;
@@ -1692,11 +1696,32 @@ ALTER TABLE admin_sessions ADD COLUMN IF NOT EXISTS absolute_expires_at TIMESTAM
 		// relationships_object_lowercase: entity names are lowercase
 		// everywhere they're looked up, and subjects always were; objects
 		// kept the extractor's case, so "Acme" was a second entity no
-		// lookup, merge or delete could reach. The unique index is
-		// (subject, predicate, owner), so this can't collide.
+		// lookup, merge or delete could reach. The key for these rows is
+		// (subject, predicate, owner), so this can't collide. links_to
+		// rows are keyed by their object (relationships_links_multi) and
+		// left alone: their objects are page keys built from slugs,
+		// lowercase already, and lowercasing one that differed only in
+		// case from another would fail the boot on every restart.
 		name: "relationships_object_lowercase",
 		ddl: `
-UPDATE relationships SET object = lower(object) WHERE object <> lower(object);`,
+UPDATE relationships SET object = lower(object)
+ WHERE object <> lower(object) AND predicate <> 'links_to';`,
+	},
+	{
+		// relationships_links_multi: a triple was unique on (subject,
+		// predicate, owner), so a page's links_to edges overwrote each
+		// other and only its last link survived. links_to is keyed by its
+		// object too; every other predicate keeps one object per subject
+		// (an IP moved, a deadline changed). The old index is dropped
+		// once, after the two that replace it exist; existing rows
+		// already satisfy both.
+		name: "relationships_links_multi",
+		ddl: `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rel_links_to
+    ON relationships (subject, object, user_id_key) WHERE predicate = 'links_to';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rel_subject_pred_user_single
+    ON relationships (subject, predicate, user_id_key) WHERE predicate <> 'links_to';
+DROP INDEX IF EXISTS idx_rel_subject_pred_user;`,
 	},
 }
 

@@ -688,3 +688,26 @@ func TestInvoke_PipelineErrorReturns500(t *testing.T) {
 // grows or shrinks; no-op otherwise.
 var _ = fmt.Sprintf
 var _ = io.Discard
+
+// A failed streamed invocation ends with an error event, not the
+// internal error text as reply content followed by a "stop" finish
+// (which reads as a successful completion and leaked upstream URLs).
+func TestInvoke_StreamingErrorIsAnErrorEvent(t *testing.T) {
+	_, _, pipe, h := buildFixtures(t)
+	pipe.err = errors.New(`LLM completion: Post "http://127.0.0.1:8081/v1/chat/completions": connection refused`)
+	body := `{"messages":[{"role":"user","content":"hi"}],"stream":true}`
+	rr := doInvoke(t, h, testShard, testEmail, testToken, body)
+	out := rr.Body.String()
+	if strings.Contains(out, "127.0.0.1") || strings.Contains(out, "connection refused") {
+		t.Errorf("internal error text reached the caller: %q", out)
+	}
+	if !strings.Contains(out, `"error":{"message":"invocation failed"`) {
+		t.Errorf("no error event: %q", out)
+	}
+	if strings.Contains(out, `"finish_reason":"stop"`) {
+		t.Errorf("a failed stream finished as stop: %q", out)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(out), "data: [DONE]") {
+		t.Errorf("stream not terminated: %q", out)
+	}
+}

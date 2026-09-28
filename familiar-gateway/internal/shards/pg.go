@@ -30,9 +30,22 @@ import (
 const TokenPlaintextPrefix = "shard_"
 
 // tokenPrefixLen is how many leading characters of the plaintext we
-// keep unhashed for UI display and for indexing ValidateToken lookups.
-// Matches FAMILIAR-SHARDS-PHASE1-SPEC §"shard_tokens table".
-const tokenPrefixLen = 8
+// keep unhashed for UI display and for indexing ValidateToken lookups:
+// the literal "shard_" plus 10 random characters (60 bits). It was 8,
+// leaving 2 random characters: 4096 buckets, so a probe found the
+// occupied ones cheaply and each guess into one cost a bcrypt compare
+// (a CPU flood from an unauthenticated endpoint), and two tokens of one
+// shard often showed the same prefix.
+const tokenPrefixLen = len(TokenPlaintextPrefix) + 10
+
+// legacyTokenPrefixLen is the prefix length of tokens minted before
+// that; they validate until they are revoked and re-minted.
+const legacyTokenPrefixLen = 8
+
+// bcryptSlots caps concurrent token hash comparisons, so a flood of
+// guesses into a legacy prefix bucket can't take every CPU the gateway
+// (chat, memory) needs.
+var bcryptSlots = make(chan struct{}, 4)
 
 // bcryptCost trades hash time for brute-force resistance. Default 10
 // is ~60ms on commodity hardware, fine for the low-QPS invoke path.
@@ -512,13 +525,17 @@ func (s *PGStore) ListTokens(ctx context.Context, shardID string) ([]*Token, err
 // caller cannot use the error to distinguish "we have a row with this
 // prefix" from "we don't" — a small timing hardening.
 func (s *PGStore) ValidateToken(ctx context.Context, plaintext string) (*Token, error) {
-	if len(plaintext) < tokenPrefixLen {
+	if len(plaintext) < legacyTokenPrefixLen {
 		return nil, ErrTokenNotFound
 	}
-	prefix := plaintext[:tokenPrefixLen]
+	legacy := plaintext[:legacyTokenPrefixLen]
+	prefix := legacy
+	if len(plaintext) >= tokenPrefixLen {
+		prefix = plaintext[:tokenPrefixLen]
+	}
 	rows, err := s.db.QueryContext(ctx,
-		selectTokenColumns+`, token_hash FROM shard_tokens WHERE token_prefix = $1`,
-		prefix,
+		selectTokenColumns+`, token_hash FROM shard_tokens WHERE token_prefix = $1 OR token_prefix = $2`,
+		prefix, legacy,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("shards: validate token: %w", err)
@@ -530,7 +547,14 @@ func (s *PGStore) ValidateToken(ctx context.Context, plaintext string) (*Token, 
 		if err != nil {
 			return nil, fmt.Errorf("shards: validate token: scan: %w", err)
 		}
-		if bcrypt.CompareHashAndPassword([]byte(hash), []byte(plaintext)) != nil {
+		select {
+		case bcryptSlots <- struct{}{}:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		mismatch := bcrypt.CompareHashAndPassword([]byte(hash), []byte(plaintext)) != nil
+		<-bcryptSlots
+		if mismatch {
 			continue
 		}
 		if t.RevokedAt != nil {

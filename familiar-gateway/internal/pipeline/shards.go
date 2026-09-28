@@ -36,10 +36,11 @@ import (
 //     zero MaxTokens falls through to the pipeline default, Temperature
 //     is a pointer because 0.0 is a valid explicit value.
 //   - SearchBudget grants the envelope web_search calls; zero keeps
-//     the shard-path default (search disabled — shard turns bypass the
-//     classifier and are stamped SearchNone). Stored shards don't set
-//     it; it exists for purpose-built envelopes (research workers,
-//     RESEARCH-SKILL-SPEC §6.1).
+//     the shard-path default (a pinned shard is stamped SearchNone, an
+//     unpinned one gets its classifier's verdict). Stored shards that
+//     allowlist web_search get one (OverridesForShard), as do
+//     purpose-built envelopes (research workers, RESEARCH-SKILL-SPEC
+//     §6.1).
 type ShardOverrides struct {
 	ShardID string
 
@@ -68,12 +69,11 @@ type ShardOverrides struct {
 	Temperature *float32
 
 	// SearchBudget grants this envelope N web_search calls for the
-	// turn. Shard turns bypass the classifier and are stamped
-	// SearchNone (shardClassifierOutput), which hard-disables
-	// web_search at dispatch; a positive SearchBudget lifts that for
-	// purpose-built envelopes (research workers). Zero keeps today's
-	// behavior — existing shards and ephemeral action envelopes never
-	// search.
+	// turn. A shard pinned to a model or tier bypasses the classifier
+	// and is stamped SearchNone (shardClassifierOutput), which
+	// hard-disables web_search at dispatch; a positive SearchBudget
+	// lifts that. Set for shards that allowlist web_search and for
+	// purpose-built envelopes (research workers).
 	SearchBudget int
 }
 

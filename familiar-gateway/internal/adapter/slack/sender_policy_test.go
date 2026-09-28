@@ -14,6 +14,7 @@ import (
 type fakeSlackAPI struct {
 	mu          sync.Mutex
 	posted      []string
+	texts       []string
 	membersErr  string // e.g. "missing_scope"
 	membersPage [][]string
 }
@@ -44,6 +45,7 @@ func (f *fakeSlackAPI) server(t *testing.T) *httptest.Server {
 		_ = r.ParseForm()
 		f.mu.Lock()
 		f.posted = append(f.posted, r.Form.Get("channel"))
+		f.texts = append(f.texts, r.Form.Get("text"))
 		f.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "channel": r.Form.Get("channel"), "ts": "1.2"})
 	})

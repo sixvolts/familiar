@@ -122,13 +122,19 @@
     // refreshShardBookCatalog pulls /console/api/books fresh.
     // Called from openShardCreate / openShardDetail so a book
     // created earlier in the same session shows up in the
-    // checklist without re-initing the whole panel.
-    async function refreshShardBookCatalog() {
+    // checklist without re-initing the whole panel. It lists the
+    // shard OWNER's books, archived ones included: a shard can only
+    // reach its owner's memberships, and an admin editing someone
+    // else's shard saw their own books instead (user_id is ignored
+    // for non-admins, who only edit their own shards).
+    async function refreshShardBookCatalog(ownerID) {
+        let url = "/console/api/books?archived=true";
+        if (ownerID) url += "&user_id=" + encodeURIComponent(ownerID);
         try {
-            const books = await apiJSON("/console/api/books");
+            const books = await apiJSON(url);
             shardsState.bookCatalog = (books && books.items) || [];
         } catch (e) {
-            shardsState.bookCatalog = shardsState.bookCatalog || [];
+            shardsState.bookCatalog = [];
         }
     }
 
@@ -136,31 +142,47 @@
     // the cached book catalog and pre-checks the IDs in `selected`.
     // Stores book IDs as the checkbox value so the form payload
     // matches what the backend stores in shards.book_access (UUIDs,
-    // not slugs or display names).
+    // not slugs or display names). A selected ID missing from the
+    // catalog (a personal book, or one the catalog fetch couldn't
+    // list) is shown checked as unavailable rather than dropped, and
+    // the form only sends book_access once the picker is touched
+    // (host.dataset.dirty): an unticked list means ALL the owner's
+    // books, so saving an unrelated edit silently widened the shard.
     function renderShardBookAccess(selected) {
         const host = document.getElementById("shard-book-access");
         if (!host) return;
         host.innerHTML = "";
+        host.dataset.dirty = "0";
+        if (!host.dataset.wired) {
+            host.dataset.wired = "1";
+            host.addEventListener("change", () => { host.dataset.dirty = "1"; });
+        }
         const set = new Set(selected || []);
         const books = (shardsState && shardsState.bookCatalog) || [];
-        if (!books.length) {
+        const known = new Set(books.map((b) => b.id));
+        const missing = Array.from(set).filter((id) => !known.has(id));
+        if (!books.length && !missing.length) {
             const empty = document.createElement("div");
             empty.className = "micro";
             empty.textContent = "(no books yet — create one in the Wiki panel first)";
             host.appendChild(empty);
             return;
         }
-        for (const b of books) {
+        const option = (id, text) => {
             const label = document.createElement("label");
             label.className = "shard-checklist-option";
             const cb = document.createElement("input");
             cb.type = "checkbox";
-            cb.value = b.id;
-            cb.checked = set.has(b.id);
+            cb.value = id;
+            cb.checked = set.has(id);
             label.appendChild(cb);
-            label.appendChild(document.createTextNode(" " + (b.name || b.slug || b.id)));
+            label.appendChild(document.createTextNode(" " + text));
             host.appendChild(label);
+        };
+        for (const b of books) {
+            option(b.id, (b.name || b.slug || b.id) + (b.archived_at ? " (archived)" : ""));
         }
+        for (const id of missing) option(id, "(unavailable) " + id);
     }
 
     // refreshSkillpackCatalog pulls the biddable-skills catalog:
@@ -292,7 +314,17 @@
                 if (cls) td.className = cls;
                 tr.appendChild(td);
             };
-            addTd(s.name, "col-name");
+            // The name is a button so the row opens from the keyboard;
+            // its click bubbles to the row's handler.
+            const nameTd = document.createElement("td");
+            nameTd.className = "col-name";
+            const open = document.createElement("button");
+            open.type = "button";
+            open.className = "row-open";
+            open.textContent = s.name || s.id;
+            open.setAttribute("aria-label", "Open shard: " + (s.name || s.id));
+            nameTd.appendChild(open);
+            tr.appendChild(nameTd);
             addTd(s.id, "col-id");
             addTd((s.persistence || "").toUpperCase(), "col-status");
             addTd((s.visibility || "").toUpperCase(), "col-status");
@@ -366,7 +398,7 @@
     }
 
     async function openShardCreate() {
-        await refreshShardBookCatalog();
+        await refreshShardBookCatalog("");
         await refreshSkillpackCatalog();
         shardsState.mode = "create";
         shardsState.currentShard = null;
@@ -412,10 +444,10 @@
     }
 
     async function openShardDetail(id) {
-        await refreshShardBookCatalog();
         await refreshSkillpackCatalog();
         try {
             const s = await apiJSON("/console/api/shards/" + encodeURIComponent(id));
+            await refreshShardBookCatalog(s.owner_id || "");
             shardsState.mode = "edit";
             shardsState.currentShard = s;
             document.getElementById("shard-detail-title").textContent = s.name || s.id;
@@ -489,8 +521,9 @@
     // the chat / api kill-switches. Both off ⇒ console-only shard
     // (a kiosk that never runs inference); skip the prompt
     // requirement and grey the field out so the form stays
-    // submittable. Either on ⇒ we'll route real prompts through
-    // here, so it's required and editable.
+    // submittable, keeping its text (it used to be cleared, and the
+    // save then erased the prompt for good). Either on ⇒ we'll route
+    // real prompts through here, so it's required and editable.
     function updateShardPromptState() {
         const chatEl = document.getElementById("shard-chat-enabled");
         const apiEl = document.getElementById("shard-api-enabled");
@@ -501,7 +534,6 @@
             promptEl.required = false;
             promptEl.disabled = true;
             promptEl.placeholder = "zombie shard — console only";
-            promptEl.value = "";
         } else {
             promptEl.required = true;
             promptEl.disabled = false;
@@ -526,18 +558,19 @@
             return;
         }
 
-        // SHARD-AUTH-SPEC scoping fields. Empty arrays explicitly
-        // mean "no panels / no books"; absence means "inherit
-        // everything", which the form represents as no checkboxes
-        // ticked + a blank book-access input. Server-side, the
-        // patch shape uses pointer fields so we send arrays only
-        // when the user has actually picked a subset.
+        // SHARD-AUTH-SPEC scoping fields. An empty list means
+        // "inherit everything" (every panel / all the owner's books).
         const consolePanels = Array.from(
             document.querySelectorAll('#shard-console-panels input:checked')
         ).map(cb => cb.value);
         const bookAccess = Array.from(
             document.querySelectorAll('#shard-book-access input:checked')
         ).map(cb => cb.value);
+        const editing = shardsState.mode !== "create";
+        const bookHost = document.getElementById("shard-book-access");
+        const sendBooks = !editing || (bookHost && bookHost.dataset.dirty === "1");
+        const tempRaw = document.getElementById("shard-temperature").value.trim();
+        const temperature = tempRaw === "" ? NaN : parseFloat(tempRaw);
         const sessionMaxRaw = document.getElementById("shard-session-max-age").value.trim();
         const sessionMaxAge = sessionMaxRaw ? parseInt(sessionMaxRaw, 10) : null;
 
@@ -553,30 +586,38 @@
             model_preference: model,
             tier_preference: tier,
             max_tokens: parseInt(document.getElementById("shard-max-tokens").value, 10) || 2048,
-            temperature: parseFloat(document.getElementById("shard-temperature").value) || 0,
             console_access: document.getElementById("shard-console-access").checked,
             chat_enabled: document.getElementById("shard-chat-enabled").checked,
             api_enabled: document.getElementById("shard-api-enabled").checked,
-            // Always send the arrays — empty means "inherit", which
-            // the backend treats as nil (matches len()==0 path in
-            // loadShardPermissions).
+            // Empty means "inherit", which the backend treats as nil
+            // (matches len()==0 path in loadShardPermissions).
             console_panels: consolePanels,
-            book_access: bookAccess,
         };
+        if (sendBooks) body.book_access = bookAccess;
+        // Blank temperature: the default on create, unchanged on edit
+        // (it was sent as 0, which is now honored as greedy sampling).
+        if (!isNaN(temperature)) body.temperature = temperature;
         if (sessionMaxAge && sessionMaxAge > 0) {
             body.session_max_age = sessionMaxAge;
+        } else if (editing) {
+            body.session_max_age = 0; // cleared: back to the gateway default
         }
 
-        // Parse optional schema blobs; empty string stays empty.
+        // Parse optional schema blobs. Blank omits the schema on
+        // create and clears it on edit ("" is the server's clear).
         const inSchema = document.getElementById("shard-input-schema").value.trim();
         if (inSchema) {
             try { body.input_schema = JSON.parse(inSchema); }
             catch (err) { setError("shard-form-error", new Error("input_schema: invalid JSON")); return; }
+        } else if (editing) {
+            body.input_schema = "";
         }
         const outSchema = document.getElementById("shard-output-schema").value.trim();
         if (outSchema) {
             try { body.output_schema = JSON.parse(outSchema); }
             catch (err) { setError("shard-form-error", new Error("output_schema: invalid JSON")); return; }
+        } else if (editing) {
+            body.output_schema = "";
         }
 
         // Imported-skill bindings ride along with the form but live in
@@ -729,7 +770,8 @@
     async function mintTokenForCurrent() {
         if (!shardsState.currentShard) return;
         const id = shardsState.currentShard.id;
-        const label = prompt("Token label (e.g. 'cannonball-prod'):", "") || "";
+        const label = prompt("Token label (e.g. 'cannonball-prod'):", "");
+        if (label === null) return; // Cancel mints nothing
         try {
             const data = await apiJSON("/console/api/shards/" + encodeURIComponent(id) + "/tokens", {
                 method: "POST",

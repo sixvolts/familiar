@@ -394,7 +394,7 @@ func TestToken_ValidateUnknownReturnsNotFound(t *testing.T) {
 
 func TestToken_ValidateShortReturnsNotFound(t *testing.T) {
 	s := setupShardStore(t)
-	// Fewer chars than tokenPrefixLen — should not hit the DB.
+	// Shorter than any prefix, old or new — should not hit the DB.
 	_, err := s.ValidateToken(context.Background(), "abc")
 	if !errors.Is(err, ErrTokenNotFound) {
 		t.Errorf("err = %v, want ErrTokenNotFound", err)
@@ -648,5 +648,50 @@ func TestValidateScopeTag_ReservesBookPrefix(t *testing.T) {
 	}
 	if err := ValidateScopeTag("shard:kitchen"); err != nil {
 		t.Errorf("ordinary tag rejected: %v", err)
+	}
+}
+
+// Wiki page writers are write tools too: an "ephemeral" shard (no side
+// effects, the UI said) could rewrite a page.
+func TestValidateAllowlist_EphemeralRejectsPageWriters(t *testing.T) {
+	for _, write := range []string{"create_page", "update_page", "append_to_page", "patch_page", "pin_page"} {
+		if err := ValidateAllowlist([]string{"read_page", write}, PersistenceEphemeral, nil); !errors.Is(err, ErrWriteToolOnEph) {
+			t.Errorf("ephemeral+%s: err = %v, want ErrWriteToolOnEph", write, err)
+		}
+	}
+	if err := ValidateAllowlist([]string{"read_page", "search_pages", "list_books"}, PersistenceEphemeral, nil); err != nil {
+		t.Errorf("read-only wiki tools refused: %v", err)
+	}
+}
+
+// A token's lookup prefix carries 10 random characters (it had 2: 4096
+// buckets a probe could find, each guess into one costing a bcrypt
+// compare). Tokens minted with the old 8-character prefix still work.
+func TestToken_LongPrefixAndLegacyTokens(t *testing.T) {
+	s := setupShardStore(t)
+	ctx := context.Background()
+	if err := s.CreateShard(ctx, validShard("prefixes")); err != nil {
+		t.Fatal(err)
+	}
+	p1, t1, err := s.CreateToken(ctx, "owner", "prefixes", "one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, t2, err := s.CreateToken(ctx, "owner", "prefixes", "two")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(t1.TokenPrefix) != len(TokenPlaintextPrefix)+10 {
+		t.Errorf("prefix %q has %d characters, want %d", t1.TokenPrefix, len(t1.TokenPrefix), len(TokenPlaintextPrefix)+10)
+	}
+	if t1.TokenPrefix == t2.TokenPrefix {
+		t.Error("two tokens share a prefix")
+	}
+	// A token minted before the change: its row holds 8 characters.
+	if _, err := s.db.ExecContext(ctx, `UPDATE shard_tokens SET token_prefix = $1 WHERE id = $2`, p1[:8], t1.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.ValidateToken(ctx, p1); err != nil || got.ID != t1.ID {
+		t.Errorf("legacy-prefix token: %v, %v", got, err)
 	}
 }

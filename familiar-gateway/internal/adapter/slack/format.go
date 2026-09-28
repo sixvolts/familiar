@@ -2,6 +2,7 @@ package slack
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -14,9 +15,13 @@ import (
 //   - --- / *** / ___ rule → a unicode divider line
 //   - "- item" / "+ item" → "•  item"
 //   - **bold** → *bold*
-//   - [text](url) → <url|text>
+//   - [text](url) and <https://…> autolinks → <url|text> / <url>
 //   - <html> tags → stripped
-//   - backtick `code` and ``` ```code``` fences pass through untouched
+//   - backtick `code` and ``` ```code``` fences pass through, escaped
+//   - &, < and > are escaped everywhere, so text can't form a Slack
+//     control sequence (<!channel>, <@U…>): content a tool fetched
+//     could make the bot ping a whole channel. Only the links built
+//     here keep their <…>.
 //
 // Code spans and fenced blocks are carved out first so the bold/link
 // transformations don't accidentally rewrite content the user wanted
@@ -35,13 +40,20 @@ func toMrkdwn(s string) string {
 	b.Grow(len(s))
 	for _, seg := range segments {
 		if seg.code {
-			b.WriteString(seg.text)
+			b.WriteString(slackEscape(seg.text))
 			continue
 		}
 		b.WriteString(transformPlain(seg.text))
 	}
 	return b.String()
 }
+
+// slackEscape escapes the three characters Slack gives meaning to.
+func slackEscape(s string) string {
+	return slackEscaper.Replace(s)
+}
+
+var slackEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
 
 type codeSeg struct {
 	text string
@@ -117,20 +129,44 @@ var linkPattern = regexp.MustCompile(`\[([^\]]+)\]\(([^)\s]+)\)`)
 // htmlTagPattern matches simple HTML tags for stripping.
 var htmlTagPattern = regexp.MustCompile(`<(/?[a-zA-Z][a-zA-Z0-9]*)\b[^>]*>`)
 
+// autolinkPattern matches a CommonMark autolink, <scheme://…> or
+// <mailto:…>. It has to go before the tag strip, which took
+// "<https://x>" for a tag named https and deleted the URL.
+var autolinkPattern = regexp.MustCompile(`<((?:https?|mailto):[^\s<>]+)>`)
+
 func transformPlain(s string) string {
 	// Order matters:
-	//  1. strip HTML before link rewriting so generated <url|text>
-	//     isn't re-stripped as a tag;
-	//  2. headings/rules/bullets are line-anchored and run before the
+	//  1. links (markdown and autolinks) become placeholders first, so
+	//     the tag strip and the escaping leave them alone; they're
+	//     restored as Slack links at the end, their text escaped;
+	//  2. strip HTML, then escape what's left of &, < and >;
+	//  3. headings/rules/bullets are line-anchored and run before the
 	//     inline bold pass — heading text may itself contain **bold**,
 	//     which the bold pass then handles;
-	//  3. the hr pattern (---) must run before bullets so a "---" line
+	//  4. the hr pattern (---) must run before bullets so a "---" line
 	//     isn't seen as a "-" bullet.
+	var links []string
+	hold := func(link string) string {
+		links = append(links, link)
+		return "\x00" + strconv.Itoa(len(links)-1) + "\x00"
+	}
+	s = linkPattern.ReplaceAllStringFunc(s, func(m string) string {
+		sub := linkPattern.FindStringSubmatch(m)
+		return hold("<" + slackEscape(sub[2]) + "|" + slackEscape(sub[1]) + ">")
+	})
+	s = autolinkPattern.ReplaceAllStringFunc(s, func(m string) string {
+		return hold("<" + slackEscape(autolinkPattern.FindStringSubmatch(m)[1]) + ">")
+	})
 	s = htmlTagPattern.ReplaceAllString(s, "")
+	s = slackEscape(s)
 	s = hrPattern.ReplaceAllString(s, mrkdwnRule)
 	s = headingPattern.ReplaceAllString(s, "*$1*")
 	s = bulletPattern.ReplaceAllString(s, "$1•  ")
 	s = boldPattern.ReplaceAllString(s, "*$1*")
-	s = linkPattern.ReplaceAllString(s, "<$2|$1>")
-	return s
+	return placeholderPattern.ReplaceAllStringFunc(s, func(m string) string {
+		i, _ := strconv.Atoi(strings.Trim(m, "\x00"))
+		return links[i]
+	})
 }
+
+var placeholderPattern = regexp.MustCompile("\x00[0-9]+\x00")

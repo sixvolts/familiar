@@ -242,49 +242,43 @@ if [[ -f "$CONFIG_FILE" ]]; then
         ok "Appended Slack config to ${CONFIG_FILE}"
     fi
 else
-    # Create a new config with defaults + slack section.
-    cat > "$CONFIG_FILE" <<TOML
-[engine]
-socket_path = "~/.familiar/run/engine.sock"
-
-[adapter.cli]
-prompt = "> "
-history_file = "~/.familiar/cli_history"
-
-${SLACK_TOML}
-
-[embedder]
-endpoint = ""
-model = "nomic-embed-text"
-dimension = 768
-
-[router]
-enabled = true
-fallback_model = "anthropic/claude-sonnet-4-6"
-prefer_local = true
-
-[[models]]
-id = "anthropic/claude-sonnet-4-6"
-provider = "anthropic"
-endpoint = "https://api.anthropic.com"
-vault_key = "anthropic_api_key"
-context_window = 200000
-capabilities = ["tool_use", "vision", "reasoning"]
-latency_profile = "remote"
-max_concurrent = 5
-TOML
-    ok "Created ${CONFIG_FILE}"
+    # No config yet: start from the repository's example (the current
+    # schema) with its [adapter.slack] section replaced by ours. The
+    # template this script used to write carried settings the gateway
+    # no longer reads ([engine] socket_path, [router] fallback_model)
+    # and a remote model entry, all silently ignored or unintended.
+    EXAMPLE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/config.example.toml"
+    if [[ -f "$EXAMPLE" ]]; then
+        tmpfile=$(mktemp)
+        awk '
+            /^\[adapter\.slack\]/ { skip=1; next }
+            /^\[/ && skip { skip=0 }
+            !skip { print }
+        ' "$EXAMPLE" > "$tmpfile"
+        echo "" >> "$tmpfile"
+        echo "$SLACK_TOML" >> "$tmpfile"
+        mv "$tmpfile" "$CONFIG_FILE"
+        ok "Created ${CONFIG_FILE} from config.example.toml — review it (models, embedder) before starting the gateway"
+    else
+        echo "$SLACK_TOML" > "$CONFIG_FILE"
+        warn "config.example.toml not found: ${CONFIG_FILE} holds only the Slack section; merge it into a full config"
+    fi
 fi
 
-# Write tokens to env file.
+# Write tokens to env file. It is created unreadable to others from the
+# start (umask 077) and moved into place: writing it and then running
+# chmod left the tokens readable in between (and an existing file kept
+# its old mode until then).
 ENV_FILE="${CONFIG_DIR}/slack.env"
-cat > "$ENV_FILE" <<ENV
+ENV_TMP=$(umask 077 && mktemp "${CONFIG_DIR}/.slack.env.XXXXXX")
+cat > "$ENV_TMP" <<ENV
 # Familiar Gateway — Slack tokens
 # Source this file or export these variables before running the gateway.
 export SLACK_BOT_TOKEN="${BOT_TOKEN}"
 export SLACK_APP_TOKEN="${APP_TOKEN}"
 ENV
-chmod 600 "$ENV_FILE"
+chmod 600 "$ENV_TMP"
+mv "$ENV_TMP" "$ENV_FILE"
 ok "Tokens written to ${ENV_FILE} (mode 600)"
 
 # ─── Done ────────────────────────────────────────────────────────────────────

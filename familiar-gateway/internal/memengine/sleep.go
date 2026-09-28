@@ -36,6 +36,7 @@ import (
 
 	"github.com/familiar/gateway/internal/config"
 	"github.com/familiar/gateway/internal/db"
+	"github.com/lib/pq"
 )
 
 // SleepCycle owns the goroutine that runs consolidation on a tick.
@@ -54,6 +55,20 @@ type SleepCycle struct {
 	mu     sync.RWMutex
 	last   CycleStats
 	cycles uint64
+
+	// runMu keeps passes from overlapping: the ticker's, and on-demand
+	// ones (StartSleep, the admin button), which ran concurrently.
+	runMu sync.Mutex
+	// dedupMark is how far the drift dedup has got: rows changed after
+	// it (updated_at, then id) haven't been compared yet. Guarded by
+	// runMu. Zero after a restart, so the first passes cover every row,
+	// a batch at a time, across as many cycles as that takes.
+	dedupMark dedupMark
+}
+
+type dedupMark struct {
+	at time.Time
+	id string
 }
 
 // CycleStats is one maintenance pass's results. Surfaced via
@@ -161,10 +176,24 @@ func (s *SleepCycle) RunOnce(ctx context.Context) CycleStats {
 	if s == nil || s.pool == nil {
 		return CycleStats{}
 	}
-	return s.runOnce(ctx)
+	// A pass is already running (the ticker's, or another request's):
+	// don't start a second one, and don't make the caller wait for it.
+	if !s.runMu.TryLock() {
+		stats := s.LastStats()
+		stats.Errors = append(append([]string(nil), stats.Errors...), "a consolidation pass is already running")
+		return stats
+	}
+	defer s.runMu.Unlock()
+	return s.runPass(ctx)
 }
 
 func (s *SleepCycle) runOnce(ctx context.Context) CycleStats {
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+	return s.runPass(ctx)
+}
+
+func (s *SleepCycle) runPass(ctx context.Context) CycleStats {
 	stats := CycleStats{StartedAt: time.Now().UTC()}
 
 	// Phase 1: resolve semantic conflicts in the persistent tier.
@@ -210,13 +239,27 @@ func (s *SleepCycle) runOnce(ctx context.Context) CycleStats {
 }
 
 // resolveConflicts is the store-wide drift dedup: for each live
-// KNOWLEDGE fact, find its nearest live neighbor with a different
-// content_hash inside the same (user_id, scope_tag) partition; if
-// the cosine similarity clears the threshold, the NEWER row survives
-// and points `supersedes` at the older one — which hides the older
-// row, because everywhere in the system "superseded" means "another
-// row points at me" (retrieval's NOT EXISTS filter, the extraction
-// pipeline's UPDATE path, the console's superseded flag).
+// KNOWLEDGE fact changed since the last pass, find its nearest live
+// neighbor with a different content_hash inside the same (user_id,
+// scope_tag) partition; if the cosine similarity clears the threshold,
+// the NEWER row survives and points `supersedes` at the older one —
+// which hides the older row, because everywhere in the system
+// "superseded" means "another row points at me" (retrieval's NOT EXISTS
+// filter, the extraction pipeline's UPDATE path, the console's
+// superseded flag).
+//
+// Bounded work: rows are taken dedupBatch at a time in (updated_at, id)
+// order from s.dedupMark, each batch compared with its whole partition,
+// until none are left or ctx (the phase timeout) runs out; the mark
+// carries over to the next cycle. Comparing every row with its
+// partition in one statement is quadratic, and past about ten thousand
+// facts it hit the timeout on every cycle, so the dedup never ran.
+//
+// A chain head (a fact that replaced an older one) can be the older
+// side of a pair, and is then hidden in turn; only a row that replaces
+// nothing can take a pointer (one pointer per row). Each older row gets
+// one newer winner and each winner one loser: two winners pointing at
+// one row branched its chain.
 //
 // Deliberately excluded from dedup:
 //   - source_type='conversation' — raw turn chunks aren't knowledge;
@@ -225,59 +268,126 @@ func (s *SleepCycle) runOnce(ctx context.Context) CycleStats {
 //     page (clean-replaced on save), not by memory lifecycle.
 //   - cross-partition pairs — a shard-isolated or wiki-scoped fact
 //     must never supersede a top-level one, nor one user's another's.
+//   - pairs of different embedding dimensions (a changed embedding
+//     model): not comparable, and pgvector refuses the distance.
 //
 // Threshold defaults to 0.92 if cfg.ConflictThreshold is 0 — matches
 // the noopDedupThreshold the gateway already uses at write time.
+// Caller holds runMu.
 func (s *SleepCycle) resolveConflicts(ctx context.Context, threshold float64) (uint32, error) {
 	if threshold <= 0 {
 		threshold = 0.92
 	}
+	var total uint32
+	for ctx.Err() == nil {
+		ids, next, err := s.dedupBatchAfter(ctx, s.dedupMark)
+		if err != nil {
+			return total, err
+		}
+		if len(ids) == 0 {
+			return total, nil
+		}
+		n, err := s.dedupPass(ctx, threshold, ids)
+		if err != nil {
+			return total, err
+		}
+		total += n
+		s.dedupMark = next
+	}
+	return total, nil
+}
+
+// dedupBatch is how many changed rows one statement compares with their
+// partitions (a variable so tests can force several batches).
+var dedupBatch = 200
+
+// dedupCandidates is the set of rows the drift dedup considers: live
+// (nothing points at them) knowledge rows with a vector and a hash.
+const dedupCandidates = `
+	agent_id = $1
+	AND embedding IS NOT NULL
+	AND content_hash IS NOT NULL
+	AND source_type NOT IN ('conversation', 'wiki_page')
+	AND NOT EXISTS (SELECT 1 FROM memories s WHERE s.supersedes = memories.id)`
+
+// dedupBatchAfter returns the next batch of candidate ids changed after
+// mark, in (updated_at, id) order, and the mark after them.
+func (s *SleepCycle) dedupBatchAfter(ctx context.Context, mark dedupMark) ([]string, dedupMark, error) {
+	rows, err := s.pool.QueryContext(ctx, `
+		SELECT id::text, updated_at FROM memories
+		 WHERE `+dedupCandidates+`
+		   AND (updated_at, id::text) > ($2, $3)
+		 ORDER BY updated_at, id::text
+		 LIMIT $4`, s.agentID, mark.at, mark.id, dedupBatch)
+	if err != nil {
+		return nil, mark, err
+	}
+	defer rows.Close()
+	var ids []string
+	next := mark
+	for rows.Next() {
+		if err := rows.Scan(&next.id, &next.at); err != nil {
+			return nil, mark, err
+		}
+		ids = append(ids, next.id)
+	}
+	return ids, next, rows.Err()
+}
+
+// dedupPass pairs each of ids with its nearest candidate neighbour and
+// applies the winners.
+func (s *SleepCycle) dedupPass(ctx context.Context, threshold float64, ids []string) (uint32, error) {
 	res, err := s.pool.ExecContext(ctx, `
 		WITH live AS (
-			SELECT id, content_hash, embedding, created_at, user_id, scope_tag
+			SELECT id, content_hash, embedding, created_at, user_id, scope_tag,
+			       supersedes IS NULL AS free
 			  FROM memories
-			 WHERE agent_id = $1
-			   AND embedding IS NOT NULL
-			   AND content_hash IS NOT NULL
-			   AND supersedes IS NULL
-			   AND source_type NOT IN ('conversation', 'wiki_page')
-			   AND NOT EXISTS (
-			       SELECT 1 FROM memories s WHERE s.supersedes = memories.id
-			   )
+			 WHERE `+dedupCandidates+`
 		),
 		pairs AS (
-			SELECT a.id AS a_id, a.created_at AS a_created,
-			       b.id AS b_id, b.created_at AS b_created,
-			       (1.0 - (a.embedding <=> b.embedding))::float4 AS similarity
+			SELECT a.id AS a_id, a.created_at AS a_created, a.free AS a_free,
+			       b.id AS b_id, b.created_at AS b_created, b.free AS b_free
 			  FROM live a
 			  JOIN LATERAL (
-			       SELECT id, content_hash, embedding, created_at
+			       SELECT id, created_at, free, embedding
 			         FROM live l
 			        WHERE l.id <> a.id
 			          AND l.content_hash <> a.content_hash
 			          AND l.user_id = a.user_id
 			          AND l.scope_tag IS NOT DISTINCT FROM a.scope_tag
-			        ORDER BY l.embedding <=> a.embedding
+			          AND vector_dims(l.embedding) = vector_dims(a.embedding)
+			        ORDER BY CASE WHEN vector_dims(l.embedding) = vector_dims(a.embedding)
+			                      THEN l.embedding <=> a.embedding END
 			        LIMIT 1
 			  ) b ON true
-			 WHERE (1.0 - (a.embedding <=> b.embedding)) >= $2
+			 WHERE a.id = ANY($3::uuid[])
+			   AND (1.0 - (a.embedding <=> b.embedding)) >= $2
 		),
 		winners AS (
 			SELECT CASE WHEN a_created > b_created THEN a_id ELSE b_id END AS winner,
-			       CASE WHEN a_created > b_created THEN b_id ELSE a_id END AS loser
+			       CASE WHEN a_created > b_created THEN b_id ELSE a_id END AS loser,
+			       GREATEST(a_created, b_created) AS winner_created
 			  FROM pairs
 			 WHERE a_created <> b_created
+			   AND CASE WHEN a_created > b_created THEN a_free ELSE b_free END
 		),
-		dedup AS (
-			SELECT DISTINCT winner, loser FROM winners
+		one_per_loser AS (
+			SELECT DISTINCT ON (loser) winner, loser
+			  FROM winners
+			 ORDER BY loser, winner_created DESC, winner
+		),
+		one_per_winner AS (
+			SELECT DISTINCT ON (winner) winner, loser
+			  FROM one_per_loser
+			 ORDER BY winner, loser
 		)
 		UPDATE memories m
 		   SET supersedes = d.loser,
 		       updated_at = NOW()
-		  FROM dedup d
+		  FROM one_per_winner d
 		 WHERE m.id = d.winner
 		   AND m.agent_id = $1
-		   AND m.supersedes IS NULL`, s.agentID, threshold)
+		   AND m.supersedes IS NULL`, s.agentID, threshold, pq.Array(ids))
 	if err != nil {
 		return 0, err
 	}

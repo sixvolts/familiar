@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -164,7 +165,9 @@ func TestSleep_ResolveConflictsDirectionAndPartitions(t *testing.T) {
 	seedMemory(t, pool, agent, uuidE, "u1", "conversation_extraction", "shard:x", emb, 1*time.Hour)
 
 	s := NewSleepCycle(pool, agent, config.DefaultSleepConfig())
-	n, err := s.resolveConflicts(context.Background(), 0.92)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	n, err := s.resolveConflicts(ctx, 0.92)
 	if err != nil {
 		t.Fatalf("resolveConflicts: %v", err)
 	}
@@ -286,5 +289,156 @@ func TestSleep_RepairInvertedSupersedes(t *testing.T) {
 	supLegit, _, _ := memoryState(t, pool, legitNew)
 	if supLegit != legitOld {
 		t.Errorf("legitimate pointer was clobbered: %q", supLegit)
+	}
+}
+
+// seedVec is seedMemory with a caller-chosen content hash and vector.
+func seedVec(t *testing.T, pool *db.Pool, agent, id, hash, emb string, age time.Duration) {
+	t.Helper()
+	if _, err := pool.ExecContext(context.Background(), `
+		INSERT INTO memories (id, agent_id, scope, content, content_hash, embedding,
+		                      source_type, user_id, created_at, last_accessed)
+		VALUES ($1::uuid, $2, 'user', $3, $4, $5::vector, 'conversation_extraction', 'u1',
+		        NOW() - $6::interval, NOW() - $6::interval)`,
+		id, agent, "content "+id, hash, emb, fmt.Sprintf("%d seconds", int(age.Seconds()))); err != nil {
+		t.Fatalf("seed %s: %v", id, err)
+	}
+}
+
+// A fact that replaced an older one can itself be deduplicated by a
+// newer near-duplicate ("NYC" replaced an older fact; "New York City"
+// arrives). Heads were excluded from dedup for good.
+func TestSleep_DedupReachesChainHeads(t *testing.T) {
+	pool := sleepPoolForTest(t)
+	agent := fmt.Sprintf("sleep-heads-%d", time.Now().UnixNano())
+	a, b, c := testUUID(11), testUUID(12), testUUID(13)
+	seedVec(t, pool, agent, a, "ha", "[0,1,0]", 3*time.Hour)
+	seedVec(t, pool, agent, b, "hb", "[1,0,0]", 2*time.Hour)
+	seedVec(t, pool, agent, c, "hc", "[1,0,0]", 1*time.Hour)
+	if _, err := pool.ExecContext(context.Background(), `UPDATE memories SET supersedes = $1::uuid WHERE id = $2::uuid`, a, b); err != nil {
+		t.Fatal(err)
+	}
+	s := NewSleepCycle(pool, agent, config.DefaultSleepConfig())
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if _, err := s.resolveConflicts(ctx, 0.92); err != nil {
+		t.Fatal(err)
+	}
+	if sup, _, _ := memoryState(t, pool, c); sup != b {
+		t.Errorf("the newer duplicate supersedes %q, want the chain head %s", sup, b)
+	}
+}
+
+// Two newer near-duplicates of one fact: one of them takes it, not both
+// (which branched the chain).
+func TestSleep_DedupDoesNotBranch(t *testing.T) {
+	pool := sleepPoolForTest(t)
+	agent := fmt.Sprintf("sleep-branch-%d", time.Now().UnixNano())
+	a, w1, w2 := testUUID(21), testUUID(22), testUUID(23)
+	// w1 and w2 are each close to a (cos 0.97) but not to each other (0.88).
+	seedVec(t, pool, agent, a, "ha", "[1,0,0]", 3*time.Hour)
+	seedVec(t, pool, agent, w1, "h1", "[0.97,0.2431,0]", 2*time.Hour)
+	seedVec(t, pool, agent, w2, "h2", "[0.97,-0.2431,0]", 1*time.Hour)
+	s := NewSleepCycle(pool, agent, config.DefaultSleepConfig())
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if _, err := s.resolveConflicts(ctx, 0.92); err != nil {
+		t.Fatal(err)
+	}
+	s1, _, _ := memoryState(t, pool, w1)
+	s2, _, _ := memoryState(t, pool, w2)
+	if (s1 == a) == (s2 == a) {
+		t.Errorf("w1.supersedes=%q w2.supersedes=%q: want exactly one pointing at %s", s1, s2, a)
+	}
+}
+
+// The dedup works through the changed rows a batch at a time, keeps its
+// place, and picks up later rows on the next pass; a row with another
+// embedding dimension in the partition doesn't fail the pass.
+func TestSleep_DedupBatchesAndResumes(t *testing.T) {
+	pool := sleepPoolForTest(t)
+	agent := fmt.Sprintf("sleep-batches-%d", time.Now().UnixNano())
+	old := dedupBatch
+	dedupBatch = 2
+	t.Cleanup(func() { dedupBatch = old })
+	for i := 0; i < 5; i++ {
+		v := make([]string, 6)
+		for j := range v {
+			v[j] = "0"
+		}
+		v[i] = "1"
+		seedVec(t, pool, agent, testUUID(30+i), fmt.Sprint("hx", i), "["+strings.Join(v, ",")+"]", time.Duration(10-i)*time.Hour)
+	}
+	seedVec(t, pool, agent, testUUID(40), "hdim", "[1,0,0]", 90*time.Minute) // other dimension
+	dupOld, dupNew := testUUID(41), testUUID(42)
+	seedVec(t, pool, agent, dupOld, "hd1", "[0,0,0,0,0,1]", 2*time.Hour)
+	seedVec(t, pool, agent, dupNew, "hd2", "[0,0,0,0,0,1]", 1*time.Hour)
+	s := NewSleepCycle(pool, agent, config.DefaultSleepConfig())
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	n, err := s.resolveConflicts(ctx, 0.92)
+	if err != nil {
+		t.Fatalf("resolveConflicts: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("resolved %d, want 1", n)
+	}
+	if sup, _, _ := memoryState(t, pool, dupNew); sup != dupOld {
+		t.Errorf("dup not resolved across batches: %q", sup)
+	}
+	// A later duplicate is picked up by the next pass.
+	late := testUUID(43)
+	seedVec(t, pool, agent, late, "hd3", "[0,0,0,0,0,1]", 0)
+	if _, err := s.resolveConflicts(ctx, 0.92); err != nil {
+		t.Fatal(err)
+	}
+	if sup, _, _ := memoryState(t, pool, late); sup != dupNew {
+		t.Errorf("the later duplicate supersedes %q, want %s", sup, dupNew)
+	}
+}
+
+// An on-demand pass while one is running reports that and returns.
+func TestSleep_RunOnceDoesNotOverlap(t *testing.T) {
+	pool := sleepPoolForTest(t)
+	s := NewSleepCycle(pool, "sleep-overlap", config.DefaultSleepConfig())
+	s.runMu.Lock()
+	done := make(chan CycleStats, 1)
+	go func() { done <- s.RunOnce(context.Background()) }()
+	select {
+	case st := <-done:
+		if len(st.Errors) == 0 || !strings.Contains(st.Errors[len(st.Errors)-1], "already running") {
+			t.Errorf("stats = %+v, want an already-running note", st)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunOnce waited for the running pass")
+	}
+	s.runMu.Unlock()
+}
+
+// Only a row that replaces nothing can take the older duplicate: when
+// the newest candidate is a chain head (its one pointer is taken), the
+// next free candidate does. Picking the head left the duplicate live.
+func TestSleep_DedupWinnerMustBeFree(t *testing.T) {
+	pool := sleepPoolForTest(t)
+	agent := fmt.Sprintf("sleep-free-%d", time.Now().UnixNano())
+	x, l, f, h := testUUID(51), testUUID(52), testUUID(53), testUUID(54)
+	seedVec(t, pool, agent, x, "hx", "[0,1,0]", 4*time.Hour)
+	seedVec(t, pool, agent, l, "hl", "[1,0,0]", 3*time.Hour)
+	seedVec(t, pool, agent, f, "hf", "[1,0.05,0]", 2*time.Hour)
+	seedVec(t, pool, agent, h, "hh", "[1,-0.02,0]", 1*time.Hour)
+	if _, err := pool.ExecContext(context.Background(), `UPDATE memories SET supersedes = $1::uuid WHERE id = $2::uuid`, x, h); err != nil {
+		t.Fatal(err)
+	}
+	s := NewSleepCycle(pool, agent, config.DefaultSleepConfig())
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if _, err := s.resolveConflicts(ctx, 0.92); err != nil {
+		t.Fatal(err)
+	}
+	if sup, _, _ := memoryState(t, pool, f); sup != l {
+		t.Errorf("the free newer duplicate supersedes %q, want %s", sup, l)
+	}
+	if sup, _, _ := memoryState(t, pool, h); sup != x {
+		t.Errorf("the head's pointer moved to %q", sup)
 	}
 }

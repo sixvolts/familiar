@@ -1688,6 +1688,16 @@ UPDATE users u SET first_passkey_at = NOW()
 		ddl: `
 ALTER TABLE admin_sessions ADD COLUMN IF NOT EXISTS absolute_expires_at TIMESTAMPTZ;`,
 	},
+	{
+		// relationships_object_lowercase: entity names are lowercase
+		// everywhere they're looked up, and subjects always were; objects
+		// kept the extractor's case, so "Acme" was a second entity no
+		// lookup, merge or delete could reach. The unique index is
+		// (subject, predicate, owner), so this can't collide.
+		name: "relationships_object_lowercase",
+		ddl: `
+UPDATE relationships SET object = lower(object) WHERE object <> lower(object);`,
+	},
 }
 
 // migrateLockKey is the pg_advisory_lock key that serializes Migrate

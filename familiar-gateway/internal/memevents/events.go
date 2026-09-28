@@ -120,10 +120,21 @@ type Bus struct {
 	logSink func(Event) // optional — the log emitter writes here
 
 	// Per-session ring buffer for replay-on-reconnect. Sized by
-	// ringSize; older events fall off as new ones land.
-	ringSize int
-	rings    map[string]*sessionRing
+	// ringSize; older events fall off as new ones land. A ring idle for
+	// ringIdle is dropped (swept on Emit, at most every ringSweepEvery):
+	// there was one per session ever seen, kept for the life of the
+	// process, each holding up to ringSize events of fact text.
+	ringSize  int
+	rings     map[string]*sessionRing
+	lastSweep time.Time
 }
+
+// Ring eviction. Generous: a reconnecting client replays what it missed
+// from its session's ring. Variables so tests can shorten them.
+var (
+	ringIdle       = 45 * time.Minute
+	ringSweepEvery = time.Minute
+)
 
 type subscription struct {
 	sessionID string // "" means subscribe to all sessions
@@ -134,11 +145,13 @@ type sessionRing struct {
 	mu     sync.Mutex
 	events []Event
 	cap    int
+	last   time.Time // last append
 }
 
 func (r *sessionRing) append(e Event) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.last = time.Now()
 	r.events = append(r.events, e)
 	if len(r.events) > r.cap {
 		drop := len(r.events) - r.cap
@@ -197,6 +210,9 @@ func (b *Bus) Emit(sessionID string, kind Kind, payload any) {
 	}
 	if b.ringSize > 0 && sessionID != "" {
 		b.mu.Lock()
+		if time.Since(b.lastSweep) >= ringSweepEvery {
+			b.sweepRingsLocked()
+		}
 		ring, ok := b.rings[sessionID]
 		if !ok {
 			ring = &sessionRing{cap: b.ringSize}
@@ -219,6 +235,19 @@ func (b *Bus) Emit(sessionID string, kind Kind, payload any) {
 			// subscriber. Logging is intentional only at the bus
 			// level (logSink) so a slow SSE client doesn't spam
 			// the gateway log on every emit.
+		}
+	}
+}
+
+// sweepRingsLocked drops rings idle for ringIdle. Caller holds b.mu.
+func (b *Bus) sweepRingsLocked() {
+	b.lastSweep = time.Now()
+	for id, r := range b.rings {
+		r.mu.Lock()
+		idle := time.Since(r.last) >= ringIdle
+		r.mu.Unlock()
+		if idle {
+			delete(b.rings, id)
 		}
 	}
 }

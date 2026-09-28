@@ -105,12 +105,20 @@
             if (row.superseded) tr.classList.add("is-superseded");
             tr.dataset.id = row.id;
 
+            // The content is the row's button: keyboard and screen-reader
+            // users could filter the list but never open a memory (the
+            // row only took mouse clicks).
             const cContent = document.createElement("td");
             cContent.className = "col-content";
-            const div = document.createElement("div");
-            div.className = "content-cell";
-            div.textContent = row.content || "";
-            cContent.appendChild(div);
+            const open = document.createElement("button");
+            open.type = "button";
+            open.className = "row-open";
+            open.setAttribute("aria-label", "Open memory: " + truncate(row.content || "", 80));
+            const text = document.createElement("span");
+            text.className = "content-cell";
+            text.textContent = row.content || "";
+            open.appendChild(text);
+            cContent.appendChild(open);
 
             const cScope = document.createElement("td");
             cScope.className = "col-scope";
@@ -138,6 +146,7 @@
 
             tr.append(cContent, cScope, cUser, cSource, cConf, cCreated, cAct);
             tr.addEventListener("click", () => openDetail(row.id));
+            open.addEventListener("click", (e) => { e.stopPropagation(); openDetail(row.id); });
             tbody.appendChild(tr);
         }
     }
@@ -154,15 +163,28 @@
         document.getElementById("memory-total").textContent = String(memState.total);
     }
 
+    // loadSeq (like the graph's) drops a response overtaken by a later
+    // load: switching tabs while a slow one was in flight painted its
+    // rows under the new tab (chunks under Knowledge).
+    let loadSeq = 0;
     async function loadMemories() {
+        const seq = ++loadSeq;
         setError("memory-error", null);
         try {
             const data = await apiJSON("/console/api/memories?" + memQueryString());
+            if (seq !== loadSeq) return;
             memState.total = data.total || 0;
+            // Past the end (the last row of the last page was deleted):
+            // show the last page there is, not "51–50 OF 50".
+            if (memState.offset > 0 && memState.offset >= memState.total) {
+                memState.offset = Math.max(0, Math.ceil(memState.total / PAGE_SIZE) - 1) * PAGE_SIZE;
+                loadMemories();
+                return;
+            }
             renderMemoryRows(data.items || []);
             updatePager();
         } catch (e) {
-            setError("memory-error", e);
+            if (seq === loadSeq) setError("memory-error", e);
         }
     }
 
@@ -325,6 +347,7 @@
     }
 
     async function loadEntities() {
+        const seq = ++loadSeq;
         setError("memory-error", null);
         const q = document.getElementById("me-q").value.trim();
         const params = new URLSearchParams({ limit: "100" });
@@ -332,11 +355,12 @@
         if (memState.viewUser) params.set("user_id", memState.viewUser);
         try {
             const data = await apiJSON("/console/api/memory/entities?" + params.toString());
+            if (seq !== loadSeq) return;
             entState.items = (data && data.items) || [];
             document.getElementById("memory-total").textContent = String(entState.items.length);
             renderEntityRows();
         } catch (e) {
-            setError("memory-error", e);
+            if (seq === loadSeq) setError("memory-error", e);
         }
     }
 
@@ -364,7 +388,13 @@
             const tr = document.createElement("tr");
             const cName = document.createElement("td");
             cName.className = "col-content";
-            cName.textContent = ent.name;
+            const open = document.createElement("button");
+            open.type = "button";
+            open.className = "row-open";
+            open.textContent = ent.name;
+            open.setAttribute("aria-label", "Open entity: " + ent.name);
+            open.addEventListener("click", (e) => { e.stopPropagation(); openEntityDetail(ent); });
+            cName.appendChild(open);
             const cDeg = document.createElement("td");
             cDeg.textContent = String(ent.degree || 0);
             const cFacts = document.createElement("td");

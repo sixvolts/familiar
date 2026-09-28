@@ -177,9 +177,11 @@ func TestSaveFact_NoEmbedderAddsNote(t *testing.T) {
 	if !strings.Contains(res.Content, "no embedding") {
 		t.Errorf("expected no-embedding note, got %q", res.Content)
 	}
+	// Saved facts are durable user knowledge: recall enforces no
+	// narrower scope, so a requested "session" isn't honoured.
 	fact := eng.committed[0]
-	if fact.Scope != "session" {
-		t.Errorf("scope override: %q", fact.Scope)
+	if fact.Scope != "user" {
+		t.Errorf("scope = %q, want user", fact.Scope)
 	}
 	if fact.Confidence != 0.5 {
 		t.Errorf("confidence override: %v", fact.Confidence)

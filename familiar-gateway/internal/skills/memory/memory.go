@@ -242,11 +242,6 @@ var saveFactParams = json.RawMessage(`{
       "type": "string",
       "description": "The fact to remember. Write a single self-contained statement — future retrieval embeds this verbatim."
     },
-    "scope": {
-      "type": "string",
-      "description": "Visibility scope. \"user\" = durable knowledge about the user (default). \"session\" = only this conversation. \"agent\" = private to the assistant.",
-      "enum": ["user", "session", "agent"]
-    },
     "tags": {
       "type": "array",
       "description": "Optional topical tags for later filtering.",
@@ -412,7 +407,12 @@ func (s *Skill) Execute(ctx context.Context, toolName string, params json.RawMes
 // --- save_fact --------------------------------------------------------------
 
 type saveFactArgs struct {
-	Content    string   `json:"content"`
+	Content string `json:"content"`
+	// Scope is accepted and ignored: every saved fact is durable user
+	// knowledge. The tool offered "session" (only this conversation)
+	// and "agent" (private to the assistant), but recall enforces
+	// neither, so a "session" fact appeared in every later
+	// conversation (and was deleted after 90 idle days as a chunk).
 	Scope      string   `json:"scope,omitempty"`
 	Tags       []string `json:"tags,omitempty"`
 	Confidence *float64 `json:"confidence,omitempty"`
@@ -432,10 +432,7 @@ func (s *Skill) execSaveFact(ctx context.Context, params json.RawMessage) (skill
 	if strings.TrimSpace(args.Content) == "" {
 		return skills.ToolResult{Error: "content is required"}, nil
 	}
-	scope := args.Scope
-	if scope == "" {
-		scope = "user"
-	}
+	scope := "user"
 	conf := 0.9
 	if args.Confidence != nil {
 		conf = *args.Confidence
@@ -861,7 +858,11 @@ func (s *Skill) execListMyMemories(ctx context.Context, params json.RawMessage) 
 	// own scope, and the trusted path leaves isolated shards' rows out
 	// (they were showing up in the owner's list, conversation chunks
 	// included).
+	// Knowledge only: raw conversation chunks are transcript, and
+	// listing them answered "what do you remember about me?" with the
+	// latest chat turns.
 	f := mem.MemoryFilter{
+		Kind:             "knowledge",
 		Substring:        args.Query,
 		UserIDFilterMode: mem.UserIDFilterExact,
 		UserID:           userID,

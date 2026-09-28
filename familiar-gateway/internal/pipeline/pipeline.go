@@ -1090,7 +1090,7 @@ func (p *Pipeline) assembleMessages(
 		// of racing a database call on every request.
 		if p.entityVocab != nil {
 			haystack := strings.Join(contents, "\n")
-			entities := p.entityVocab.FindIn(haystack)
+			entities := p.entityVocab.FindIn(sess.UserID(), haystack)
 			// Cap the number of seed entities so a meme-heavy memory
 			// doesn't kick off twenty recursive CTEs in a row.
 			if len(entities) > 4 {

@@ -309,6 +309,7 @@ func TestSweepPrunesSatisfiedRows(t *testing.T) {
 		t.Error("embedder should not be called for an already-embedded row")
 		return nil, nil
 	}, time.Minute, 10)
+	s.dimsChecked = true // not about the once-per-process dimension probe
 	s.RunOnce(ctx)
 
 	n, err := s.PendingCount(ctx)
@@ -515,5 +516,46 @@ func TestSweepDoesNotBlameRowsForBrokenEmbedder(t *testing.T) {
 		if attempts, queued := queueRow(t, e, c); !queued || attempts != 0 {
 			t.Errorf("%s: queued=%v attempts=%d; a broken embedder counted against the row", c, queued, attempts)
 		}
+	}
+}
+
+// Vectors of another dimension (the embedding model changed) are
+// re-embedded: dense search can't compare them and the sweep only took
+// rows without a vector. Checked once per process.
+func TestSweepReembedsOtherDimensions(t *testing.T) {
+	e := setupReembedTest(t)
+	ctx := context.Background()
+	commitFact(t, e, "embedded by the old model", []float32{1, 0, 0, 0})
+	commitFact(t, e, "embedded by the new model", []float32{0, 1, 0})
+	calls := 0
+	embed := func(ctx context.Context, text string) ([]float32, error) {
+		calls++
+		return []float32{0.5, 0.5, 0.5}, nil
+	}
+	s := NewReembedSweeper(e.pool, embed, time.Minute, 10)
+	// Nothing queued: the pass probes the embedder and queues the
+	// old-dimension row; the next pass re-embeds it.
+	s.RunOnce(ctx)
+	if got := s.RunOnce(ctx); got != 1 {
+		t.Fatalf("sweep fixed %d rows, want 1 (the old-dimension row)", got)
+	}
+	var dims []int
+	rows, err := e.pool.QueryContext(ctx, `SELECT vector_dims(embedding) FROM memories ORDER BY content`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var d int
+		_ = rows.Scan(&d)
+		dims = append(dims, d)
+	}
+	rows.Close()
+	if len(dims) != 2 || dims[0] != 3 || dims[1] != 3 {
+		t.Errorf("dimensions after the sweep = %v, want [3 3]", dims)
+	}
+	before := calls
+	s.RunOnce(ctx)
+	if calls != before {
+		t.Errorf("the dimension check ran again (%d more embed calls)", calls-before)
 	}
 }

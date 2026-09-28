@@ -97,6 +97,9 @@ type ReembedSweeper struct {
 	lastRun  time.Time
 	lastFix  int
 	lastErrs int
+	// dimsChecked: this process has re-queued the vectors of another
+	// dimension than the embedder's (see requeueOtherDimensions).
+	dimsChecked bool
 }
 
 // NewReembedSweeper constructs a sweeper without starting it. A nil pool
@@ -171,7 +174,6 @@ func (s *ReembedSweeper) RunOnce(ctx context.Context) int {
 	if s == nil || s.pool == nil || s.embed == nil {
 		return 0
 	}
-
 	type pending struct {
 		id      string
 		content string
@@ -207,10 +209,12 @@ func (s *ReembedSweeper) RunOnce(ctx context.Context) int {
 	s.dropSatisfied(ctx)
 
 	if len(batch) == 0 {
+		s.checkDimensions(ctx, 0)
 		return 0
 	}
 
 	fixed, failed := 0, 0
+	dims := 0        // the embedder's vector length, once one lands
 	working := false // the embedder has embedded something this pass
 	for _, p := range batch {
 		vec, err := s.embedRow(ctx, p.content)
@@ -251,6 +255,7 @@ func (s *ReembedSweeper) RunOnce(ctx context.Context) int {
 			continue
 		}
 		working = true
+		dims = len(vec)
 		if err := s.applyVector(ctx, p.id, vec); err != nil {
 			s.recordFailure(ctx, p.id, err, true)
 			failed++
@@ -266,7 +271,53 @@ func (s *ReembedSweeper) RunOnce(ctx context.Context) int {
 	if fixed > 0 {
 		log.Printf("[reembed] back-filled %d embedding(s); %d failure(s)", fixed, failed)
 	}
+	if dims > 0 {
+		s.checkDimensions(ctx, dims)
+	}
 	return fixed
+}
+
+// checkDimensions clears and queues the vectors whose dimension isn't
+// the embedder's (the embedding model changed), once per process. Such
+// rows can't be compared with a query vector (dense search skips them)
+// and nothing re-embedded them: the sweep only takes rows without a
+// vector. dims is the length of a vector this pass produced; 0 (an
+// empty queue) probes the embedder once it answers. A model of the same
+// dimension can't be told apart this way.
+func (s *ReembedSweeper) checkDimensions(ctx context.Context, dims int) {
+	s.mu.RLock()
+	done := s.dimsChecked
+	s.mu.RUnlock()
+	if done {
+		return
+	}
+	if dims == 0 {
+		probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		vec, err := s.embed(probeCtx, "ok")
+		cancel()
+		if err != nil || len(vec) == 0 {
+			return // not answering: try again next pass
+		}
+		dims = len(vec)
+	}
+	res, err := s.pool.ExecContext(ctx, `
+		WITH stale AS (
+			UPDATE memories SET embedding = NULL, updated_at = NOW()
+			 WHERE embedding IS NOT NULL AND vector_dims(embedding) <> $1
+			RETURNING id
+		)
+		INSERT INTO pending_embeds (memory_id) SELECT id FROM stale
+		ON CONFLICT (memory_id) DO UPDATE SET attempts = 0`, dims)
+	if err != nil {
+		log.Printf("[reembed] warning: could not re-queue vectors of another dimension: %v", err)
+		return
+	}
+	s.mu.Lock()
+	s.dimsChecked = true
+	s.mu.Unlock()
+	if n, _ := res.RowsAffected(); n > 0 {
+		log.Printf("[reembed] %d memories have vectors of another dimension than the embedder's %d (the embedding model changed); re-embedding them", n, dims)
+	}
 }
 
 // probe reports whether the embedder embeds a trivial input.

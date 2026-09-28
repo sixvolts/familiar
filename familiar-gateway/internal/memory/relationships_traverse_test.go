@@ -193,16 +193,16 @@ func TestEntityVocab_FindIn(t *testing.T) {
 	}
 	seedEdges(t, s)
 
-	vocab := NewEntityVocab(s, "owner", 0)
-	if err := vocab.Refresh(context.Background()); err != nil {
+	vocab := NewEntityVocab(s, 0)
+	if err := vocab.Refresh(context.Background(), "owner"); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
-	if vocab.Size() == 0 {
+	if vocab.Size("owner") == 0 {
 		t.Fatal("vocab empty after refresh")
 	}
 
 	haystack := "Earlier the operator mentioned that gpu-host runs gpu-x accelerators under Ubuntu."
-	found := vocab.FindIn(haystack)
+	found := vocab.FindIn("owner", haystack)
 	seen := map[string]bool{}
 	for _, n := range found {
 		seen[n] = true

@@ -47,10 +47,6 @@ func (m *recordingMemStore) HybridSearch(ctx context.Context, _ string, vector [
 	return m.Search(ctx, vector, limit, threshold, userID)
 }
 
-func (m *recordingMemStore) NearestSimilarity(ctx context.Context, vector []float32, scope string, userID string) (float64, bool, error) {
-	return 0, false, nil
-}
-
 func (m *recordingMemStore) NearestLiveFacts(ctx context.Context, vector []float32, userID, scopeTag string, limit int) ([]memory.NearestFact, error) {
 	return nil, nil
 }

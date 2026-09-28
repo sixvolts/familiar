@@ -21,6 +21,7 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -61,6 +62,8 @@ type fakeGraphStore struct {
 	lastFactsEntity string
 	lastFactsOwner  string
 	lastFactsLimit  int
+
+	entityCount int // what CountEntities reports
 
 	mergeRewritten      int64
 	lastMergeFrom       string
@@ -142,7 +145,7 @@ func (f *fakeGraphStore) GetRelationship(_ context.Context, id, ownerID string) 
 // Phase F dashboard-aggregate stubs — existing graph tests don't
 // exercise these; the dashboard tests use dedicated fakes.
 func (f *fakeGraphStore) CountEntities(_ context.Context, userID string) (int, error) {
-	return 0, nil
+	return f.entityCount, nil
 }
 func (f *fakeGraphStore) CountRelationships(_ context.Context, userID string) (int, error) {
 	return 0, nil
@@ -537,5 +540,47 @@ func TestGraph_UnwiredReturns503(t *testing.T) {
 	h.listGraph(rec, req)
 	if rec.Code != 503 {
 		t.Errorf("status = %d, want 503", rec.Code)
+	}
+}
+
+// The response says when it shows a slice of the graph: the edge cap
+// was reached, or the whole-graph view has more entities than it
+// shows. The flag was never set.
+func TestGraph_TruncatedFlag(t *testing.T) {
+	edges := func(n int) []memory.GraphEdge {
+		out := make([]memory.GraphEdge, n)
+		for i := range out {
+			out[i] = memory.GraphEdge{ID: fmt.Sprint(i), Subject: fmt.Sprint("e", i), Predicate: "p", Object: fmt.Sprint("e", i+1)}
+		}
+		return out
+	}
+	get := func(g *fakeGraphStore, query string) bool {
+		h := &Handler{}
+		h.AttachGraphStore(g)
+		req := httptest.NewRequest("GET", "/console/api/memory/graph?"+query, nil).WithContext(
+			ctxWithAuth(context.Background(), operatorAdmin()))
+		rec := httptest.NewRecorder()
+		h.listGraph(rec, req)
+		var resp graphResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return resp.Truncated
+	}
+	// limit=2: the edge cap is 10.
+	if !get(&fakeGraphStore{graphTopEdges: edges(10)}, "limit=2") {
+		t.Error("top view at the edge cap: not truncated")
+	}
+	if !get(&fakeGraphStore{graphTopEdges: edges(3), entityCount: 40}, "limit=2") {
+		t.Error("top view with more entities than shown: not truncated")
+	}
+	if get(&fakeGraphStore{graphTopEdges: edges(3), entityCount: 4}, "limit=2") {
+		t.Error("the whole graph shown: truncated")
+	}
+	if !get(&fakeGraphStore{graphAroundEdges: edges(10)}, "limit=2&center=e0") {
+		t.Error("around view at the edge cap: not truncated")
+	}
+	if get(&fakeGraphStore{graphAroundEdges: edges(4), entityCount: 400}, "limit=2&center=e0") {
+		t.Error("around view under the cap: truncated")
 	}
 }

@@ -534,7 +534,9 @@
                     return;
                 }
                 for (const e of edges) {
-                    const row = document.createElement("div");
+                    // A button, so the keyboard can open the relationship.
+                    const row = document.createElement("button");
+                    row.type = "button";
                     row.className = "graph-detail-rel-row";
                     row.innerHTML =
                         '<code>' + escapeText(e.source) + '</code> ' +

@@ -42,7 +42,6 @@ type MemoryResult struct {
 type MemoryStore interface {
 	Search(ctx context.Context, vector []float32, limit int, threshold float64, userID string) ([]MemoryResult, error)
 	HybridSearch(ctx context.Context, queryText string, vector []float32, limit int, threshold float64, userID string) ([]MemoryResult, error)
-	NearestSimilarity(ctx context.Context, vector []float32, scope string, userID string) (float64, bool, error)
 	NearestLiveFacts(ctx context.Context, vector []float32, userID, scopeTag string, limit int) ([]NearestFact, error)
 	ReinforceFacts(ctx context.Context, ids []string) error
 	Close() error
@@ -73,6 +72,44 @@ func NewPgVectorStore(pool *db.Pool) (*PgVectorStore, error) {
 		return nil, fmt.Errorf("memory: nil pool")
 	}
 	return &PgVectorStore{db: pool}, nil
+}
+
+// vecDist is the cosine distance from column col to the query vector
+// $1, or NULL for a row embedded with another dimension (after the
+// embedding model changed). pgvector refuses to compare vectors of
+// different dimensions and fails the whole query, so one such row
+// turned off long-term memory for every turn. Filtering on
+// vector_dims beside the distance isn't enough (Postgres may evaluate
+// either first); the CASE decides before the distance is computed.
+// The re-embed sweep re-embeds such rows.
+func vecDist(col string) string {
+	return `(CASE WHEN vector_dims(` + col + `) = vector_dims($1::vector) THEN ` + col + ` <=> $1::vector END)`
+}
+
+// recallVisible is the recall predicate for a memories or relationships
+// row aliased a, for the user bound at parameter u:
+//   - a wiki row (scope_tag "book:{id}") is visible to the book's current
+//     members, whoever saved the page. It was keyed to the saver's user
+//     id alone, so only the member who last saved a page recalled its
+//     facts (the other stopped when one saved), and a member removed
+//     from the book kept recalling the pages they had saved.
+//   - any other row: global (no owner) or the user's own, except rows
+//     tagged to one of the owner's isolated shards.
+//
+// Recall only: the console, the dedup and conflict lookups, and shard
+// sessions (confined to their own scope tag) stay owner-scoped.
+func recallVisible(a, u string) string {
+	return `(CASE WHEN ` + a + `.scope_tag LIKE 'book:%'
+	    THEN EXISTS (SELECT 1 FROM book_members bm
+	                  WHERE bm.user_id = ` + u + `
+	                    AND ` + a + `.scope_tag = 'book:' || bm.book_id::text)
+	    ELSE (` + a + `.user_id IS NULL OR ` + a + `.user_id = ` + u + `)
+	     AND (` + a + `.scope_tag IS NULL
+	          OR NOT EXISTS (SELECT 1 FROM shards sh
+	                          WHERE sh.scope_tag = ` + a + `.scope_tag
+	                            AND sh.owner_id = ` + a + `.user_id
+	                            AND sh.visibility = 'isolated'))
+	    END)`
 }
 
 // Search finds memories similar to the given query vector.
@@ -108,21 +145,14 @@ func (s *PgVectorStore) Search(ctx context.Context, vector []float32, limit int,
 	// "global only", which is the safe default when the caller hasn't
 	// resolved a canonical identity yet.
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT m.id::text, content, scope, 1 - (embedding <=> $1::vector) AS similarity, created_at, embedding::text
+		`SELECT m.id::text, content, scope, 1 - (`+vecDist("embedding")+`) AS similarity, created_at, embedding::text
 		 FROM memories m
 		 WHERE embedding IS NOT NULL
-		   AND 1 - (embedding <=> $1::vector) > $2
+		   AND 1 - (`+vecDist("embedding")+`) > $2
 		   AND source_type != 'conversation'
 		   AND NOT EXISTS (SELECT 1 FROM memories s WHERE s.supersedes = m.id)
-		   AND (user_id IS NULL OR user_id = $4)
-		   AND (m.scope_tag IS NULL
-		        OR NOT EXISTS (
-		          SELECT 1 FROM shards sh
-		          WHERE sh.scope_tag = m.scope_tag
-		            AND sh.owner_id = m.user_id
-		            AND sh.visibility = 'isolated'
-		        ))
-		 ORDER BY embedding <=> $1::vector
+		   AND `+recallVisible("m", "$4")+`
+		 ORDER BY `+vecDist("embedding")+`
 		 LIMIT $3`,
 		vecStr, threshold, limit, userID)
 	if err != nil {
@@ -201,19 +231,14 @@ func (s *PgVectorStore) HybridSearch(ctx context.Context, queryText string, vect
 	rows, err := s.db.QueryContext(ctx, `
 		WITH dense AS (
 		    SELECT m.id,
-		           row_number() OVER (ORDER BY m.embedding <=> $1::vector) AS rnk
+		           row_number() OVER (ORDER BY `+vecDist("m.embedding")+`) AS rnk
 		      FROM memories m
 		     WHERE m.embedding IS NOT NULL
-		       AND 1 - (m.embedding <=> $1::vector) > $2
+		       AND 1 - (`+vecDist("m.embedding")+`) > $2
 		       AND m.source_type != 'conversation'
 		       AND NOT EXISTS (SELECT 1 FROM memories sup WHERE sup.supersedes = m.id)
-		       AND (m.user_id IS NULL OR m.user_id = $3)
-		       AND (m.scope_tag IS NULL
-		            OR NOT EXISTS (SELECT 1 FROM shards sh
-		                            WHERE sh.scope_tag = m.scope_tag
-		                              AND sh.owner_id = m.user_id
-		                              AND sh.visibility = 'isolated'))
-		     ORDER BY m.embedding <=> $1::vector
+		       AND `+recallVisible("m", "$3")+`
+		     ORDER BY `+vecDist("m.embedding")+`
 		     LIMIT $4
 		),
 		sparse AS (
@@ -225,12 +250,7 @@ func (s *PgVectorStore) HybridSearch(ctx context.Context, queryText string, vect
 		     WHERE to_tsvector('english', m.content) @@ q
 		       AND m.source_type != 'conversation'
 		       AND NOT EXISTS (SELECT 1 FROM memories sup WHERE sup.supersedes = m.id)
-		       AND (m.user_id IS NULL OR m.user_id = $3)
-		       AND (m.scope_tag IS NULL
-		            OR NOT EXISTS (SELECT 1 FROM shards sh
-		                            WHERE sh.scope_tag = m.scope_tag
-		                              AND sh.owner_id = m.user_id
-		                              AND sh.visibility = 'isolated'))
+		       AND `+recallVisible("m", "$3")+`
 		     ORDER BY ts_rank_cd(to_tsvector('english', m.content), q) DESC
 		     LIMIT $4
 		),
@@ -249,7 +269,7 @@ func (s *PgVectorStore) HybridSearch(ctx context.Context, queryText string, vect
 		       -- would break hybrid retrieval for every lexically-matching
 		       -- query. Cosine is undefined here anyway; the RRF fused
 		       -- score still ranks it.
-		       COALESCE(1 - (m.embedding <=> $1::vector), 0) AS similarity,
+		       COALESCE(1 - (`+vecDist("m.embedding")+`), 0) AS similarity,
 		       f.rrf,
 		       m.created_at, m.embedding::text
 		  FROM fused f
@@ -301,12 +321,7 @@ func (s *PgVectorStore) keywordSearch(ctx context.Context, queryText string, lim
 		 WHERE to_tsvector('english', m.content) @@ q
 		   AND m.source_type != 'conversation'
 		   AND NOT EXISTS (SELECT 1 FROM memories sup WHERE sup.supersedes = m.id)
-		   AND (m.user_id IS NULL OR m.user_id = $2)
-		   AND (m.scope_tag IS NULL
-		        OR NOT EXISTS (SELECT 1 FROM shards sh
-		                        WHERE sh.scope_tag = m.scope_tag
-		                          AND sh.owner_id = m.user_id
-		                          AND sh.visibility = 'isolated'))
+		   AND `+recallVisible("m", "$2")+`
 		 ORDER BY ts_rank_cd(to_tsvector('english', m.content), q) DESC
 		 LIMIT $3`,
 		queryText, userID, limit, rrfK)
@@ -355,55 +370,6 @@ func parseVector(s string) ([]float32, error) {
 	return out, nil
 }
 
-// NearestSimilarity returns the cosine similarity of the single most
-// similar live memory (non-superseded) to the query vector, scoped to
-// an optional scope filter. Returns (0, false, nil) when the store is
-// empty or no live candidates match. Used by the extraction pipeline to
-// NOOP-skip facts that duplicate something already in memory.
-func (s *PgVectorStore) NearestSimilarity(ctx context.Context, vector []float32, scope string, userID string) (float64, bool, error) {
-	if len(vector) == 0 {
-		return 0, false, nil
-	}
-	vecStr := vectorToString(vector)
-
-	// user_id predicate mirrors Search: global rows + the caller's own.
-	// The scope filter is orthogonal and optional.
-	var query string
-	var args []any
-	if scope != "" {
-		query = `SELECT 1 - (embedding <=> $1::vector) AS similarity
-		         FROM memories m
-		         WHERE embedding IS NOT NULL
-		           AND source_type NOT IN ('conversation', 'wiki_page')
-		           AND scope = $2
-		           AND NOT EXISTS (SELECT 1 FROM memories s WHERE s.supersedes = m.id)
-		           AND (user_id IS NULL OR user_id = $3)
-		         ORDER BY embedding <=> $1::vector
-		         LIMIT 1`
-		args = []any{vecStr, scope, userID}
-	} else {
-		query = `SELECT 1 - (embedding <=> $1::vector) AS similarity
-		         FROM memories m
-		         WHERE embedding IS NOT NULL
-		           AND source_type NOT IN ('conversation', 'wiki_page')
-		           AND NOT EXISTS (SELECT 1 FROM memories s WHERE s.supersedes = m.id)
-		           AND (user_id IS NULL OR user_id = $2)
-		         ORDER BY embedding <=> $1::vector
-		         LIMIT 1`
-		args = []any{vecStr, userID}
-	}
-
-	var sim float64
-	err := s.db.QueryRowContext(ctx, query, args...).Scan(&sim)
-	if err == sql.ErrNoRows {
-		return 0, false, nil
-	}
-	if err != nil {
-		return 0, false, fmt.Errorf("pgvector nearest: %w", err)
-	}
-	return sim, true, nil
-}
-
 // NearestLiveFact returns the single most similar non-superseded memory
 // to the query vector, including its id and content. Used by the
 // extraction pipeline's write-time conflict resolver, which needs the
@@ -444,9 +410,10 @@ func (s *PgVectorStore) NearestLiveFacts(ctx context.Context, vector []float32, 
 	}
 
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT m.id::text, m.content, 1 - (m.embedding <=> $1::vector) AS similarity
+		`SELECT m.id::text, m.content, 1 - (`+vecDist("m.embedding")+`) AS similarity
 		 FROM memories m
 		 WHERE m.embedding IS NOT NULL
+		   AND `+vecDist("m.embedding")+` IS NOT NULL
 		   AND m.source_type NOT IN ('conversation', 'wiki_page')
 		   AND NOT EXISTS (SELECT 1 FROM memories s WHERE s.supersedes = m.id)
 		   AND (m.user_id IS NULL OR m.user_id = $2)
@@ -461,7 +428,7 @@ func (s *PgVectorStore) NearestLiveFacts(ctx context.Context, vector []float32, 
 		              WHERE sh.scope_tag = m.scope_tag
 		                AND sh.owner_id = m.user_id
 		                AND sh.visibility = 'isolated')))
-		 ORDER BY m.embedding <=> $1::vector
+		 ORDER BY `+vecDist("m.embedding")+`
 		 LIMIT $4`,
 		vecStr, userID, scopeParam, limit)
 	if err != nil {

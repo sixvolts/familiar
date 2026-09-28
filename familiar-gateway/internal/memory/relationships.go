@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/familiar/gateway/internal/db"
 	"github.com/familiar/gateway/internal/safego"
@@ -114,7 +116,7 @@ func (s *PgRelationshipStore) UpsertRelationships(ctx context.Context, rels []Re
 			    updated_at  = EXCLUDED.updated_at
 			WHERE relationships.scope_tag IS NOT DISTINCT FROM EXCLUDED.scope_tag
 			   OR EXCLUDED.scope_tag IS NULL`,
-			strings.ToLower(r.Subject), strings.ToLower(r.Predicate), r.Object,
+			strings.ToLower(r.Subject), strings.ToLower(r.Predicate), strings.ToLower(r.Object),
 			userArg, sourceArg, conf, scopeArg, now)
 		if err != nil {
 			return fmt.Errorf("upsert relationship (%s, %s): %w", r.Subject, r.Predicate, err)
@@ -123,13 +125,56 @@ func (s *PgRelationshipStore) UpsertRelationships(ctx context.Context, rels []Re
 	return nil
 }
 
-// RelatedForContents returns triples whose subject appears as a
-// substring of any content in the provided slice. Used by the
+// InsertRelationshipsIfAbsent adds the triples that aren't stored yet
+// (by subject, predicate and owner, lowercased like
+// UpsertRelationships) and leaves existing ones alone, reporting how
+// many it added. The relationship backfill uses it: a re-run
+// upserting its extraction reset every edge the user had re-weighted
+// or re-pointed in the graph editor.
+func (s *PgRelationshipStore) InsertRelationshipsIfAbsent(ctx context.Context, rels []Relationship) (int, error) {
+	added := 0
+	for _, r := range rels {
+		if r.Subject == "" || r.Predicate == "" || r.Object == "" {
+			continue
+		}
+		var userArg, sourceArg, scopeArg any
+		if r.UserID != "" {
+			userArg = r.UserID
+		}
+		if r.SourceFact != "" {
+			sourceArg = r.SourceFact
+		}
+		if r.ScopeTag != "" {
+			scopeArg = r.ScopeTag
+		}
+		conf := r.Confidence
+		if conf <= 0 {
+			conf = 1.0
+		}
+		res, err := s.db.ExecContext(ctx, `
+			INSERT INTO relationships (subject, predicate, object, user_id, source_fact, confidence, scope_tag, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5::uuid, $6, $7, NOW(), NOW())
+			ON CONFLICT (subject, predicate, user_id_key) DO NOTHING`,
+			strings.ToLower(r.Subject), strings.ToLower(r.Predicate), strings.ToLower(r.Object),
+			userArg, sourceArg, conf, scopeArg)
+		if err != nil {
+			return added, fmt.Errorf("insert relationship (%s, %s): %w", r.Subject, r.Predicate, err)
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			added++
+		}
+	}
+	return added, nil
+}
+
+// RelatedForContents returns triples whose subject appears as a whole
+// word (or words) in any content in the provided slice. Used by the
 // retrieval path to attach one-hop structured context to the
-// vector-search results. Matching is case-insensitive and anchored on
-// word boundaries via ILIKE '%' || subject || '%', which is cheap on
-// small content lists and correct enough for entity names extracted
-// in lowercase form by UpsertRelationships.
+// vector-search results. Matching is case-insensitive, on word
+// boundaries, for subjects of at least 3 characters (the entity
+// vocabulary's floor). A plain substring test matched "ai" inside
+// "said" and "art" inside "start", filling every prompt's graph budget
+// with unrelated triples.
 //
 // limit caps the number of triples returned; callers should use a
 // small value (10-20) because the block is injected into the LLM
@@ -146,16 +191,12 @@ func (s *PgRelationshipStore) RelatedForContents(ctx context.Context, contents [
 	haystack := strings.ToLower(strings.Join(contents, "\n"))
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT subject, predicate, object
-		FROM relationships
-		WHERE (user_id IS NULL OR user_id = $1)
-		  AND position(subject IN $2) > 0
-		  AND (scope_tag IS NULL
-		       OR NOT EXISTS (SELECT 1 FROM shards sh
-		                       WHERE sh.scope_tag = relationships.scope_tag
-		                         AND sh.owner_id = relationships.user_id
-		                         AND sh.visibility = 'isolated'))
-		ORDER BY updated_at DESC
+		SELECT r.subject, r.predicate, r.object
+		FROM relationships r
+		WHERE `+recallVisible("r", "$1")+`
+		  AND length(r.subject) >= 3
+		  AND $2 ~* ('\m' || regexp_replace(r.subject, '([^[:alnum:]_ ])', '\\\1', 'g') || '\M')
+		ORDER BY r.updated_at DESC
 		LIMIT $3`,
 		userID, haystack, limit)
 	if err != nil {
@@ -215,22 +256,12 @@ func (s *PgRelationshipStore) TraverseFrom(ctx context.Context, entity string, u
 			FROM relationships r
 			JOIN frontier f ON (r.subject = f.entity OR r.object = f.entity)
 			WHERE f.depth < $3
-			  AND (r.user_id IS NULL OR r.user_id = $2)
-			  AND (r.scope_tag IS NULL
-			       OR NOT EXISTS (SELECT 1 FROM shards sh
-			                       WHERE sh.scope_tag = r.scope_tag
-			                         AND sh.owner_id = r.user_id
-			                         AND sh.visibility = 'isolated'))
+			  AND `+recallVisible("r", "$2")+`
 		)
 		SELECT DISTINCT r.subject, r.predicate, r.object
 		FROM relationships r
 		JOIN frontier f ON (r.subject = f.entity OR r.object = f.entity)
-		WHERE (r.user_id IS NULL OR r.user_id = $2)
-		  AND (r.scope_tag IS NULL
-		       OR NOT EXISTS (SELECT 1 FROM shards sh
-		                       WHERE sh.scope_tag = r.scope_tag
-		                         AND sh.owner_id = r.user_id
-		                         AND sh.visibility = 'isolated'))
+		WHERE `+recallVisible("r", "$2")+`
 		ORDER BY r.subject, r.predicate
 		LIMIT $4`,
 		entity, userID, depth, limit)
@@ -269,11 +300,13 @@ func (s *PgRelationshipStore) ListDistinctEntities(ctx context.Context, userID s
 			) t
 			GROUP BY ent`)
 	} else {
+		// What the user's recall can see (recallVisible): their own and
+		// global triples, their books' triples, no isolated shard's.
 		rows, err = s.db.QueryContext(ctx, `
 			SELECT ent, COUNT(*) FROM (
-				SELECT subject AS ent FROM relationships WHERE user_id IS NULL OR user_id = $1
+				SELECT r.subject AS ent FROM relationships r WHERE `+recallVisible("r", "$1")+`
 				UNION ALL
-				SELECT object  AS ent FROM relationships WHERE user_id IS NULL OR user_id = $1
+				SELECT r.object  AS ent FROM relationships r WHERE `+recallVisible("r", "$1")+`
 			) t
 			GROUP BY ent`, userID)
 	}
@@ -298,130 +331,71 @@ func (s *PgRelationshipStore) ListDistinctEntities(ctx context.Context, userID s
 	return out, rows.Err()
 }
 
-// MergeEntity rewrites every triple owned by userID so that any
-// appearance of one of the aliases as a subject or an object is replaced
-// by the canonical name. Runs in a single transaction so a partial
-// merge can't leave the graph half-rewritten. Returns the number of
-// rows affected across both updates.
+// EntityVocab caches, per user, every distinct entity name (subject
+// or object) in the relationship graph that user's recall can see. The
+// pipeline uses it to spot entity mentions inside retrieved memory
+// contents without a database round-trip per memory: FindIn returns
+// the names that appear as words in the supplied text.
 //
-// Callers are responsible for deduping: two triples that collapse to
-// the same (subject, predicate, object) after the rewrite will still
-// exist as separate rows because the unique index is on
-// (subject, predicate, user_id_key) only — the object is free, so an
-// update from "rune" → "host-a" can't conflict with a pre-existing
-// "host-a has_ip X" row. A follow-up DELETE on exact duplicates is run
-// at the end of the transaction to clean those up.
-func (s *PgRelationshipStore) MergeEntity(ctx context.Context, userID string, canonical string, aliases []string) (int64, error) {
-	if canonical == "" || len(aliases) == 0 {
-		return 0, nil
-	}
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, fmt.Errorf("merge entity: begin: %w", err)
-	}
-	defer tx.Rollback()
-
-	var userFilter string
-	args := []any{canonical, aliases}
-	if userID == "" {
-		userFilter = "user_id IS NULL"
-	} else {
-		userFilter = "(user_id IS NULL OR user_id = $3)"
-		args = append(args, userID)
-	}
-
-	subjRes, err := tx.ExecContext(ctx,
-		`UPDATE relationships SET subject = $1, updated_at = NOW()
-		 WHERE subject = ANY($2) AND `+userFilter, args...)
-	if err != nil {
-		return 0, fmt.Errorf("merge entity: subject update: %w", err)
-	}
-	subjN, _ := subjRes.RowsAffected()
-
-	objRes, err := tx.ExecContext(ctx,
-		`UPDATE relationships SET object = $1, updated_at = NOW()
-		 WHERE object = ANY($2) AND `+userFilter, args...)
-	if err != nil {
-		return 0, fmt.Errorf("merge entity: object update: %w", err)
-	}
-	objN, _ := objRes.RowsAffected()
-
-	// Collapse exact duplicates the rewrite may have produced. Keep the
-	// oldest row (MIN(ctid)) so source_fact provenance sticks with the
-	// first triple extracted, not the most recently rewritten one.
-	if _, err := tx.ExecContext(ctx, `
-		DELETE FROM relationships a
-		USING relationships b
-		WHERE a.ctid > b.ctid
-		  AND a.subject = b.subject
-		  AND a.predicate = b.predicate
-		  AND a.object = b.object
-		  AND COALESCE(a.user_id::text, '') = COALESCE(b.user_id::text, '')`); err != nil {
-		return 0, fmt.Errorf("merge entity: dedupe: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("merge entity: commit: %w", err)
-	}
-	return subjN + objN, nil
-}
-
-// EntityVocab is an in-memory cache of every distinct entity name
-// (subject or object) present in the relationship graph for a given
-// user scope. The pipeline uses it to spot entity mentions inside
-// retrieved memory contents without a database round-trip per memory
-// — FindIn walks the cached vocabulary and returns the names that
-// appear as substrings of the supplied text.
+// It was one vocabulary, built from the first admin's graph: every
+// other user's entities were never found, so their turns got no
+// multi-hop graph context.
 //
-// The vocab is refreshed in a background goroutine on a fixed
-// interval plus on demand via Refresh. Reads are lock-held for the
-// minimum time needed to copy the current name slice; callers should
-// treat the returned entity list as read-only.
+// A user's vocabulary loads in the background the first time it's
+// asked for (FindIn doesn't wait: it finds nothing until the load
+// lands, as before) and reloads, again in the background, once it's
+// older than the refresh interval. At most maxVocabUsers are kept; the
+// least recently used goes first.
 type EntityVocab struct {
 	store    *PgRelationshipStore
-	userID   string
 	interval time.Duration
 
-	mu     sync.RWMutex
-	names  []string // sorted by length DESC so FindIn matches long names first
-	loaded bool
+	mu    sync.Mutex
+	ctx   context.Context // for background loads; Start's
+	users map[string]*userVocab
 
 	stopOnce sync.Once
 	stopCh   chan struct{}
 }
 
-// NewEntityVocab builds a vocab bound to a store and a user scope.
-// Call Start to begin the background refresher. interval may be zero,
-// in which case a sensible default (5 minutes) is applied.
-func NewEntityVocab(store *PgRelationshipStore, userID string, interval time.Duration) *EntityVocab {
+type userVocab struct {
+	names    []string // sorted by length DESC so FindIn matches long names first
+	loadedAt time.Time
+	usedAt   time.Time
+	loading  bool
+}
+
+const maxVocabUsers = 256
+
+// NewEntityVocab builds a vocab over a store. interval (how long a
+// user's vocabulary is used before it reloads) may be zero, in which
+// case a sensible default (5 minutes) is applied.
+func NewEntityVocab(store *PgRelationshipStore, interval time.Duration) *EntityVocab {
 	if interval <= 0 {
 		interval = 5 * time.Minute
 	}
 	return &EntityVocab{
 		store:    store,
-		userID:   userID,
 		interval: interval,
+		ctx:      context.Background(),
+		users:    map[string]*userVocab{},
 		stopCh:   make(chan struct{}),
 	}
 }
 
-// Start performs an initial load and then launches a goroutine that
-// refreshes the vocab on the configured interval. Safe to call once.
-// A failed initial load does not prevent the background loop from
-// running — the next tick will try again.
+// Start sets the context background loads run under. Loads are lazy,
+// per user, so there is nothing to load up front.
 func (v *EntityVocab) Start(ctx context.Context) {
 	if v == nil || v.store == nil {
 		return
 	}
-	if err := v.Refresh(ctx); err != nil {
-		log.Printf("[entity-vocab] initial load failed (continuing): %v", err)
-	}
-	go v.refreshLoop(ctx)
+	v.mu.Lock()
+	v.ctx = ctx
+	v.mu.Unlock()
 }
 
-// Stop signals the background refresher to exit. Safe to call
-// multiple times from different goroutines.
+// Stop ends background loading: a vocabulary asked for afterwards
+// isn't loaded. Safe to call more than once.
 func (v *EntityVocab) Stop() {
 	if v == nil {
 		return
@@ -429,15 +403,13 @@ func (v *EntityVocab) Stop() {
 	v.stopOnce.Do(func() { close(v.stopCh) })
 }
 
-// Refresh reloads the vocab from the store. Callers can invoke this
-// synchronously after a known write (e.g., at the end of the
-// backfill run) to pick up new entities without waiting for the next
-// tick.
-func (v *EntityVocab) Refresh(ctx context.Context) error {
+// Refresh reloads one user's vocabulary synchronously (tests, or after
+// a known write).
+func (v *EntityVocab) Refresh(ctx context.Context, userID string) error {
 	if v == nil || v.store == nil {
 		return nil
 	}
-	ents, err := v.store.ListDistinctEntities(ctx, v.userID)
+	ents, err := v.store.ListDistinctEntities(ctx, userID)
 	if err != nil {
 		return err
 	}
@@ -460,75 +432,113 @@ func (v *EntityVocab) Refresh(ctx context.Context) error {
 	})
 
 	v.mu.Lock()
-	v.names = names
-	v.loaded = true
-	v.mu.Unlock()
+	defer v.mu.Unlock()
+	u := v.entryLocked(userID)
+	u.names = names
+	u.loadedAt = time.Now()
+	u.loading = false
 	return nil
 }
 
-// FindIn scans the haystack for every cached entity name and returns
-// the set of matches, in descending-length order so the caller sees
-// the most specific names first. Returns nil if the vocab has never
-// loaded. Matching is case-insensitive; the haystack is lowered once
-// up front and each name is already lowercased at Refresh time.
-func (v *EntityVocab) FindIn(haystack string) []string {
-	if v == nil {
+// entryLocked returns userID's cache entry, making room if needed.
+func (v *EntityVocab) entryLocked(userID string) *userVocab {
+	u, ok := v.users[userID]
+	if !ok {
+		if len(v.users) >= maxVocabUsers {
+			oldest := ""
+			for id, e := range v.users {
+				if oldest == "" || e.usedAt.Before(v.users[oldest].usedAt) {
+					oldest = id
+				}
+			}
+			delete(v.users, oldest)
+		}
+		u = &userVocab{}
+		v.users[userID] = u
+	}
+	u.usedAt = time.Now()
+	return u
+}
+
+// FindIn returns the user's entity names that appear as words in the
+// haystack, longest first, from what's cached now; a missing or stale
+// vocabulary is (re)loaded in the background. Matching is
+// case-insensitive, on word boundaries: "art" isn't in "start".
+func (v *EntityVocab) FindIn(userID, haystack string) []string {
+	if v == nil || v.store == nil {
 		return nil
 	}
-	v.mu.RLock()
-	names := v.names
-	loaded := v.loaded
-	v.mu.RUnlock()
-	if !loaded || len(names) == 0 || haystack == "" {
+	v.mu.Lock()
+	u := v.entryLocked(userID)
+	names := u.names
+	if !u.loading && time.Since(u.loadedAt) >= v.interval {
+		select {
+		case <-v.stopCh:
+		default:
+			u.loading = true
+			go v.load(v.ctx, userID)
+		}
+	}
+	v.mu.Unlock()
+	if len(names) == 0 || haystack == "" {
 		return nil
 	}
 	lower := strings.ToLower(haystack)
-	seen := make(map[string]struct{}, 8)
 	var out []string
 	for _, n := range names {
-		if _, ok := seen[n]; ok {
-			continue
-		}
-		if strings.Contains(lower, n) {
-			seen[n] = struct{}{}
+		if containsWord(lower, n) {
 			out = append(out, n)
 		}
 	}
 	return out
 }
 
-// Size reports the number of cached entity names. Useful for admin
-// status dumps and test assertions.
-func (v *EntityVocab) Size() int {
+func (v *EntityVocab) load(ctx context.Context, userID string) {
+	safego.Do("entity-vocab load", func() {
+		loadCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		if err := v.Refresh(loadCtx, userID); err != nil {
+			log.Printf("[entity-vocab] load failed (continuing): %v", err)
+			v.mu.Lock()
+			if u, ok := v.users[userID]; ok {
+				u.loading = false
+				u.loadedAt = time.Now() // retry after an interval, not every turn
+			}
+			v.mu.Unlock()
+		}
+	})
+}
+
+// containsWord reports whether word occurs in s with no letter, digit
+// or underscore directly before or after it.
+func containsWord(s, word string) bool {
+	isWord := func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' }
+	for from := 0; ; {
+		i := strings.Index(s[from:], word)
+		if i < 0 {
+			return false
+		}
+		i += from
+		before, _ := utf8.DecodeLastRuneInString(s[:i])
+		after, _ := utf8.DecodeRuneInString(s[i+len(word):])
+		if (i == 0 || !isWord(before)) && (i+len(word) == len(s) || !isWord(after)) {
+			return true
+		}
+		from = i + 1
+	}
+}
+
+// Size reports how many entity names are cached for the user.
+func (v *EntityVocab) Size(userID string) int {
 	if v == nil {
 		return 0
 	}
-	v.mu.RLock()
-	defer v.mu.RUnlock()
-	return len(v.names)
-}
-
-func (v *EntityVocab) refreshLoop(ctx context.Context) {
-	ticker := time.NewTicker(v.interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-v.stopCh:
-			return
-		case <-ticker.C:
-			// Per-tick recovery so one bad refresh doesn't retire the
-			// cache's only updater.
-			safego.Do("entity-vocab refresh", func() {
-				refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-				defer cancel()
-				if err := v.Refresh(refreshCtx); err != nil {
-					log.Printf("[entity-vocab] refresh failed (continuing): %v", err)
-				}
-			})
-		}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if u, ok := v.users[userID]; ok {
+		return len(u.names)
 	}
+	return 0
 }
 
 // FormatLines renders a slice of relationships grouped by predicate.
@@ -1050,8 +1060,10 @@ func (s *PgRelationshipStore) OrphanEdges(ctx context.Context, userID string) (i
 
 // DeleteEntity removes all relationships where the entity name
 // appears as either subject or object, scoped to the given user.
-// Returns the number of deleted rows.
+// Returns the number of deleted rows. Entity names are lowercase, as
+// every other lookup assumes.
 func (s *PgRelationshipStore) DeleteEntity(ctx context.Context, name, userID string) (int64, error) {
+	name = strings.ToLower(strings.TrimSpace(name))
 	res, err := s.db.ExecContext(ctx,
 		`DELETE FROM relationships WHERE user_id = $1 AND (subject = $2 OR object = $2)`,
 		userID, name)

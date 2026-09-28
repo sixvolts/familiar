@@ -459,13 +459,10 @@ func main() {
 			} else {
 				relStore = rs
 				log.Printf("[memory] relationship store ready (graph layer enabled)")
-				// Launch the entity vocab cache so the pipeline's
-				// multi-hop traversal has somewhere to look up entity
-				// names found in retrieved memory contents. Scoped to
-				// the configured primary user (single-tenant entry
-				// point — per-user vocabs land when the relationship
-				// store grows a user_id index suitable for fan-out).
-				entityVocab = memory.NewEntityVocab(relStore, cfg.Admin.FirstUserID, 5*time.Minute)
+				// The entity vocab cache gives the pipeline's multi-hop
+				// traversal the entity names to look for in retrieved
+				// memory contents, per user (loaded on first use).
+				entityVocab = memory.NewEntityVocab(relStore, 5*time.Minute)
 				entityVocab.Start(ctx)
 			}
 

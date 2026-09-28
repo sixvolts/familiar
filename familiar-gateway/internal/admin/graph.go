@@ -162,10 +162,13 @@ func (h *Handler) listGraph(w http.ResponseWriter, r *http.Request) {
 		edges []memory.GraphEdge
 		err   error
 	)
+	// Both queries return at most limit*5 edges (GraphTop: among its
+	// top-limit entities).
+	edgeCap := limit * 5
 	if center != "" {
 		// Allow up to limit*5 edges around a center so a popular
 		// node doesn't get its outgoing edges cut off.
-		edges, err = h.graph.GraphAround(r.Context(), center, ownerID, depth, limit*5)
+		edges, err = h.graph.GraphAround(r.Context(), center, ownerID, depth, edgeCap)
 	} else {
 		edges, err = h.graph.GraphTop(r.Context(), ownerID, limit)
 	}
@@ -174,7 +177,18 @@ func (h *Handler) listGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, edgesToGraphResponse(edges))
+	resp := edgesToGraphResponse(edges)
+	// Say when this is a slice of the graph: the edge cap was reached,
+	// or (whole-graph view) there are more entities than it shows. The
+	// flag was never set, so a 2,000-edge graph looked like its first 50
+	// entities, with no hint.
+	resp.Truncated = len(edges) >= edgeCap
+	if center == "" && !resp.Truncated {
+		if total, cerr := h.graph.CountEntities(r.Context(), ownerID); cerr == nil && total > len(resp.Nodes) {
+			resp.Truncated = true
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // edgesToGraphResponse derives nodes from edges and computes per-node

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/familiar/gateway/internal/backfill"
 	"github.com/familiar/gateway/internal/memory"
@@ -28,9 +29,10 @@ func (a *backfillAdapter) ListForBackfill(ctx context.Context, userID string) ([
 	out := make([]backfill.Item, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, backfill.Item{
-			ID:      r.ID,
-			Content: r.Content,
-			UserID:  r.UserID,
+			ID:       r.ID,
+			Content:  r.Content,
+			UserID:   r.UserID,
+			ScopeTag: r.ScopeTag,
 		})
 	}
 	return out, nil
@@ -74,6 +76,12 @@ func (h *Handler) startBackfill(w http.ResponseWriter, r *http.Request) {
 		BatchSize int    `json:"batch_size"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
+	if strings.TrimSpace(body.UserID) == "" {
+		// The run is one user's memories; without one it scanned nothing
+		// and reported success.
+		writeJSONError(w, http.StatusBadRequest, "user_id is required")
+		return
+	}
 
 	h.backfillMu.Lock()
 	if h.backfillState != nil && h.backfillState.Running {

@@ -244,11 +244,11 @@ func TestSession_SlidingRenewal(t *testing.T) {
 func TestSession_DeleteByCredentialEndsOnlyThatKeysSessions(t *testing.T) {
 	s := sessionStoreForTest(t)
 	ctx := context.Background()
-	stolen, err := s.CreateBound(ctx, PrincipalTypeUser, "sess-cred-user", "sess-cred-user", "cred-stolen", time.Hour)
+	stolen, err := s.CreateBound(ctx, PrincipalTypeUser, "sess-cred-user", "sess-cred-user", "cred-stolen", time.Hour, 0)
 	if err != nil {
 		t.Fatalf("CreateBound: %v", err)
 	}
-	other, err := s.CreateBound(ctx, PrincipalTypeUser, "sess-cred-user", "sess-cred-user", "cred-other", time.Hour)
+	other, err := s.CreateBound(ctx, PrincipalTypeUser, "sess-cred-user", "sess-cred-user", "cred-other", time.Hour, 0)
 	if err != nil {
 		t.Fatalf("CreateBound: %v", err)
 	}
@@ -268,11 +268,11 @@ func TestSession_DeleteByCredentialEndsOnlyThatKeysSessions(t *testing.T) {
 func TestSession_DeleteByShardEndsOnlyThatShard(t *testing.T) {
 	s := sessionStoreForTest(t)
 	ctx := context.Background()
-	kiosk, err := s.CreateBound(ctx, PrincipalTypeShard, "sess-kitchen", "sess-shard-owner", "cred-k", time.Hour)
+	kiosk, err := s.CreateBound(ctx, PrincipalTypeShard, "sess-kitchen", "sess-shard-owner", "cred-k", time.Hour, 0)
 	if err != nil {
 		t.Fatalf("CreateBound: %v", err)
 	}
-	garage, err := s.CreateBound(ctx, PrincipalTypeShard, "sess-garage", "sess-shard-owner", "cred-g", time.Hour)
+	garage, err := s.CreateBound(ctx, PrincipalTypeShard, "sess-garage", "sess-shard-owner", "cred-g", time.Hour, 0)
 	if err != nil {
 		t.Fatalf("CreateBound: %v", err)
 	}
@@ -290,5 +290,94 @@ func TestSession_DeleteByShardEndsOnlyThatShard(t *testing.T) {
 		if _, err := s.Validate(ctx, tok); err != nil {
 			t.Errorf("%s session was ended too: %v", name, err)
 		}
+	}
+}
+
+// A session in constant use still ends at its absolute deadline. Sliding
+// renewal used to make the TTL an idle timeout only: an open tab (the
+// SPA probes every 90s) or a stolen cookie in use lived forever, and a
+// shard's session_max_age never forced the re-auth it documents.
+func TestSession_RenewalStopsAtAbsoluteLifetime(t *testing.T) {
+	s := sessionStoreForTest(t)
+	ctx := context.Background()
+	token, err := s.CreateBound(ctx, PrincipalTypeShard, "sess-abs-kiosk", "sess-abs-owner", "", time.Hour, 10*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var absolute time.Time
+	if err := s.pool.QueryRowContext(ctx,
+		`SELECT absolute_expires_at FROM admin_sessions WHERE token = $1`, token).Scan(&absolute); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := s.Validate(ctx, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.ExpiresAt.After(absolute) {
+		t.Errorf("a new session expires at %v, after its lifetime %v", sess.ExpiresAt, absolute)
+	}
+
+	// Due for renewal (under half the hour left): renewal stops at the deadline.
+	if _, err := s.pool.ExecContext(ctx,
+		`UPDATE admin_sessions SET expires_at = NOW() + interval '5 minutes' WHERE token = $1`, token); err != nil {
+		t.Fatal(err)
+	}
+	sess, err = s.Validate(ctx, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.ExpiresAt.After(absolute.Add(time.Second)) {
+		t.Errorf("renewal carried the session to %v, past its lifetime %v", sess.ExpiresAt, absolute)
+	}
+
+	// Past the deadline it's over, whatever expires_at says.
+	if _, err := s.pool.ExecContext(ctx,
+		`UPDATE admin_sessions SET absolute_expires_at = NOW() - interval '1 second', expires_at = NOW() + interval '1 hour' WHERE token = $1`, token); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Validate(ctx, token); !errors.Is(err, ErrSessionInvalid) {
+		t.Errorf("a session past its absolute lifetime validated (err = %v)", err)
+	}
+}
+
+// Sessions from before absolute_expires_at existed live at most the
+// store's maximum from their creation.
+func TestSession_LegacyRowsGetTheMaximumLifetime(t *testing.T) {
+	s := sessionStoreForTest(t)
+	ctx := context.Background()
+	old, _ := s.Create(ctx, "sess-legacy", time.Hour)
+	young, _ := s.Create(ctx, "sess-legacy", time.Hour)
+	if _, err := s.pool.ExecContext(ctx, `
+		UPDATE admin_sessions SET absolute_expires_at = NULL, expires_at = NOW() + interval '30 minutes',
+		       created_at = CASE WHEN token = $1 THEN NOW() - interval '8 days' ELSE NOW() - interval '6 days' END
+		 WHERE token IN ($1, $2)`, old, young); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Validate(ctx, old); !errors.Is(err, ErrSessionInvalid) {
+		t.Errorf("an 8-day-old session validated (err = %v)", err)
+	}
+	if _, err := s.Validate(ctx, young); err != nil {
+		t.Errorf("a 6-day-old session was refused: %v", err)
+	}
+}
+
+// A lifetime longer than the store's maximum is cut to it.
+func TestSession_LifetimeCappedAtMaximum(t *testing.T) {
+	s := sessionStoreForTest(t)
+	s.maxLifetime = time.Hour
+	ctx := context.Background()
+	token, err := s.CreateBound(ctx, PrincipalTypeUser, "sess-cap", "sess-cap", "", 2*time.Hour, 48*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var left time.Duration
+	var secs float64
+	if err := s.pool.QueryRowContext(ctx,
+		`SELECT EXTRACT(EPOCH FROM absolute_expires_at - NOW()) FROM admin_sessions WHERE token = $1`, token).Scan(&secs); err != nil {
+		t.Fatal(err)
+	}
+	left = time.Duration(secs * float64(time.Second))
+	if left > time.Hour+time.Minute {
+		t.Errorf("lifetime %v, want at most the store's 1h maximum", left)
 	}
 }

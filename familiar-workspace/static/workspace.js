@@ -66,7 +66,15 @@
         diagram: { title: "Diagram", placeholder: "Open a diagram by clicking a rendered mermaid block in a note or wiki page." },
     };
 
-    const STORAGE_KEY = "familiar.workspace.v1";
+    // Tab state (layout, doc ids, and titles, which are note and
+    // conversation names) is stored per principal, under a key bound
+    // once auth status is known (bindPrincipal). It used to be one key
+    // for the browser: the next person to sign in saw the last one's tab
+    // titles, and their surfaces tried to open the last one's documents.
+    const STORAGE_PREFIX = "familiar.workspace.v1";
+    let storageKey = null; // unbound: nothing is loaded or saved
+    try { localStorage.removeItem(STORAGE_PREFIX); } catch (_) { /* the old shared key */ }
+    let wired = false;
 
     const MIN_TRACK_FRACTION = 0.15; // 15% of grid extent — keeps
                                      // resize handles from collapsing
@@ -76,7 +84,7 @@
 
     // ── State ──────────────────────────────────────────────────
 
-    const state = loadState();
+    const state = defaultState();
 
     // Surface renderers register here. Phase 1c populates this map.
     // Default renderer renders the placeholder text — visible until
@@ -95,6 +103,14 @@
         switchTab,
         setLayout,
         getState() { return JSON.parse(JSON.stringify(state)); },
+        bindPrincipal,
+        // Sign-out: drop this principal's saved tabs from the browser.
+        forgetPrincipal() {
+            if (storageKey) {
+                try { localStorage.removeItem(storageKey); } catch (_) { /* disabled */ }
+            }
+            storageKey = null;
+        },
         // Update a tab's display title (called by surfaces when a
         // doc loads or is renamed). Re-renders just the tab label.
         updateTabTitle(tabId, title) {
@@ -143,9 +159,22 @@
 
     // ── State load/save ────────────────────────────────────────
 
+    // bindPrincipal switches to the saved tabs of principal (an opaque
+    // per-user / per-shard key; empty unbinds) and redraws.
+    function bindPrincipal(principal) {
+        const key = principal ? STORAGE_PREFIX + ":" + principal : null;
+        if (key === storageKey) return;
+        storageKey = key;
+        const loaded = loadState();
+        for (const k of Object.keys(state)) delete state[k];
+        Object.assign(state, loaded);
+        if (wired) renderGrid();
+    }
+
     function loadState() {
+        if (!storageKey) return defaultState();
         try {
-            const raw = localStorage.getItem(STORAGE_KEY);
+            const raw = localStorage.getItem(storageKey);
             if (raw) {
                 const parsed = JSON.parse(raw);
                 if (parsed && parsed.layout) {
@@ -209,8 +238,9 @@
     }
 
     function saveState() {
+        if (!storageKey) return;
         try {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+            localStorage.setItem(storageKey, JSON.stringify(state));
         } catch (e) { /* quota or disabled — ignore */ }
     }
 
@@ -2328,7 +2358,14 @@
         })();
 
         // Render now that DOM is parsed.
+        wired = true;
         renderGrid();
+    }
+
+    // app.js binds the principal when auth status arrives; that can land
+    // before this script runs, so catch up with it here.
+    if (window.FAMILIAR_SESSION && window.familiarPrincipalKey) {
+        bindPrincipal(window.familiarPrincipalKey(window.FAMILIAR_SESSION));
     }
 
     if (document.readyState === "loading") {

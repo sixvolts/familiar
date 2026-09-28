@@ -16,7 +16,6 @@ package admin
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -196,7 +195,7 @@ func New(cfg config.AdminConfig, pool *db.Pool) (*Handler, error) {
 		rps:           rpMap,
 		cookieSecure:  cfg.CookieSecure,
 		credentials:   NewCredentialStore(pool),
-		sessions:      NewSessionStore(pool),
+		sessions:      &SessionStore{pool: pool, maxLifetime: time.Duration(cfg.SessionMaxLifetime) * time.Second},
 		pending:       newPendingStore(),
 		enrollTokens:  NewEnrollmentTokenStore(pool),
 		sessionMaxAge: ttl,
@@ -251,7 +250,7 @@ func stripPort(host string) string {
 //
 //	POST /console/api/auth/*       — WebAuthn ceremony endpoints
 //	GET  /console/api/auth/status  — session probe
-//	/console/api/*                 — authed, wrapped in requireAuth
+//	/console/api/*                 — authed, wrapped in authRequired
 //
 // The /admin → /console back-compat redirect now lives in the
 // workspace, since URL bookmarks land at the workspace's hostname,
@@ -322,7 +321,9 @@ func (h *Handler) Mux(authed http.Handler) http.Handler {
 	// rows, admins see everything. Routes that have NO per-user
 	// concept (status, skills/tools) just don't filter; the data is
 	// safe to surface to any authenticated user.
-	authedMux.HandleFunc("GET /console/api/status", h.getStatus)
+	// Admin-only: the snapshot names every model server's (unauthenticated)
+	// endpoint and carries instance-wide user, session and memory counts.
+	authedMux.Handle("GET /console/api/status", h.adminOnly(http.HandlerFunc(h.getStatus)))
 	// Maintenance mode: GET is any-role (the frontend banner reads it);
 	// POST (the toggle + fallback-model selection) is admin-only,
 	// wrapped in the admin-only block below.
@@ -570,6 +571,7 @@ func (h *Handler) Mux(authed http.Handler) http.Handler {
 	authedMux.Handle("GET /console/api/users/{id}", h.adminOnly(http.HandlerFunc(h.getUser)))
 	authedMux.Handle("PATCH /console/api/users/{id}", h.adminOnly(http.HandlerFunc(h.patchUser)))
 	authedMux.Handle("POST /console/api/users/{id}/status", h.adminOnly(http.HandlerFunc(h.setUserStatus)))
+	authedMux.Handle("DELETE /console/api/users/{id}/enrollment-tokens", h.adminOnly(http.HandlerFunc(h.revokeEnrollmentTokens)))
 	authedMux.Handle("POST /console/api/users/{id}/identities", h.adminOnly(http.HandlerFunc(h.linkIdentity)))
 	authedMux.Handle("DELETE /console/api/users/{id}/identities/{platform}/{platform_id}", h.adminOnly(http.HandlerFunc(h.unlinkIdentity)))
 
@@ -597,23 +599,6 @@ func (m *routeRecorder) Handle(pattern string, handler http.Handler) {
 func (m *routeRecorder) HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request)) {
 	m.patterns = append(m.patterns, pattern)
 	m.ServeMux.HandleFunc(pattern, handler)
-}
-
-// RequireAuth wraps next so every request must carry a valid admin
-// session cookie. Exposed for dashboard endpoints the gateway wires up
-// later. On failure returns 401 with a JSON error body.
-func (h *Handler) RequireAuth(next http.Handler) http.Handler { return h.requireAuth(next) }
-
-func (h *Handler) requireAuth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		userID, ok := h.authenticatedUser(r)
-		if !ok {
-			writeJSONError(w, http.StatusUnauthorized, "not authenticated")
-			return
-		}
-		ctx := context.WithValue(r.Context(), ContextKeyUserID, userID)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
 }
 
 // authenticatedUser reads the session cookie and returns the canonical
@@ -1100,27 +1085,13 @@ func (h *Handler) loginFinish(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
 
-	all, lErr := h.credentials.ListAll(r.Context())
-	if lErr != nil {
-		writeJSONError(w, http.StatusInternalServerError, "list credentials: "+lErr.Error())
-		return
-	}
-
 	// Peek at the rawId to decide whether this is a user passkey or a
 	// shard passkey. The two tables are partitioned by credential_id
 	// so a single rawId resolves to exactly one row in one table.
 	// SHARD-AUTH-SPEC: shard_passkeys takes precedence when matched
 	// (a credential can only live in one of the two tables, but the
 	// lookup order is stable for tests).
-	var partial struct {
-		RawID string `json:"rawId"`
-	}
-	var rawID []byte
-	if json.Unmarshal(body, &partial) == nil && partial.RawID != "" {
-		if decoded, decErr := base64.RawURLEncoding.DecodeString(partial.RawID); decErr == nil {
-			rawID = decoded
-		}
-	}
+	rawID := assertionRawID(body)
 	var matchedShard *StoredShardPasskey
 	if h.shardPasskeys != nil && len(rawID) > 0 {
 		if sp, _ := h.shardPasskeys.GetByRawID(r.Context(), rawID); sp != nil {
@@ -1143,38 +1114,44 @@ func (h *Handler) loginFinish(w http.ResponseWriter, r *http.Request) {
 	// session UserID + the adminUser handle to that stored handle so
 	// both checks pass; the session itself is still created under the
 	// canonical user_id.
-	if len(all) == 0 {
+	//
+	// Identity comes from the credential the assertion names and nothing
+	// else. This used to start from the instance's first credential (the
+	// bootstrap admin) and only switch when the rawId lookup hit, so a
+	// miss verified against every user's credentials and minted an
+	// admin session unless a second lookup happened to correct it.
+	owner, own, lErr := h.loginCredential(r.Context(), rawID)
+	if errors.Is(lErr, ErrNotFound) {
 		writeJSONError(w, http.StatusUnauthorized, "no matching credential")
 		return
 	}
-	ownerID := all[0].UserID         // canonical id — for the session
-	ownerHandle := all[0].UserHandle // WebAuthn handle — for verification
-	if len(rawID) > 0 {
-		if stored, _ := h.credentials.GetByRawID(r.Context(), rawID); stored != nil {
-			ownerID = stored.UserID
-			ownerHandle = stored.UserHandle
-		}
+	if lErr != nil {
+		writeJSONError(w, http.StatusInternalServerError, "look up credential: "+lErr.Error())
+		return
 	}
+	ownerID := owner.UserID         // canonical id — for the session
+	ownerHandle := owner.UserHandle // WebAuthn handle — for verification
 
 	// Patch session data to the handle — fixes check 1 (it must equal
 	// WebAuthnID(), which is the handle).
 	entry.data.UserID = []byte(ownerHandle)
 
+	creds, _ := usableCredentials(toCredentials(own))
 	user := &adminUser{
 		id:          ownerID,
 		handle:      ownerHandle,
 		displayName: "login",
-		credentials: toCredentials(all),
+		credentials: creds,
 	}
 
 	// Trim AllowedCredentialIDs the same way finishShardLogin does:
-	// loginBegin offered user passkeys + shard passkeys, but the
-	// adminUser here only owns user passkeys. Without the trim, the
-	// library's "user owns every allowed credential" check would
-	// fail the moment any shard passkey exists on the instance.
-	allowedUser := make([][]byte, 0, len(all))
-	for _, c := range all {
-		allowedUser = append(allowedUser, c.Credential.ID)
+	// loginBegin offered every user and shard passkey, but the
+	// adminUser here owns only this user's. Without the trim, the
+	// library's "user owns every allowed credential" check would fail
+	// the moment anyone else has a passkey.
+	allowedUser := make([][]byte, 0, len(creds))
+	for _, c := range creds {
+		allowedUser = append(allowedUser, c.ID)
 	}
 	entry.data.AllowedCredentialIDs = allowedUser
 
@@ -1189,11 +1166,19 @@ func (h *Handler) loginFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Credential owner already identified above (ownerID). Use the
-	// library's credential match to double-check if available.
+	// The verified credential must still be on file, and still that
+	// user's: an admin revoking it between the lookup above and here
+	// must not lose the race.
+	if stored, sErr := h.credentials.GetByRawID(r.Context(), cred.ID); sErr != nil || stored.UserID != ownerID {
+		writeJSONError(w, http.StatusUnauthorized, "no matching credential")
+		return
+	}
 	foundUserID := ownerID
-	if stored, _ := h.credentials.GetByRawID(r.Context(), cred.ID); stored != nil {
-		foundUserID = stored.UserID
+	if cred.Authenticator.CloneWarning {
+		log.Printf("[admin] login refused: credential %s signed with a counter at or below the stored one (cloned authenticator?)",
+			encodeCredentialID(cred.ID))
+		writeJSONError(w, http.StatusUnauthorized, "this passkey's signature counter went backwards; it may have been copied. Use another passkey or ask an admin")
+		return
 	}
 
 	if err := h.credentials.UpdateSignCount(r.Context(), cred.ID, cred.Authenticator.SignCount); err != nil {
@@ -1235,7 +1220,7 @@ func (h *Handler) loginFinish(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sessionToken, err := h.sessions.CreateBound(r.Context(), PrincipalTypeUser, foundUserID, foundUserID,
-		encodeCredentialID(cred.ID), h.sessionMaxAge)
+		encodeCredentialID(cred.ID), h.sessionMaxAge, 0)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "create session: "+err.Error())
 		return
@@ -1313,20 +1298,31 @@ func (h *Handler) finishShardLogin(w http.ResponseWriter, r *http.Request, body 
 		writeJSONError(w, http.StatusUnauthorized, "verify: "+err.Error())
 		return
 	}
+	if cred.Authenticator.CloneWarning {
+		log.Printf("[admin] shard login refused: credential %s signed with a counter at or below the stored one (cloned authenticator?)",
+			encodeCredentialID(cred.ID))
+		writeJSONError(w, http.StatusUnauthorized, "this passkey's signature counter went backwards; it may have been copied")
+		return
+	}
 	if err := h.shardPasskeys.UpdateSignCount(r.Context(), cred.ID, cred.Authenticator.SignCount); err != nil {
 		log.Printf("[admin] warning: shard sign_count update: %v", err)
 	}
 
 	// Pick the session TTL: shard.session_max_age overrides the
 	// gateway default when set (for kiosk shards that should re-auth
-	// daily, say). Falls back to h.sessionMaxAge otherwise.
+	// daily, say), and is then also the session's absolute lifetime:
+	// renewal never carries it past session_max_age, so the kiosk
+	// re-authenticates on that schedule even while in use. Falls back
+	// to h.sessionMaxAge (and the store's maximum lifetime) otherwise.
 	ttl := h.sessionMaxAge
+	var lifetime time.Duration
 	if sh.SessionMaxAge != nil && *sh.SessionMaxAge > 0 {
 		ttl = time.Duration(*sh.SessionMaxAge) * time.Second
+		lifetime = ttl
 	}
 
 	token, err := h.sessions.CreateBound(r.Context(), PrincipalTypeShard, sh.ID, sh.OwnerID,
-		encodeCredentialID(cred.ID), ttl)
+		encodeCredentialID(cred.ID), ttl, lifetime)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "create session: "+err.Error())
 		return
@@ -1533,6 +1529,39 @@ func (h *Handler) clearPendingCookie(w http.ResponseWriter) {
 		Secure:   h.cookieSecure,
 		SameSite: http.SameSiteLaxMode,
 	})
+}
+
+// assertionRawID reads the credential id from a login assertion with the
+// library's own base64 decoder, which accepts padding. A stricter decode
+// here once disagreed with FinishLogin about which credential a padded
+// rawId named. Nil when absent or malformed.
+func assertionRawID(body []byte) []byte {
+	var partial struct {
+		RawID protocol.URLEncodedBase64 `json:"rawId"`
+	}
+	if json.Unmarshal(body, &partial) != nil {
+		return nil
+	}
+	return partial.RawID
+}
+
+// loginCredential finds the stored user credential a login assertion
+// names, and every credential its owner holds (what FinishLogin may
+// verify against). An unknown or missing id is ErrNotFound: there is no
+// default identity.
+func (h *Handler) loginCredential(ctx context.Context, rawID []byte) (*StoredCredential, []StoredCredential, error) {
+	if len(rawID) == 0 {
+		return nil, nil, ErrNotFound
+	}
+	owner, err := h.credentials.GetByRawID(ctx, rawID)
+	if err != nil {
+		return nil, nil, err
+	}
+	own, err := h.credentials.ListByUser(ctx, owner.UserID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return owner, own, nil
 }
 
 func toCredentials(stored []StoredCredential) []webauthn.Credential {

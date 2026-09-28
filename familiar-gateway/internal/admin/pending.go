@@ -44,6 +44,11 @@ const (
 
 const pendingTTL = 5 * time.Minute
 
+// maxPending bounds the store. /login/begin is public, and each entry
+// lives pendingTTL, so without a cap a script could grow the map (and
+// the sweep every put and take runs over it) without limit.
+const maxPending = 1024
+
 func newPendingStore() *pendingStore {
 	return &pendingStore{entries: make(map[string]pendingEntry)}
 }
@@ -54,6 +59,9 @@ func (p *pendingStore) put(token string, data webauthn.SessionData, kind, userID
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.gcLocked()
+	if len(p.entries) >= maxPending {
+		p.evictLocked()
+	}
 	p.entries[token] = pendingEntry{
 		data:    data,
 		kind:    kind,
@@ -75,6 +83,27 @@ func (p *pendingStore) take(token string) (pendingEntry, bool) {
 		return pendingEntry{}, false
 	}
 	return e, true
+}
+
+// evictLocked drops the oldest login entry, or the oldest entry when
+// there are none. Logins are the anonymous ceremony, so a flood of them
+// displaces other logins before it touches a signed-in user's
+// registration or an enrollment.
+func (p *pendingStore) evictLocked() {
+	var oldest string
+	var oldestLogin string
+	for k, e := range p.entries {
+		if oldest == "" || e.expires.Before(p.entries[oldest].expires) {
+			oldest = k
+		}
+		if e.kind == PendingKindLogin && (oldestLogin == "" || e.expires.Before(p.entries[oldestLogin].expires)) {
+			oldestLogin = k
+		}
+	}
+	if oldestLogin != "" {
+		oldest = oldestLogin
+	}
+	delete(p.entries, oldest)
 }
 
 func (p *pendingStore) gcLocked() {

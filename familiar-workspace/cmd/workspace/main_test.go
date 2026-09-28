@@ -34,3 +34,16 @@ func TestRedirectAdminToConsole_PreservesPath(t *testing.T) {
 		}
 	}
 }
+
+// The public listener drops slow or idle connections, and never sets a
+// read or write deadline: either would end the SSE and chat streams it
+// proxies (a read deadline reached mid-response cancels the request).
+func TestNewServer_TimeoutsSpareStreams(t *testing.T) {
+	s := newServer(":0", http.NewServeMux())
+	if s.ReadHeaderTimeout <= 0 || s.IdleTimeout <= 0 {
+		t.Errorf("ReadHeaderTimeout=%v IdleTimeout=%v, want both set", s.ReadHeaderTimeout, s.IdleTimeout)
+	}
+	if s.ReadTimeout != 0 || s.WriteTimeout != 0 {
+		t.Errorf("ReadTimeout=%v WriteTimeout=%v, want 0: streams must not be cut", s.ReadTimeout, s.WriteTimeout)
+	}
+}

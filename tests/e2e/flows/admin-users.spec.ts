@@ -76,6 +76,18 @@ test("an invited user is flagged 'no passkey' and gets a one-click enrollment li
         await page.locator("#user-enroll-go").click();
         await expect(page.locator("#user-enroll-url")).toHaveValue(/\/enroll\?token=/, { timeout: 10_000 });
         await expect(page.locator("#user-enroll-msg")).toContainText(/valid/i);
+
+        // A link sent to the wrong place can be taken back: revoking ends
+        // every unused one (it used to stay good for 48h).
+        const token = new URL(await page.locator("#user-enroll-url").inputValue()).searchParams.get("token");
+        page.once("dialog", (d) => d.accept());
+        await page.locator("#user-enroll-revoke").click();
+        await expect(page.locator("#user-enroll-msg")).toContainText(/Revoked \d+ unused link/, { timeout: 10_000 });
+        const begin = await request.post(`${stack.workspaceURL}/console/api/auth/enroll/begin`, {
+            headers: { "Content-Type": "application/json" },
+            data: { token },
+        });
+        expect(begin.status(), "a revoked link still starts an enrollment").toBe(400);
     } finally {
         await ctx.close();
     }

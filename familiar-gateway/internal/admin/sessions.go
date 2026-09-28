@@ -19,6 +19,23 @@ import (
 // two-hour TTL).
 type SessionStore struct {
 	pool *db.Pool
+	// maxLifetime caps how long any session lives, however active:
+	// sliding renewal stops at created_at + maxLifetime. Zero means
+	// DefaultSessionMaxLifetime.
+	maxLifetime time.Duration
+}
+
+// DefaultSessionMaxLifetime is the absolute lifetime of a session that
+// keeps renewing. Without one, sliding renewal made the TTL an idle
+// timeout only: an open tab (the SPA probes every 90s) or a stolen
+// cookie in use kept a session alive forever.
+const DefaultSessionMaxLifetime = 7 * 24 * time.Hour
+
+func (s *SessionStore) lifetime() time.Duration {
+	if s.maxLifetime > 0 {
+		return s.maxLifetime
+	}
+	return DefaultSessionMaxLifetime
 }
 
 // AdminSession is a validated session record. PrincipalType /
@@ -62,7 +79,7 @@ func (s *SessionStore) Create(ctx context.Context, userID string, ttl time.Durat
 // the right user). principalID is the shard or user id depending
 // on principalType.
 func (s *SessionStore) CreatePrincipal(ctx context.Context, principalType, principalID, userID string, ttl time.Duration) (string, error) {
-	return s.CreateBound(ctx, principalType, principalID, userID, "", ttl)
+	return s.CreateBound(ctx, principalType, principalID, userID, "", ttl, 0)
 }
 
 // CreateBound mints a session tied to the passkey that authenticated
@@ -71,7 +88,11 @@ func (s *SessionStore) CreatePrincipal(ctx context.Context, principalType, princ
 // DeleteByCredential end every session a revoked or deleted passkey
 // minted; without it, sliding renewal kept those sessions alive
 // indefinitely.
-func (s *SessionStore) CreateBound(ctx context.Context, principalType, principalID, userID, credentialID string, ttl time.Duration) (string, error) {
+//
+// ttl is the idle window. lifetime is the absolute one, past which the
+// session ends however active it is; zero means the store's maximum,
+// and a longer one is cut to it.
+func (s *SessionStore) CreateBound(ctx context.Context, principalType, principalID, userID, credentialID string, ttl, lifetime time.Duration) (string, error) {
 	if principalType != PrincipalTypeUser && principalType != PrincipalTypeShard {
 		return "", fmt.Errorf("admin: invalid principal_type %q", principalType)
 	}
@@ -79,11 +100,19 @@ func (s *SessionStore) CreateBound(ctx context.Context, principalType, principal
 	if err != nil {
 		return "", err
 	}
-	expires := time.Now().Add(ttl)
+	if lifetime <= 0 || lifetime > s.lifetime() {
+		lifetime = s.lifetime()
+	}
+	now := time.Now()
+	absolute := now.Add(lifetime)
+	expires := now.Add(ttl)
+	if expires.After(absolute) {
+		expires = absolute
+	}
 	_, err = s.pool.ExecContext(ctx, `
-		INSERT INTO admin_sessions (token, user_id, principal_type, principal_id, expires_at, ttl_seconds, credential_id)
-		VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''))
-	`, token, userID, principalType, principalID, expires, int(ttl.Seconds()), credentialID)
+		INSERT INTO admin_sessions (token, user_id, principal_type, principal_id, expires_at, ttl_seconds, credential_id, absolute_expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), $8)
+	`, token, userID, principalType, principalID, expires, int(ttl.Seconds()), credentialID, absolute)
 	if err != nil {
 		return "", err
 	}
@@ -103,18 +132,25 @@ func (s *SessionStore) Validate(ctx context.Context, token string) (*AdminSessio
 	}
 	var sess AdminSession
 	var ttlSeconds sql.NullInt64
+	var absolute sql.NullTime
 	err := s.pool.QueryRowContext(ctx, `
-		SELECT token, user_id, principal_type, principal_id, created_at, expires_at, ttl_seconds
+		SELECT token, user_id, principal_type, principal_id, created_at, expires_at, ttl_seconds, absolute_expires_at
 		FROM admin_sessions
 		WHERE token = $1
-	`, token).Scan(&sess.Token, &sess.UserID, &sess.PrincipalType, &sess.PrincipalID, &sess.CreatedAt, &sess.ExpiresAt, &ttlSeconds)
+	`, token).Scan(&sess.Token, &sess.UserID, &sess.PrincipalType, &sess.PrincipalID, &sess.CreatedAt, &sess.ExpiresAt, &ttlSeconds, &absolute)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrSessionInvalid
 	}
 	if err != nil {
 		return nil, err
 	}
-	if time.Now().After(sess.ExpiresAt) {
+	// Rows from before absolute_expires_at existed get the store's
+	// maximum from their creation.
+	deadline := sess.CreatedAt.Add(s.lifetime())
+	if absolute.Valid {
+		deadline = absolute.Time
+	}
+	if now := time.Now(); now.After(sess.ExpiresAt) || now.After(deadline) {
 		_ = s.Delete(ctx, token)
 		return nil, ErrSessionInvalid
 	}
@@ -130,8 +166,11 @@ func (s *SessionStore) Validate(ctx context.Context, token string) (*AdminSessio
 	if !ttlSeconds.Valid || ttl <= 0 {
 		ttl = sess.ExpiresAt.Sub(sess.CreatedAt)
 	}
-	if ttl > 0 && time.Until(sess.ExpiresAt) < ttl/2 {
+	if ttl > 0 && time.Until(sess.ExpiresAt) < ttl/2 && sess.ExpiresAt.Before(deadline) {
 		newExpires := time.Now().Add(ttl)
+		if newExpires.After(deadline) {
+			newExpires = deadline
+		}
 		if _, err := s.pool.ExecContext(ctx, `
 			UPDATE admin_sessions
 			   SET expires_at = $2,

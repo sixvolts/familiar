@@ -3352,10 +3352,45 @@ var reader = resp.body.getReader();
             for (var i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
             return out;
         }
+        // getRegistration, not .ready: ready never resolves when no
+        // service worker is registered, and logout waits on this.
         async function currentSubscription() {
             if (!supported()) return null;
-            var reg = await navigator.serviceWorker.ready;
-            return reg.pushManager.getSubscription();
+            var reg = await navigator.serviceWorker.getRegistration();
+            return reg ? reg.pushManager.getSubscription() : null;
+        }
+        function sameKey(sub, publicKey) {
+            var have = sub.options && sub.options.applicationServerKey;
+            if (!have) return true; // not exposed by this browser: can't tell
+            var a = new Uint8Array(have);
+            var b = urlB64ToUint8Array(publicKey);
+            if (a.length !== b.length) return false;
+            for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+            return true;
+        }
+        // sync re-registers this device's subscription for whoever is
+        // signed in. The server may have pruned it (the push service
+        // said it was gone), a restore may have lost it, or another user
+        // may hold it; the toggle used to say On from browser state
+        // alone while nothing arrived. A subscription made under a key
+        // the server no longer uses can never deliver: it is dropped,
+        // and the Account screen offers Enable again. Reports whether
+        // the device is subscribed afterwards.
+        async function sync() {
+            var sub = await currentSubscription();
+            if (!sub) return false;
+            var key = (await apiJSON('/console/api/push/key')).public_key;
+            if (!sameKey(sub, key)) {
+                try { await sub.unsubscribe(); } catch (_) { /* gone either way */ }
+                return false;
+            }
+            var j = sub.toJSON();
+            await apiJSON('/console/api/push/subscribe', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ endpoint: j.endpoint, keys: j.keys }),
+            });
+            return true;
         }
         async function enable() {
             if (!supported()) throw new Error('Notifications aren’t supported on this browser.');
@@ -3412,8 +3447,13 @@ var reader = resp.body.getReader();
                 btn.hidden = true;
                 return;
             }
-            var sub = await currentSubscription();
-            if (sub) {
+            var on;
+            try {
+                on = await sync();
+            } catch (_) {
+                on = !!(await currentSubscription());
+            }
+            if (on) {
                 meta.textContent = 'On — scheduled actions can notify this device';
                 btn.textContent = 'Disable';
                 btn.dataset.on = '1';
@@ -3439,7 +3479,7 @@ var reader = resp.body.getReader();
                 render();
             }
         }
-        return { render: render, toggle: toggle };
+        return { render: render, toggle: toggle, disable: disable, sync: sync };
     })();
 
     var Account = (function () {
@@ -3822,10 +3862,11 @@ var reader = resp.body.getReader();
 
        Touch-drag down from the top of any .mob-scroll container
        (when it's already at scrollTop=0) to fire a hard refresh:
-       unregister all service workers, delete every CacheStorage
-       entry, then location.reload(). This is the manual escape
-       hatch for "the SW is serving stale assets" — useful during
-       PWA development and after a deploy.
+       update the service worker (never unregister it: that ends
+       its push subscription), delete every CacheStorage entry, then
+       location.reload(). This is the manual escape hatch for "the SW
+       is serving stale assets" — useful during PWA development and
+       after a deploy.
 
        Implementation notes:
        - touchstart only arms when the active scroll container is
@@ -3893,8 +3934,12 @@ var reader = resp.body.getReader();
             label.textContent = 'Refreshing…';
             try {
                 if ('serviceWorker' in navigator) {
+                    // update(), not unregister(): unregistering ends the
+                    // worker's push subscription, so every pull-to-refresh
+                    // silently turned notifications off. sw.js takes over
+                    // at once (skipWaiting + clients.claim).
                     var regs = await navigator.serviceWorker.getRegistrations();
-                    await Promise.all(regs.map(function (r) { return r.unregister(); }));
+                    await Promise.all(regs.map(function (r) { return r.update(); }));
                 }
                 if (window.caches && caches.keys) {
                     var keys = await caches.keys();
@@ -4103,6 +4148,16 @@ var reader = resp.body.getReader();
         }
 
         async function logout() {
+            // Unsubscribe this device first. Left subscribed, it kept
+            // receiving this user's notifications (with previews) after
+            // someone else signed in. Bounded, so a stuck service worker
+            // can't keep the user signed in.
+            try {
+                await Promise.race([
+                    Push.disable(),
+                    new Promise(function (resolve) { setTimeout(resolve, 3000); }),
+                ]);
+            } catch (_) { /* sign out regardless */ }
             try {
                 await apiJSON('/console/api/auth/logout', { method: 'POST' });
             } catch (_) { /* even if the call fails, kick the user back to login */ }
@@ -4151,6 +4206,12 @@ var reader = resp.body.getReader();
                     hideAll();
                     startApp();
                     applyMaintenanceBanner(status.maintenance);
+                    // Re-register this device's push subscription (if it
+                    // has one) for the user now signed in. Owner-only:
+                    // a shard session can't hold one.
+                    if ((status.principal_type || 'user') === 'user') {
+                        Push.sync().catch(function (e) { console.warn('push: sync failed', e); });
+                    }
                     return;
                 }
             } catch (_) { /* 401 → fall through */ }

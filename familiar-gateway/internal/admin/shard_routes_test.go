@@ -201,7 +201,7 @@ func withCookie(req *http.Request, token string) *http.Request {
 func TestShardSession_RealChainRefusesOwnerRoutes(t *testing.T) {
 	h, _ := shardSessionHarness(t)
 	ctx := context.Background()
-	token, err := h.sessions.CreateBound(ctx, PrincipalTypeShard, "kitchen", "kiosk-owner", "cred-kiosk", time.Hour)
+	token, err := h.sessions.CreateBound(ctx, PrincipalTypeShard, "kitchen", "kiosk-owner", "cred-kiosk", time.Hour, 0)
 	if err != nil {
 		t.Fatalf("mint shard session: %v", err)
 	}
@@ -225,7 +225,7 @@ func TestShardSession_RealChainRefusesOwnerRoutes(t *testing.T) {
 // it. A shard session must not be able to add a passkey to its owner.
 func TestShardSession_CannotRegisterOwnerPasskey(t *testing.T) {
 	h, _ := shardSessionHarness(t)
-	token, err := h.sessions.CreateBound(context.Background(), PrincipalTypeShard, "kitchen", "kiosk-owner", "cred-kiosk", time.Hour)
+	token, err := h.sessions.CreateBound(context.Background(), PrincipalTypeShard, "kitchen", "kiosk-owner", "cred-kiosk", time.Hour, 0)
 	if err != nil {
 		t.Fatalf("mint shard session: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestShardSession_CannotRegisterOwnerPasskey(t *testing.T) {
 // the same id comes back.
 func TestShardSession_DeletedShardRevokesSession(t *testing.T) {
 	h, st := shardSessionHarness(t)
-	token, err := h.sessions.CreateBound(context.Background(), PrincipalTypeShard, "kitchen", "kiosk-owner", "cred-kiosk", time.Hour)
+	token, err := h.sessions.CreateBound(context.Background(), PrincipalTypeShard, "kitchen", "kiosk-owner", "cred-kiosk", time.Hour, 0)
 	if err != nil {
 		t.Fatalf("mint shard session: %v", err)
 	}

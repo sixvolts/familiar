@@ -1679,6 +1679,14 @@ UPDATE users u SET first_passkey_at = NOW()
  WHERE u.first_passkey_at IS NULL
    AND EXISTS (SELECT 1 FROM webauthn_credentials c WHERE c.user_id = u.id);`,
 	},
+	{
+		// admin_sessions_absolute_expiry: sliding renewal stops at this
+		// deadline. NULL (rows from before it) means created_at plus the
+		// gateway's maximum session lifetime.
+		name: "admin_sessions_absolute_expiry",
+		ddl: `
+ALTER TABLE admin_sessions ADD COLUMN IF NOT EXISTS absolute_expires_at TIMESTAMPTZ;`,
+	},
 }
 
 // migrateLockKey is the pg_advisory_lock key that serializes Migrate

@@ -120,7 +120,10 @@ history_file = "~/.familiar/cli_history"
 # Native Familiar HTTP chat API (POST /api/chat) plus the admin console
 # (mounts on /admin/ when [admin].enabled=true). The Familiar workspace
 # reverse-proxies to this. Enable by running the gateway with --http.
-listen_addr = "0.0.0.0:8000"
+# Loopback (the default when unset): the workspace is the only public
+# listener, and the gateway serves plain HTTP. Bind wider only if the
+# workspace runs on another host, and firewall the port to it.
+listen_addr = "127.0.0.1:8000"
 # OWNER-MIGRATION removed the default_sender_id field. Requests with no
 # X-User-Email header and no admin session cookie now return 401.
 
@@ -529,6 +532,10 @@ session_max_age = 7200                # session IDLE window, seconds. Sessions s
                                       # activity renews them, so this is "log out after
                                       # this much inactivity", not an absolute deadline.
                                       # Shards can override per-shard (session_max_age).
+# session_max_lifetime = 604800       # the absolute deadline: a session ends this long
+                                      # after sign-in however active it is (seconds;
+                                      # default 7 days). A shard's session_max_age is
+                                      # its absolute lifetime, capped by this.
 cookie_secure   = false               # set true when fronted by HTTPS
 
 # first_user_id is the canonical_id assigned to the very first

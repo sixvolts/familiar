@@ -2,9 +2,7 @@ package identity
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -64,6 +62,10 @@ var ErrUserNotFound = errors.New("identity: user not found")
 // this as a soft error and shows the existing mapping so the operator
 // can decide whether to delete it first.
 var ErrDuplicateLink = errors.New("identity: platform link already exists")
+
+// ErrLinkNotFound is returned by UnlinkIdentity when the user has no
+// such link (it may have been moved to someone else meanwhile).
+var ErrLinkNotFound = errors.New("identity: no such platform link for this user")
 
 // ResolveWithStatus returns the canonical ID for a platform identity
 // *and* the user's current status. When no link exists the returned
@@ -245,12 +247,22 @@ func (r *Resolver) LinkIdentity(ctx context.Context, userID, platform, platformI
 	if existing {
 		return ErrDuplicateLink
 	}
-	if _, err := r.db.ExecContext(ctx, `
+	res, err := r.db.ExecContext(ctx, `
 		INSERT INTO identity_map (platform, platform_id, canonical_id, display_name)
 		VALUES ($1, $2, $3, $4)
 		ON CONFLICT (platform, platform_id) DO NOTHING`,
-		platform, platformID, userID, displayName); err != nil {
+		platform, platformID, userID, displayName)
+	if err != nil {
 		return fmt.Errorf("identity: link: %w", err)
+	}
+	// The cache check above can miss a row the database has (another
+	// admin linking the same id at the same moment, or a row the cache
+	// never loaded). Caching our user anyway routed that platform user
+	// to the wrong account until the next restart.
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("identity: link: %w", err)
+	} else if n == 0 {
+		return ErrDuplicateLink
 	}
 	r.mu.Lock()
 	r.cache[platform+":"+platformID] = userID
@@ -259,17 +271,24 @@ func (r *Resolver) LinkIdentity(ctx context.Context, userID, platform, platformI
 	return nil
 }
 
-// UnlinkIdentity removes a (platform, platform_id) row. Used by the
-// admin UI to detach stray mappings. The underlying user is left
-// untouched.
-func (r *Resolver) UnlinkIdentity(ctx context.Context, platform, platformID string) error {
+// UnlinkIdentity removes userID's (platform, platform_id) row. Used by
+// the admin UI to detach stray mappings. The underlying user is left
+// untouched. Scoped to userID: unlinking from a stale view of one user
+// used to remove the link from whoever held it by then.
+func (r *Resolver) UnlinkIdentity(ctx context.Context, userID, platform, platformID string) error {
 	if r == nil || r.db == nil {
 		return fmt.Errorf("identity: nil resolver")
 	}
-	if _, err := r.db.ExecContext(ctx,
-		`DELETE FROM identity_map WHERE platform = $1 AND platform_id = $2`,
-		platform, platformID); err != nil {
+	res, err := r.db.ExecContext(ctx,
+		`DELETE FROM identity_map WHERE platform = $1 AND platform_id = $2 AND canonical_id = $3`,
+		platform, platformID, userID)
+	if err != nil {
 		return fmt.Errorf("identity: unlink: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("identity: unlink: %w", err)
+	} else if n == 0 {
+		return ErrLinkNotFound
 	}
 	r.mu.Lock()
 	delete(r.cache, platform+":"+platformID)
@@ -318,17 +337,19 @@ func (r *Resolver) SetUserStatus(ctx context.Context, userID string, status User
 	return nil
 }
 
-// SearchUsers returns up to `limit` users whose id, display_name,
-// or email starts with `query` (case-insensitive). Used by the
-// any-role lookup endpoint that powers in-app pickers (e.g. the
-// book-members modal). Empty query → empty result so the endpoint
-// can never accidentally list everyone. limit clamps to [1, 25].
+// SearchUsers returns up to `limit` APPROVED users whose id,
+// display_name, or email starts with `query` (case-insensitive). Used
+// by the any-role lookup endpoint that powers in-app pickers (e.g. the
+// book-members modal). limit clamps to [1, 25].
+//
+// The query is a literal prefix: % and _ are escaped, so "%" can't list
+// everyone. Queries under two characters return nothing.
 func (r *Resolver) SearchUsers(ctx context.Context, query string, limit int) ([]User, error) {
 	if r == nil || r.db == nil {
 		return nil, fmt.Errorf("identity: nil resolver")
 	}
 	q := strings.TrimSpace(query)
-	if q == "" {
+	if len([]rune(q)) < 2 {
 		return nil, nil
 	}
 	if limit <= 0 {
@@ -337,13 +358,14 @@ func (r *Resolver) SearchUsers(ctx context.Context, query string, limit int) ([]
 	if limit > 25 {
 		limit = 25
 	}
-	pattern := q + "%"
+	pattern := likeEscaper.Replace(q) + "%"
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT `+userColumns+`
 		   FROM users
-		  WHERE id ILIKE $1
-		     OR display_name ILIKE $1
-		     OR email ILIKE $1
+		  WHERE status = 'approved'
+		    AND (id ILIKE $1 ESCAPE '\'
+		         OR display_name ILIKE $1 ESCAPE '\'
+		         OR email ILIKE $1 ESCAPE '\')
 		  ORDER BY (LOWER(id) = LOWER($2)) DESC,
 		           (LOWER(email) = LOWER($2)) DESC,
 		           (LOWER(display_name) = LOWER($2)) DESC,
@@ -363,6 +385,9 @@ func (r *Resolver) SearchUsers(ctx context.Context, query string, limit int) ([]
 	}
 	return out, rows.Err()
 }
+
+// likeEscaper makes a string a literal LIKE pattern (with ESCAPE '\').
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 
 // GetByEmail looks up a user by email. Returns (nil, nil) when no
 // user carries that email — distinct from ErrUserNotFound so the
@@ -748,16 +773,17 @@ func (r *Resolver) SetUserDisplayName(ctx context.Context, userID, displayName s
 	return nil
 }
 
-// CountAdmins returns the number of users with role='admin'. Used by
-// the admin handler's last-admin guard to refuse demotions that
-// would lock everyone out.
+// CountAdmins returns the number of APPROVED users with role='admin'.
+// Used by the admin handler's last-admin guard to refuse demotions and
+// status changes that would lock everyone out. A disabled or pending
+// admin can't sign in, so counting them let the last usable admin go.
 func (r *Resolver) CountAdmins(ctx context.Context) (int, error) {
 	if r == nil || r.db == nil {
 		return 0, fmt.Errorf("identity: nil resolver")
 	}
 	var n int
 	err := r.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM users WHERE role = 'admin'`).Scan(&n)
+		`SELECT COUNT(*) FROM users WHERE role = 'admin' AND status = 'approved'`).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("identity: count admins: %w", err)
 	}
@@ -773,15 +799,4 @@ func (r *Resolver) UserStatusOf(userID string) UserStatus {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.userStatus[userID]
-}
-
-// newUserID returns a short, opaque canonical id of the form
-// "u_<6 hex>". Opaque on purpose — the display_name is the human label
-// and the id only needs to be unique and stable.
-func newUserID() (string, error) {
-	var buf [3]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		return "", fmt.Errorf("identity: new id: %w", err)
-	}
-	return "u_" + hex.EncodeToString(buf[:]), nil
 }

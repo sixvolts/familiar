@@ -371,6 +371,14 @@
         host.appendChild(banner);
     }
 
+    // familiarPrincipalKey names who a session is: a user, or a shard
+    // (which acts for its owner). Empty for no session.
+    function familiarPrincipalKey(s) {
+        if (!s || !s.authenticated) return "";
+        return s.principal_type === "shard" ? "s:" + (s.shard_id || "") : "u:" + (s.user || "");
+    }
+    window.familiarPrincipalKey = familiarPrincipalKey;
+
     function renderDashboard(session) {
         // Phase-3 role-conditional bootstrap. `session` is the full
         // auth-status response: {user, display_name, role, email,
@@ -391,10 +399,24 @@
         const principalType = (session && session.principal_type) || "user";
         const perms = (session && session.permissions) || null;
 
+        // Someone else signed in, in a tab that already showed a
+        // dashboard (an idled-out session, then a kiosk login on a shared
+        // device). Start clean: nothing reset the previous principal's
+        // open chat, notes, Home pins or panel permissions, so the next
+        // one saw and used them.
+        const prevPrincipal = familiarPrincipalKey(window.FAMILIAR_SESSION);
+        if (prevPrincipal && prevPrincipal !== familiarPrincipalKey(session)) {
+            location.reload();
+            return;
+        }
+
         document.body.dataset.role = role;
         document.body.dataset.principalType = principalType;
         applyPermissionEnvelope(perms);
         window.FAMILIAR_SESSION = session || {};
+        if (window.FamiliarWorkspace && window.FamiliarWorkspace.bindPrincipal) {
+            window.FamiliarWorkspace.bindPrincipal(familiarPrincipalKey(session));
+        }
         applyMaintenanceBanner(session && session.maintenance);
 
         // DESIGN.md: user identity now lives in the
@@ -1363,6 +1385,9 @@
                 try {
                     await apiJSON("/console/api/auth/logout", { method: "POST" });
                 } catch (e2) { /* ignore */ }
+                if (window.FamiliarWorkspace && window.FamiliarWorkspace.forgetPrincipal) {
+                    window.FamiliarWorkspace.forgetPrincipal();
+                }
                 location.reload();
             });
         }
@@ -2154,6 +2179,8 @@
         // gated server-side; the rendering is harmless for non-admins).
         const enrollGo = document.getElementById("user-enroll-go");
         if (enrollGo) enrollGo.addEventListener("click", adminGenerateEnrollmentLink);
+        const enrollRevoke = document.getElementById("user-enroll-revoke");
+        if (enrollRevoke) enrollRevoke.addEventListener("click", adminRevokeEnrollmentLinks);
         const enrollCopy = document.getElementById("user-enroll-copy");
         if (enrollCopy) {
             enrollCopy.addEventListener("click", async () => {
@@ -2625,6 +2652,27 @@
                 "share with " + usersState.currentID + " (valid " + validFor + "):";
         } catch (e) {
             msg.textContent = "Couldn't generate link: " + (e.message || e);
+        }
+    }
+
+    // Ends every enrollment link the user hasn't used yet: one pasted
+    // into the wrong chat would otherwise add a passkey for 48h.
+    async function adminRevokeEnrollmentLinks() {
+        const result = document.getElementById("user-enroll-result");
+        const msg = document.getElementById("user-enroll-msg");
+        const urlInput = document.getElementById("user-enroll-url");
+        if (!usersState.currentID || !result || !msg) return;
+        if (!confirm("Revoke every unused enrollment link for " + usersState.currentID + "?")) return;
+        result.hidden = false;
+        if (urlInput) urlInput.value = "";
+        try {
+            const resp = await apiJSON("/console/api/users/" + encodeURIComponent(usersState.currentID) + "/enrollment-tokens", {
+                method: "DELETE",
+            });
+            const n = resp.revoked || 0;
+            msg.textContent = n ? ("Revoked " + n + " unused link" + (n === 1 ? "" : "s") + ".") : "No unused links to revoke.";
+        } catch (e) {
+            msg.textContent = "Couldn't revoke links: " + (e.message || e);
         }
     }
 

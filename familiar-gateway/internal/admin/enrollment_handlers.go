@@ -28,6 +28,7 @@ package admin
 //     in by this — they must authenticate normally after.
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -103,6 +104,13 @@ func (h *Handler) createEnrollmentToken(w http.ResponseWriter, r *http.Request) 
 	if canonical != au.UserID && !au.IsAdmin() {
 		writeJSONError(w, http.StatusForbidden,
 			"only admins can issue enrollment tokens for other users")
+		return
+	}
+	// A link for an id that isn't an approved user would register a
+	// passkey for nobody (the credentials table has no foreign key), and
+	// a later account created under that id would inherit it.
+	if err := h.enrollTargetUsable(r.Context(), canonical); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -395,6 +403,10 @@ func (h *Handler) enrollBegin(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if err := h.enrollTargetUsable(r.Context(), tok.CanonicalID); err != nil {
+		writeJSONError(w, http.StatusForbidden, err.Error())
+		return
+	}
 
 	// Existing creds for this user — passed to BeginRegistration so
 	// the browser's authenticator selection knows to exclude
@@ -436,9 +448,9 @@ type enrollFinishRequest struct {
 	Attestation json.RawMessage `json:"attestation"`
 }
 
-// enrollFinish validates the attestation, writes the credential,
-// and consumes the token. On any failure the token stays valid —
-// the user can retry without re-issuing.
+// enrollFinish validates the attestation, consumes the token, then
+// writes the credential. A failed ceremony leaves the token valid for a
+// retry; once the credential is being stored, the link is spent.
 func (h *Handler) enrollFinish(w http.ResponseWriter, r *http.Request) {
 	if h.enrollTokens == nil {
 		writeJSONError(w, http.StatusServiceUnavailable, "enrollment not configured")
@@ -452,6 +464,10 @@ func (h *Handler) enrollFinish(w http.ResponseWriter, r *http.Request) {
 	tok, rp, err := h.resolveEnrollmentToken(r, body.Token)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := h.enrollTargetUsable(r.Context(), tok.CanonicalID); err != nil {
+		writeJSONError(w, http.StatusForbidden, err.Error())
 		return
 	}
 	entry, ok := h.pending.take(tok.Token)
@@ -498,15 +514,13 @@ func (h *Handler) enrollFinish(w http.ResponseWriter, r *http.Request) {
 		prefix = "Security key"
 	}
 	label := fmt.Sprintf("%s — %s (%s)", prefix, tok.CanonicalID, time.Now().UTC().Format("2006-01-02"))
-	if err := h.credentials.Insert(r.Context(), tok.CanonicalID, label, cred); err != nil {
+	if err := h.storeEnrolledCredential(r.Context(), tok, label, cred); err != nil {
+		if errors.Is(err, ErrEnrollmentTokenInvalid) {
+			writeJSONError(w, http.StatusBadRequest, "this enrollment link has already been used, revoked or has expired")
+			return
+		}
 		writeJSONError(w, http.StatusInternalServerError, "store credential: "+err.Error())
 		return
-	}
-	if err := h.enrollTokens.Consume(r.Context(), tok.Token); err != nil {
-		// Credential is already written; log but don't fail the
-		// user — they'd retry, find the credential exists, get
-		// confused. Token will be cleaned by sweep.
-		// (no-op)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":            true,
@@ -514,6 +528,51 @@ func (h *Handler) enrollFinish(w http.ResponseWriter, r *http.Request) {
 		"canonical_id":  tok.CanonicalID,
 		"credential_id": encodeCredentialID(cred.ID),
 	})
+}
+
+// storeEnrolledCredential spends the token, then stores the credential.
+// The other order (store, then consume and ignore a failure) let two
+// overlapping ceremonies on one link each add a passkey.
+func (h *Handler) storeEnrolledCredential(ctx context.Context, tok *EnrollmentToken, label string, cred *webauthn.Credential) error {
+	if err := h.enrollTokens.Consume(ctx, tok.Token); err != nil {
+		return err
+	}
+	return h.credentials.Insert(ctx, tok.CanonicalID, label, cred)
+}
+
+// enrollTargetUsable refuses a link for a user who doesn't exist or
+// isn't approved.
+func (h *Handler) enrollTargetUsable(ctx context.Context, userID string) error {
+	if h.users == nil {
+		return nil
+	}
+	u, err := h.users.GetUser(ctx, userID)
+	if err != nil && !errors.Is(err, identity.ErrUserNotFound) {
+		return err
+	}
+	if u == nil {
+		return fmt.Errorf("no user %q", userID)
+	}
+	if u.Status != identity.StatusApproved {
+		return fmt.Errorf("user %q is %s, not approved", userID, u.Status)
+	}
+	return nil
+}
+
+// revokeEnrollmentTokens serves DELETE /console/api/users/{id}/enrollment-tokens
+// (admin): ends every unused link for the user, for a link sent to the
+// wrong place.
+func (h *Handler) revokeEnrollmentTokens(w http.ResponseWriter, r *http.Request) {
+	if h.enrollTokens == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "enrollment not configured")
+		return
+	}
+	n, err := h.enrollTokens.RevokeActive(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"revoked": n})
 }
 
 // resolveEnrollmentToken validates the token + inbound Host: the

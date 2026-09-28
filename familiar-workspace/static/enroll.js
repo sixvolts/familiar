@@ -11,7 +11,10 @@
         const params = new URLSearchParams(location.search);
         const token = params.get("token") || "";
 
+        // #status is a live region, so screen readers announce each
+        // outcome; a failure is an alert (announced at once).
         function setStatus(kind, message) {
+            status.setAttribute("role", kind === "err" ? "alert" : "status");
             status.className = "status is-" + kind;
             status.textContent = message;
         }

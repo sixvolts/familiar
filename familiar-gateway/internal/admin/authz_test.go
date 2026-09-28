@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -55,7 +56,7 @@ func (f *fakeUserManager) SetUserStatus(ctx context.Context, userID string, stat
 func (f *fakeUserManager) LinkIdentity(ctx context.Context, userID, platform, platformID, displayName string) error {
 	return nil
 }
-func (f *fakeUserManager) UnlinkIdentity(ctx context.Context, platform, platformID string) error {
+func (f *fakeUserManager) UnlinkIdentity(ctx context.Context, userID, platform, platformID string) error {
 	return nil
 }
 func (f *fakeUserManager) SetUserRole(ctx context.Context, userID, role string) error {
@@ -80,7 +81,7 @@ func (f *fakeUserManager) CountAdmins(ctx context.Context) (int, error) {
 	}
 	n := 0
 	for _, u := range f.users {
-		if u.Role == "admin" {
+		if u.Role == "admin" && u.Status == identity.StatusApproved {
 			n++
 		}
 	}
@@ -528,7 +529,7 @@ func TestEnsureNotLastAdmin_CountError(t *testing.T) {
 	// If CountAdmins errors, the guard should surface it rather
 	// than silently allow a dangerous demotion.
 	fm := &fakeUserManager{
-		users:      map[string]*identity.User{"owner": {ID: "owner", Role: "admin"}},
+		users:      map[string]*identity.User{"owner": {ID: "owner", Role: "admin", Status: identity.StatusApproved}},
 		adminCount: -1,
 	}
 	h := &Handler{users: &countErrorUserManager{fakeUserManager: *fm}}
@@ -538,10 +539,90 @@ func TestEnsureNotLastAdmin_CountError(t *testing.T) {
 	}
 }
 
+// A disabled admin can't sign in, so it doesn't count as a remaining
+// admin: demoting the only approved one is still refused.
+func TestEnsureNotLastAdmin_DisabledAdminsDontCount(t *testing.T) {
+	h := &Handler{users: &fakeUserManager{
+		users: map[string]*identity.User{
+			"owner":  {ID: "owner", Role: "admin", Status: identity.StatusApproved},
+			"former": {ID: "former", Role: "admin", Status: identity.StatusDisabled},
+		},
+		adminCount: -1,
+	}}
+	if err := h.ensureNotLastAdmin(context.Background(), "owner"); err == nil {
+		t.Error("demoting the only approved admin was allowed because a disabled admin exists")
+	}
+	// Changing the disabled one takes no one away.
+	if err := h.ensureNotLastAdmin(context.Background(), "former"); err != nil {
+		t.Errorf("a disabled admin's change was refused: %v", err)
+	}
+}
+
+// The status route has the same guard as the role route: the sole
+// admin can't disable (or deny) themselves or be disabled.
+func TestSetUserStatus_KeepsTheLastApprovedAdmin(t *testing.T) {
+	fm := &fakeUserManager{
+		users: map[string]*identity.User{
+			"owner":  {ID: "owner", Role: "admin", Status: identity.StatusApproved},
+			"alison": {ID: "alison", Role: "user", Status: identity.StatusApproved},
+		},
+		adminCount: -1,
+	}
+	h := &Handler{users: fm}
+	for _, status := range []string{"disabled", "denied", "pending"} {
+		req := httptest.NewRequest(http.MethodPost, "/console/api/users/owner/status",
+			strings.NewReader(`{"status":"`+status+`"}`))
+		req.SetPathValue("id", "owner")
+		rec := httptest.NewRecorder()
+		h.setUserStatus(rec, req)
+		if rec.Code != http.StatusConflict {
+			t.Errorf("%s the last admin: status %d, want 409", status, rec.Code)
+		}
+		if fm.users["owner"].Status != identity.StatusApproved {
+			t.Fatalf("%s went through: owner is now %s", status, fm.users["owner"].Status)
+		}
+	}
+	// Other users are unaffected.
+	req := httptest.NewRequest(http.MethodPost, "/console/api/users/alison/status", strings.NewReader(`{"status":"disabled"}`))
+	req.SetPathValue("id", "alison")
+	rec := httptest.NewRecorder()
+	h.setUserStatus(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("disabling a user: status %d, want 200", rec.Code)
+	}
+}
+
 // countErrorUserManager forces CountAdmins to fail so the guard's
 // error-propagation path is exercised.
 type countErrorUserManager struct{ fakeUserManager }
 
 func (c *countErrorUserManager) CountAdmins(ctx context.Context) (int, error) {
 	return 0, errors.New("db unavailable")
+}
+
+// The lookup returns emails only to admins, or to a caller who typed the
+// whole address. It used to hand every signed-in user (a kiosk shard
+// included) the email of every prefix match.
+func TestLookupUsers_EmailsOnlyForAdminsOrExactMatch(t *testing.T) {
+	bob := "bob@corp.example"
+	h := &Handler{users: &fakeUserManager{users: map[string]*identity.User{
+		"bob": {ID: "bob", DisplayName: "Bob", Status: identity.StatusApproved, Email: &bob},
+	}, adminCount: -1}}
+	get := func(q string, who AuthUser) string {
+		req := httptest.NewRequest(http.MethodGet, "/console/api/users/lookup?q="+url.QueryEscape(q), nil)
+		req = req.WithContext(context.WithValue(req.Context(), ctxAuthUserKey, who))
+		rec := httptest.NewRecorder()
+		h.lookupUsers(rec, req)
+		return rec.Body.String()
+	}
+	user := AuthUser{UserID: "sam", Role: "user"}
+	if body := get("bo", user); !strings.Contains(body, `"id":"bob"`) || strings.Contains(body, bob) {
+		t.Errorf("prefix lookup by a user: %s", body)
+	}
+	if body := get(bob, user); !strings.Contains(body, bob) {
+		t.Errorf("a user who typed the whole address doesn't get it back: %s", body)
+	}
+	if body := get("bo", AuthUser{UserID: "boss", Role: "admin"}); !strings.Contains(body, bob) {
+		t.Errorf("admin lookup lost the email: %s", body)
+	}
 }

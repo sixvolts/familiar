@@ -167,3 +167,37 @@ func TestStripsIdentityHeaders(t *testing.T) {
 		}
 	}
 }
+
+// X-Forwarded-* describe this hop only. X-Forwarded-For used to come out
+// as "203.0.113.7:54321, 203.0.113.7" (the manual ip:port plus
+// ReverseProxy's own), a client-sent X-Forwarded-For was passed along as
+// if trusted, and "Connection: X-Forwarded-Host" deleted the value set
+// here (hop-by-hop stripping ran after the Director).
+func TestForwardedHeadersAreThisHopOnly(t *testing.T) {
+	var got *http.Request
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Clone(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer gateway.Close()
+	p, err := New(gateway.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("GET", "/console/api/x?y=1", nil)
+	req.Host = "host-a.example.test"
+	req.RemoteAddr = "203.0.113.7:54321"
+	req.Header.Set("X-Forwarded-For", "10.9.9.9")
+	req.Header.Set("Connection", "X-Forwarded-Host")
+	p.ServeHTTP(httptest.NewRecorder(), req)
+
+	if xff := got.Header.Get("X-Forwarded-For"); xff != "203.0.113.7" {
+		t.Errorf("X-Forwarded-For = %q, want just the client IP", xff)
+	}
+	if h := got.Header.Get("X-Forwarded-Host"); h != "host-a.example.test" {
+		t.Errorf("X-Forwarded-Host = %q, want host-a.example.test", h)
+	}
+	if got.Host != "host-a.example.test" || got.URL.RawQuery != "y=1" || got.URL.Path != "/console/api/x" {
+		t.Errorf("forwarded as Host %q, %s?%s", got.Host, got.URL.Path, got.URL.RawQuery)
+	}
+}

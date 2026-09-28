@@ -144,3 +144,20 @@ test("disabling a user kills their live session on the next request", async ({ s
     await setUserStatus(user.id, "approved");
     expect((await request.get(url, { headers })).ok()).toBeTruthy();
 });
+
+// A state change carrying the session cookie from another origin is
+// refused, on the console API and on /api/chat. There was no check:
+// SameSite=Lax still sends the cookie from a sibling subdomain.
+test("state changes from another origin are refused, even with the session cookie", async ({ stack, request }) => {
+    const user = await createTestUser();
+    const from = (origin: string) => ({ Cookie: user.cookieHeader, "Content-Type": "application/json", Origin: origin });
+    const evil = from("https://evil.example");
+    expect((await request.post(`${stack.workspaceURL}/console/api/books`, { headers: evil, data: { name: "csrf" } })).status()).toBe(403);
+    expect((await request.post(`${stack.workspaceURL}/api/chat`, { headers: evil, data: { message: "hi" } })).status()).toBe(403);
+    // The app's own origin is fine.
+    const ok = await request.post(`${stack.workspaceURL}/console/api/books`, {
+        headers: from(stack.workspaceURL),
+        data: { name: `csrf ok ${Date.now().toString(36)}` },
+    });
+    expect(ok.ok(), `own origin: HTTP ${ok.status()}`).toBeTruthy();
+});

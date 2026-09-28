@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -154,6 +155,7 @@ type Adapter struct {
 	cfg           config.HTTPConfig
 	verbose       bool
 	adminHandler  http.Handler
+	guard         func(http.Handler) http.Handler
 	shardsHandler http.Handler
 	memEvents     *memevents.Bus
 	sessionReader SessionReader
@@ -251,6 +253,15 @@ func (a *Adapter) SetShardChatResolver(r ShardChatResolver) {
 	a.shardChat = r
 }
 
+// SetRequestGuard wraps every route the adapter serves (the console,
+// /api/chat, the rest) in guard. The gateway passes the admin handler's
+// CSRF guard, which knows the session cookie and the allowed origins.
+func (a *Adapter) SetRequestGuard(guard func(http.Handler) http.Handler) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.guard = guard
+}
+
 // SetAdminHandler mounts the admin/console handler at both /console/
 // and /admin/ (the latter 301s to the former internally; both
 // registrations are required so the redirect lands somewhere).
@@ -314,20 +325,47 @@ func (a *Adapter) buildMux() *http.ServeMux {
 	return mux
 }
 
+// rootHandler is everything the server serves: the routes, inside the
+// request guard (when one is set), inside logging and CORS.
+func (a *Adapter) rootHandler() http.Handler {
+	var handler http.Handler = a.buildMux()
+	a.mu.Lock()
+	if a.guard != nil {
+		handler = a.guard(handler)
+	}
+	a.mu.Unlock()
+	return withCORS(withLogging(handler))
+}
+
+// DefaultListenAddr is where the gateway listens when [adapter.http]
+// sets no listen_addr: loopback, behind the workspace, which is the only
+// public listener. It used to be 0.0.0.0, exposing the whole API (the
+// first-run registration endpoint included) over plain HTTP to anything
+// that could reach the port.
+const DefaultListenAddr = "127.0.0.1:8000"
+
+func listenAddr(configured string) string {
+	if configured == "" {
+		return DefaultListenAddr
+	}
+	return configured
+}
+
 // Run starts the HTTP server. Blocks until ctx is cancelled or the
 // server fails. Graceful shutdown waits up to 5s for in-flight
 // requests.
 func (a *Adapter) Run(ctx context.Context) error {
-	mux := a.buildMux()
 
-	addr := a.cfg.ListenAddr
-	if addr == "" {
-		addr = "0.0.0.0:8000"
+	addr := listenAddr(a.cfg.ListenAddr)
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		if ip := net.ParseIP(host); host == "" || (ip != nil && !ip.IsLoopback()) {
+			log.Printf("[http] listening on %s: NOT loopback. The workspace is meant to be the only public listener; the gateway serves plain HTTP", addr)
+		}
 	}
 
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           withCORS(withLogging(mux)),
+		Handler:           a.rootHandler(),
 		ReadHeaderTimeout: 30 * time.Second,
 		WriteTimeout:      600 * time.Second,
 		IdleTimeout:       60 * time.Second,

@@ -198,3 +198,22 @@ func TestGetEmbeddingsProvider(t *testing.T) {
 		t.Errorf("embeddings model should build as a Provider for health checks: %v", err)
 	}
 }
+
+// config.Validate rejects providers and formatters outside
+// config.KnownProviders / KnownFormatters; those sets must be exactly
+// what buildProvider and pickFormatter build.
+func TestBuildProvider_MatchesConfigKnownProviders(t *testing.T) {
+	for p := range config.KnownProviders {
+		if _, err := buildProvider(config.ModelConfig{ID: "m", Provider: p, Endpoint: "http://m"}, ""); err != nil {
+			t.Errorf("known provider %q doesn't build: %v", p, err)
+		}
+	}
+	for f := range config.KnownFormatters {
+		if _, err := pickFormatter(f); err != nil {
+			t.Errorf("known formatter %q doesn't build: %v", f, err)
+		}
+	}
+	if _, err := buildProvider(config.ModelConfig{ID: "m", Provider: "anthropic", Endpoint: "e"}, ""); err == nil {
+		t.Error("an unknown provider built")
+	}
+}

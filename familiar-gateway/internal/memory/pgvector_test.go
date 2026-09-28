@@ -334,6 +334,13 @@ func TestSanitizeDSN(t *testing.T) {
 		{"postgres://user:secret@host/db", "postgres://user:***@host/db"},
 		{"postgres://user@host/db", "postgres://user@host/db"},
 		{"host/db", "host/db"},
+		// A password containing @, and one inside an error message.
+		{"postgresql://u:p@ss@host/db", "postgresql://u:***@host/db"},
+		{`parse "postgresql://familiar:s3cr%zzet@localhost:5432/familiar": invalid URL escape "%zz"`,
+			`parse "postgresql://familiar:***@localhost:5432/familiar": invalid URL escape "%zz"`},
+		// Key-value form, quoted with spaces.
+		{"host=h password='a b c' dbname=d", "host=h password=*** dbname=d"},
+		{"host=h password=plain dbname=d", "host=h password=*** dbname=d"},
 	}
 	for _, tc := range cases {
 		if got := db.SanitizeDSN(tc.in); got != tc.want {

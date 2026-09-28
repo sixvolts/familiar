@@ -76,8 +76,9 @@ See `tests/e2e/MAKE_TESTS.md` for the E2E harness details.
 ## Configuration
 
 `config.example.toml` documents every gateway block. System prompts live in
-`prompts/` as a tiered set (`base.md`, `tier_*.md`, `tool_policy.md`); point
-`[system_prompt].dir` at it. The single config knobs you must set for a usable
+`prompts/tiers/` as a tiered set (`base.md`, `tier_*.md`, `tool_policy.md`);
+point `[system_prompt].prompt_dir` at that directory (the key is `prompt_dir`,
+not `dir`; an unknown key is reported at boot and otherwise ignored). The single config knobs you must set for a usable
 instance: `[adapter.http].listen_addr`, `[memory].local_dsn`, at least one
 `[[models]]` chat model (with `"tools"` in its capabilities), `[system_prompt]`,
 and the `[admin]` WebAuthn relying-party (`rp_id` / `rp_origins`).

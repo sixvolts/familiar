@@ -14,6 +14,7 @@ import (
 
 	"github.com/familiar/gateway/internal/db"
 	"github.com/familiar/gateway/internal/safego"
+	"github.com/lib/pq"
 )
 
 // Relationship is one (subject, predicate, object) triple extracted
@@ -38,7 +39,9 @@ type Relationship struct {
 // lookups keyed by retrieved memory contents, and the write path
 // needs an upsert that collapses (subject, predicate) pairs to one
 // row so IP changes / version bumps replace the previous value
-// instead of accumulating contradictory triples.
+// instead of accumulating contradictory triples — except links_to,
+// where a page has one edge per link (ReplacePageLinks keeps the set
+// current).
 type RelationshipStore interface {
 	UpsertRelationships(ctx context.Context, rels []Relationship) error
 	RelatedForContents(ctx context.Context, contents []string, userID string, limit int) ([]Relationship, error)
@@ -108,7 +111,7 @@ func (s *PgRelationshipStore) UpsertRelationships(ctx context.Context, rels []Re
 		_, err := s.db.ExecContext(ctx, `
 			INSERT INTO relationships (subject, predicate, object, user_id, source_fact, confidence, scope_tag, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5::uuid, $6, $7, $8, $8)
-			ON CONFLICT (subject, predicate, user_id_key) DO UPDATE
+			ON CONFLICT `+conflictTarget(r.Predicate)+` DO UPDATE
 			SET object      = EXCLUDED.object,
 			    source_fact = EXCLUDED.source_fact,
 			    confidence  = EXCLUDED.confidence,
@@ -123,6 +126,51 @@ func (s *PgRelationshipStore) UpsertRelationships(ctx context.Context, rels []Re
 		}
 	}
 	return nil
+}
+
+// linksTo is the one multi-valued predicate: a page links to many
+// pages, one edge each.
+const linksTo = "links_to"
+
+// conflictTarget is the ON CONFLICT target matching the unique index
+// that covers predicate (relationships_links_multi).
+func conflictTarget(predicate string) string {
+	if strings.EqualFold(predicate, linksTo) {
+		return `(subject, object, user_id_key) WHERE predicate = 'links_to'`
+	}
+	return `(subject, predicate, user_id_key) WHERE predicate <> 'links_to'`
+}
+
+// ReplacePageLinks makes subject's links_to edges in scopeTag exactly
+// objects, owned by userID: edges to pages no longer linked are
+// deleted (whoever saved them; a page's links are the page's, not a
+// member's), and the rest upserted. A page saved with no links keeps
+// none.
+func (s *PgRelationshipStore) ReplacePageLinks(ctx context.Context, subject, userID, scopeTag string, objects []string) error {
+	subject = strings.ToLower(subject)
+	lower := make([]string, 0, len(objects))
+	for _, o := range objects {
+		if o != "" {
+			lower = append(lower, strings.ToLower(o))
+		}
+	}
+	var scopeArg any
+	if scopeTag != "" {
+		scopeArg = scopeTag
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		DELETE FROM relationships
+		 WHERE subject = $1 AND predicate = 'links_to'
+		   AND scope_tag IS NOT DISTINCT FROM $2
+		   AND NOT (object = ANY($3::text[]) AND user_id_key = $4)`,
+		subject, scopeArg, pq.Array(lower), userID); err != nil {
+		return fmt.Errorf("replace links of %s: %w", subject, err)
+	}
+	rels := make([]Relationship, 0, len(lower))
+	for _, o := range lower {
+		rels = append(rels, Relationship{Subject: subject, Predicate: linksTo, Object: o, UserID: userID, ScopeTag: scopeTag, Confidence: 1.0})
+	}
+	return s.UpsertRelationships(ctx, rels)
 }
 
 // InsertRelationshipsIfAbsent adds the triples that aren't stored yet
@@ -154,7 +202,7 @@ func (s *PgRelationshipStore) InsertRelationshipsIfAbsent(ctx context.Context, r
 		res, err := s.db.ExecContext(ctx, `
 			INSERT INTO relationships (subject, predicate, object, user_id, source_fact, confidence, scope_tag, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5::uuid, $6, $7, NOW(), NOW())
-			ON CONFLICT (subject, predicate, user_id_key) DO NOTHING`,
+			ON CONFLICT `+conflictTarget(r.Predicate)+` DO NOTHING`,
 			strings.ToLower(r.Subject), strings.ToLower(r.Predicate), strings.ToLower(r.Object),
 			userArg, sourceArg, conf, scopeArg)
 		if err != nil {

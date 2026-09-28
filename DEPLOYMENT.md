@@ -223,7 +223,7 @@ display_name    = "Local Chat"
 # For a hosted API instead, e.g.:
 #   provider = "openai"      # valid: llama-server | openai | ollama | vllm | llama-completion
 #   endpoint = "https://api.openai.com/v1"   # any OpenAI-compatible base URL
-#   api_key  = "sk-..."      # inline (test only) — or use vault_key for the encrypted vault
+#   api_key  = "${OPENAI_API_KEY}"  # expanded from the environment; there is no vault
 # (There is no dedicated "anthropic" provider — reach Anthropic via an
 #  OpenAI-compatible endpoint under provider = "openai".)
 
@@ -463,8 +463,9 @@ familiar-gateway` → health check:
 cd ~/repos/familiar-engine && ./familiar-deploy.sh
 ```
 
-(It assumes the repo is at `~/repos/familiar-engine` and a `familiar-gateway`
-systemd unit exists.)
+(It deploys the checkout it is run from — set `FAMILIAR_REPO` to deploy another
+— and assumes a `familiar-gateway` systemd unit whose paths point at that same
+checkout; the unit templates in `systemd/` use `~/repos/familiar-engine`.)
 
 Workspace **binary** change (Go code under `familiar-workspace/`, not static):
 `cd familiar-workspace && make build && sudo systemctl restart familiar-workspace`.

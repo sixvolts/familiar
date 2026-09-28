@@ -18,6 +18,7 @@ ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 GATEWAY_DIR="$ROOT_DIR/familiar-gateway"
 
 FAMILIAR_HOME="${FAMILIAR_HOME:-$HOME/.familiar}"
+export FAMILIAR_HOME   # the gateway reads its config and default paths from it
 BUILD=true
 RUN_SIDECAR=true
 RUN_DB=true
@@ -80,15 +81,17 @@ if $RUN_DB; then
         docker compose -f "$ROOT_DIR/docker-compose.yml" up -d
         echo "    Waiting for Postgres to be ready..."
         TRIES=0
+        PG_READY=true
         until docker compose -f "$ROOT_DIR/docker-compose.yml" exec -T postgres pg_isready -U familiar >/dev/null 2>&1; do
             sleep 1
             TRIES=$((TRIES + 1))
             if [ $TRIES -ge 30 ]; then
                 echo "    WARNING: Postgres not ready after 30s — continuing without DB."
+                PG_READY=false
                 break
             fi
         done
-        echo "    Postgres ready."
+        $PG_READY && echo "    Postgres ready."
     else
         echo "    WARNING: No PostgreSQL available. Memory store will not persist."
     fi
@@ -174,6 +177,20 @@ fi
 echo "==> Starting gateway..."
 GATEWAY_BIN="$GATEWAY_DIR/familiar-gateway"
 [ -x "$GATEWAY_BIN" ] || GATEWAY_BIN="$GATEWAY_DIR/gateway"
+
+# Without --http or --slack the gateway runs the interactive CLI, which
+# reads this terminal: run it in the foreground. Backgrounded, its stdin
+# was /dev/null, it read EOF and exited at once, and the exit trap tore
+# down everything just started.
+case " $GATEWAY_FLAGS " in
+    *" --http "*|*" --slack "*) ;;
+    *)
+        echo "==> Familiar CLI (Ctrl-D to quit)"
+        # shellcheck disable=SC2086
+        "$GATEWAY_BIN" $GATEWAY_FLAGS
+        exit $?
+        ;;
+esac
 
 # shellcheck disable=SC2086
 "$GATEWAY_BIN" $GATEWAY_FLAGS &

@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="${FAMILIAR_REPO:-$HOME/repos/familiar}"
+# The checkout this script is in (FAMILIAR_REPO overrides). It was a
+# hardcoded ~/repos/familiar while the docs and units used
+# ~/repos/familiar-engine, so on a box with both it could build one tree
+# and restart the other.
+REPO="${FAMILIAR_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 GATEWAY="$REPO/familiar-gateway"
 WORKSPACE="$REPO/familiar-workspace"
 

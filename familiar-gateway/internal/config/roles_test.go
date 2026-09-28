@@ -226,7 +226,7 @@ func TestValidateAcceptsMatchedEmbedderChain(t *testing.T) {
 	c.Models = []ModelConfig{
 		{ID: "ea", Endpoint: "e", Provider: "embeddings", Model: "nomic", Dimension: 768},
 		{ID: "eb", Endpoint: "e", Provider: "embeddings", Model: "nomic", Dimension: 768},
-		{ID: "chat", Endpoint: "e", Chat: true},
+		{ID: "chat", Endpoint: "e", Provider: "llama-server", Chat: true},
 	}
 	c.Roles.Embedder = RoleChain{Primary: "ea", Backup: "eb"}
 	c.normalizeRoles()

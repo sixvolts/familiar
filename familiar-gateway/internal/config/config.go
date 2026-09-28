@@ -62,6 +62,9 @@ type Config struct {
 	// ignored names the keys in the file that nothing reads (see
 	// ignoredKeys); Validate warns about each.
 	ignored []string `toml:"-"`
+	// unknown names the keys in the file that match no field (typos,
+	// keys that were renamed or removed); Validate warns about each.
+	unknown []string `toml:"-"`
 }
 
 // PushConfig holds the VAPID keypair the Web Push subsystem signs with
@@ -1165,7 +1168,7 @@ type SlackConfig struct {
 // rejected with 401; the native adapter requires a workspace
 // session cookie (the X-User-Email path was removed).
 type HTTPConfig struct {
-	ListenAddr string `toml:"listen_addr"` // e.g., "0.0.0.0:8000"
+	ListenAddr string `toml:"listen_addr"` // default 127.0.0.1:8000 (native.DefaultListenAddr)
 
 	// Identity / auth on /api/chat is the admin session cookie only —
 	// a server-verified canonical identity. Two prior knobs were
@@ -1193,8 +1196,7 @@ type EmbedderConfig struct {
 
 // DefaultConfig returns a config with sensible defaults.
 func DefaultConfig() *Config {
-	home, _ := os.UserHomeDir()
-	_ = home // home was used by the legacy engine socket path
+	home := FamiliarHome()
 	return &Config{
 		Sleep: DefaultSleepConfig(),
 		Node: NodeConfig{
@@ -1254,7 +1256,7 @@ func DefaultConfig() *Config {
 		},
 		Adapter: AdapterConfig{
 			CLI: CLIConfig{
-				HistoryFile: filepath.Join(home, ".familiar", "cli_history"),
+				HistoryFile: filepath.Join(home, "cli_history"),
 				Prompt:      "> ",
 			},
 		},
@@ -1263,10 +1265,22 @@ func DefaultConfig() *Config {
 			Dimension: 768,
 		},
 		SystemPrompt: SystemPromptConfig{
-			Dir:  "~/.familiar/prompts",
-			File: "~/.familiar/system_prompt.md",
+			Dir:  filepath.Join(home, "prompts"),
+			File: filepath.Join(home, "system_prompt.md"),
 		},
 	}
+}
+
+// FamiliarHome is the gateway's home directory: $FAMILIAR_HOME when
+// set, else ~/.familiar. The config file is looked for there and the
+// default skills, media, prompt and history paths live under it. The
+// systemd units and scripts set FAMILIAR_HOME, and nothing read it.
+func FamiliarHome() string {
+	if h := os.Getenv("FAMILIAR_HOME"); h != "" {
+		return h
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".familiar")
 }
 
 // Load reads and parses a TOML config file, applying env var expansion and
@@ -1284,6 +1298,13 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parsing config %s: %w", path, err)
 	}
 	cfg.ignored = ignoredKnobs(md)
+	cfg.unknown = UnknownKeys(md)
+
+	// The file holds the DSN password, API keys, bot tokens and the
+	// VAPID signing key.
+	if fi, err := os.Stat(path); err == nil && fi.Mode().Perm()&0o077 != 0 {
+		log.Printf("[config] warning: %s is readable by other users (mode %04o); it holds secrets — chmod 600 it", path, fi.Mode().Perm())
+	}
 
 	// Apply expansions.
 	expandConfig(cfg)
@@ -1550,7 +1571,20 @@ const legacyEmbedderModelID = "embedder/legacy"
 // participates in health checks and can be given a backup. No-op when
 // [roles.embedder] is set explicitly or no [embedder].endpoint exists.
 func (c *Config) normalizeEmbedderRole() {
-	if !c.Roles.Embedder.IsEmpty() || c.Embedder.Endpoint == "" {
+	if !c.Roles.Embedder.IsEmpty() {
+		return
+	}
+	// A model tagged role = "embedder" is the embedder. The tag was
+	// accepted and documented but read by nothing, so facts were stored
+	// without vectors.
+	for _, m := range c.Models {
+		if m.Role == ModelRoleEmbedder {
+			c.Roles.Embedder.Primary = m.ID
+			log.Printf("[config] embedder: model %q (role=embedder) is the [roles.embedder] primary", m.ID)
+			return
+		}
+	}
+	if c.Embedder.Endpoint == "" {
 		return
 	}
 	exists := false
@@ -1575,55 +1609,55 @@ func (c *Config) normalizeEmbedderRole() {
 		c.Embedder.Endpoint, legacyEmbedderModelID)
 }
 
-// expandConfig applies tilde and env var expansion to path-like fields.
+// expandConfig applies tilde and env var expansion to path-like fields
+// and to the fields that carry secrets or endpoints (see expandEnv).
 func expandConfig(cfg *Config) {
-	cfg.Adapter.CLI.HistoryFile = expandPath(cfg.Adapter.CLI.HistoryFile)
-	cfg.Adapter.CLI.Prompt = expandEnv(cfg.Adapter.CLI.Prompt)
-	cfg.Embedder.Endpoint = expandEnv(cfg.Embedder.Endpoint)
+	cfg.Adapter.CLI.HistoryFile = expandPath("adapter.cli.history_file", cfg.Adapter.CLI.HistoryFile)
+	cfg.Adapter.CLI.Prompt = expandEnv("adapter.cli.prompt", cfg.Adapter.CLI.Prompt)
+	cfg.Embedder.Endpoint = expandEnv("embedder.endpoint", cfg.Embedder.Endpoint)
 
 	for i := range cfg.Models {
-		cfg.Models[i].APIKey = expandEnv(cfg.Models[i].APIKey)
-		cfg.Models[i].Endpoint = expandEnv(cfg.Models[i].Endpoint)
+		field := fmt.Sprintf("models[%d] (%s)", i, cfg.Models[i].ID)
+		cfg.Models[i].APIKey = expandEnv(field+" api_key", cfg.Models[i].APIKey)
+		cfg.Models[i].Endpoint = expandEnv(field+" endpoint", cfg.Models[i].Endpoint)
 	}
 
-	cfg.Sidecar.SocketPath = expandPath(cfg.Sidecar.SocketPath)
-	cfg.Memory.LocalDSN = expandEnv(cfg.Memory.LocalDSN)
+	cfg.Sidecar.SocketPath = expandPath("sidecar.socket_path", cfg.Sidecar.SocketPath)
+	cfg.Memory.LocalDSN = expandEnv("memory.local_dsn", cfg.Memory.LocalDSN)
 
-	cfg.Adapter.Slack.BotToken = expandEnv(cfg.Adapter.Slack.BotToken)
-	cfg.Adapter.Slack.AppToken = expandEnv(cfg.Adapter.Slack.AppToken)
+	cfg.Adapter.Slack.BotToken = expandEnv("adapter.slack.bot_token", cfg.Adapter.Slack.BotToken)
+	cfg.Adapter.Slack.AppToken = expandEnv("adapter.slack.app_token", cfg.Adapter.Slack.AppToken)
 
-	cfg.Push.VAPIDPrivateKey = expandEnv(cfg.Push.VAPIDPrivateKey)
-
-	cfg.SystemPrompt.Dir = expandPath(cfg.SystemPrompt.Dir)
-	cfg.SystemPrompt.File = expandPath(cfg.SystemPrompt.File)
+	cfg.SystemPrompt.Dir = expandPath("system_prompt.prompt_dir", cfg.SystemPrompt.Dir)
+	cfg.SystemPrompt.File = expandPath("system_prompt.file", cfg.SystemPrompt.File)
 	if cfg.Skills.Dir == "" {
-		cfg.Skills.Dir = "~/.familiar/skills"
+		cfg.Skills.Dir = filepath.Join(FamiliarHome(), "skills")
 	}
-	cfg.Skills.Dir = expandPath(cfg.Skills.Dir)
+	cfg.Skills.Dir = expandPath("skills.dir", cfg.Skills.Dir)
 	if cfg.Media.Dir == "" {
-		cfg.Media.Dir = "~/.familiar/media"
+		cfg.Media.Dir = filepath.Join(FamiliarHome(), "media")
 	}
-	cfg.Media.Dir = expandPath(cfg.Media.Dir)
+	cfg.Media.Dir = expandPath("media.dir", cfg.Media.Dir)
 	if cfg.Media.MaxUploadMB <= 0 {
 		cfg.Media.MaxUploadMB = 10
 	}
 
-	cfg.Tools.Brave.APIKey = expandEnv(cfg.Tools.Brave.APIKey)
-	cfg.Tools.PirateWeather.APIKey = expandEnv(cfg.Tools.PirateWeather.APIKey)
+	cfg.Tools.Brave.APIKey = expandEnv("tools.brave.api_key", cfg.Tools.Brave.APIKey)
+	cfg.Tools.PirateWeather.APIKey = expandEnv("tools.pirateweather.api_key", cfg.Tools.PirateWeather.APIKey)
 
 	// Web Push VAPID keys — the private key is a secret, expand it from
 	// the environment. Default the contact subject when push is on.
-	cfg.Push.VAPIDPublicKey = expandEnv(cfg.Push.VAPIDPublicKey)
-	cfg.Push.VAPIDPrivateKey = expandEnv(cfg.Push.VAPIDPrivateKey)
-	cfg.Push.Subject = expandEnv(cfg.Push.Subject)
+	cfg.Push.VAPIDPublicKey = expandEnv("push.vapid_public_key", cfg.Push.VAPIDPublicKey)
+	cfg.Push.VAPIDPrivateKey = expandEnv("push.vapid_private_key", cfg.Push.VAPIDPrivateKey)
+	cfg.Push.Subject = expandEnv("push.subject", cfg.Push.Subject)
 	if cfg.Push.Enabled() && cfg.Push.Subject == "" {
 		cfg.Push.Subject = "mailto:admin@example.com"
 	}
 }
 
 // expandPath expands ~/ prefix and env vars in a path string.
-func expandPath(s string) string {
-	s = expandEnv(s)
+func expandPath(field, s string) string {
+	s = expandEnv(field, s)
 	if strings.HasPrefix(s, "~/") {
 		home, err := os.UserHomeDir()
 		if err == nil {
@@ -1633,7 +1667,27 @@ func expandPath(s string) string {
 	return s
 }
 
-// expandEnv expands $VAR and ${VAR} patterns.
-func expandEnv(s string) string {
-	return os.ExpandEnv(s)
+// expandEnv expands $VAR and ${VAR} in a config value; $$ is a literal
+// $. The fields expanded are listed in expandConfig. A $ that doesn't
+// name a set variable expands to nothing, as before, but is now
+// reported (by field, never by value): a password or key containing $
+// lost characters silently, and the example said nothing was expanded.
+func expandEnv(field, s string) string {
+	if !strings.Contains(s, "$") {
+		return s
+	}
+	const literal = "\x00literal-dollar\x00"
+	s = strings.ReplaceAll(s, "$$", literal)
+	unset := false
+	s = os.Expand(s, func(name string) string {
+		v, ok := os.LookupEnv(name)
+		if !ok {
+			unset = true
+		}
+		return v
+	})
+	if unset {
+		log.Printf("[config] warning: %s has a $ that doesn't name a set environment variable; that part was dropped (write $$ for a literal $)", field)
+	}
+	return strings.ReplaceAll(s, literal, "$")
 }

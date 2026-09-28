@@ -877,12 +877,40 @@ func main() {
 	} else {
 		log.Printf("[gateway] shutdown signal received — draining")
 	}
+	// Cancel the root context on every exit path, before anything is
+	// closed: on an adapter error it was cancelled only by the deferred
+	// stop, which runs after the deferred pool.Close, so background
+	// loops ran against a closed pool.
+	stop()
+	// The other adapters unwind on the cancel, each draining its own
+	// in-flight requests; wait for them rather than closing the pool
+	// under them.
+	for i := 1; i < adapterCount; i++ {
+		select {
+		case err := <-adapterErrs:
+			if err != nil && !errors.Is(err, context.Canceled) {
+				log.Printf("[gateway] adapter error while stopping: %v", err)
+			}
+		case <-time.After(shutdownWait):
+			log.Printf("[gateway] %d adapter(s) still stopping after %v — closing anyway", adapterCount-i, shutdownWait)
+			i = adapterCount
+		}
+	}
+	// Post-turn work (fact extraction, summaries) runs detached from
+	// any request; let it finish before the pool closes.
+	if pl != nil && !pl.Drain(shutdownWait) {
+		log.Printf("[gateway] post-turn work still running after %v — closing anyway", shutdownWait)
+	}
 	// Explicitly stop the consolidation cycle here, before the deferred
 	// pool.Close runs, so a mid-pass sleep query can't race the pool
 	// closing. Idempotent: the deferred eng.Close() calls Stop() again
 	// (a sync.Once no-op).
 	inProcMem.Close()
 }
+
+// shutdownWait bounds each wait of a shutdown: for the remaining
+// adapters to stop, and for post-turn work to finish.
+const shutdownWait = 15 * time.Second
 
 // openDBWithRetry opens the pool, retrying with backoff until it
 // connects or wait elapses. On a reboot the database often isn't up yet

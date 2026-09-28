@@ -40,6 +40,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/familiar/gateway/internal/classifier"
@@ -185,6 +186,9 @@ func researchNoteFrom(toolName string, data json.RawMessage) (ResearchNoteRef, b
 
 // Pipeline wires together the engine, router, and session manager.
 type Pipeline struct {
+	// background counts post-turn goroutines still running (Drain).
+	background atomic.Int64
+
 	engine            engine.Service
 	router            *router.Router
 	sessions          *session.Manager

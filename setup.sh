@@ -144,7 +144,7 @@ if ! $SKIP_DB; then
             fi
             psql -d familiar -f "$ROOT_DIR/init-db.sql" 2>/dev/null || true
         fi
-        ok "Database schema applied (facts, conversation_turns, entity_edges)"
+        ok "pgvector enabled (the gateway creates its schema on first start)"
     fi
 fi
 
@@ -162,9 +162,6 @@ if [ ! -f "$GATEWAY_CONFIG" ]; then
     echo ""
     echo "==> Generating default config at $GATEWAY_CONFIG ..."
 
-    # Detect sidecar socket path to use.
-    SIDECAR_SOCK="$SIDECAR_SOCK_DIR/sidecar.sock"
-
     # Docker Postgres needs the generated password; a native cluster
     # authenticates the local user and needs none.
     LOCAL_DSN="postgresql://familiar@localhost:5432/familiar"
@@ -172,9 +169,16 @@ if [ ! -f "$GATEWAY_CONFIG" ]; then
         PGPW=$(sed -n 's/^POSTGRES_PASSWORD=//p' "$ROOT_DIR/.env" | tail -1)
         LOCAL_DSN="postgresql://familiar:${PGPW}@localhost:5432/familiar"
     fi
-    # gateway.toml carries credentials (the DSN, tokens): owner-only.
-    (umask 077; : > "$GATEWAY_CONFIG")
-    cat > "$GATEWAY_CONFIG" <<TOML
+    # gateway.toml carries credentials (the DSN, tokens): owner-only,
+    # from creation (umask) rather than chmod-ed after the write.
+    #
+    # A minimal working config: the HTTP API and admin console on
+    # loopback, the database, the tiered prompts, and one local
+    # OpenAI-compatible chat model. It used to name the removed
+    # "anthropic" provider (every chat call failed), set keys the
+    # gateway no longer reads, and had no [adapter.http] or [admin].
+    # config.example.toml documents everything else.
+    (umask 077; cat > "$GATEWAY_CONFIG" <<TOML
 [node]
 name = "$(hostname -s)"
 role = "gateway"
@@ -183,30 +187,16 @@ role = "gateway"
 prompt = "> "
 history_file = "$FAMILIAR_HOME/cli_history"
 
-[embedder]
-endpoint = ""
-model = "nomic-embed-text"
-dimension = 768
+[adapter.http]
+listen_addr = "127.0.0.1:8000"   # the workspace proxies to it
 
-[router]
+[admin]
 enabled = true
-fallback_model = "anthropic/claude-sonnet-4-6"
-prefer_local = true
-use_sidecar_router = false
-fallback_router = "rule_based"
-confidence_threshold = 0.7
-
-[sidecar]
-enabled = false
-socket_path = "$SIDECAR_SOCK"
-connect_timeout_ms = 500
-request_timeout_ms = 5000
-retry_interval_seconds = 10
-fallback_on_failure = true
+rp_display_name = "Familiar"
+rp_id = "localhost"
+rp_origins = ["http://localhost:3000"]   # the workspace's origin
 
 [memory]
-use_sidecar_embedder = false
-store = "local"
 local_dsn = "$LOCAL_DSN"
 relevance_threshold = 0.72
 max_injected_memories = 10
@@ -215,17 +205,21 @@ dedup_threshold = 0.95
 [sleep]
 enabled = true
 
+[system_prompt]
+prompt_dir = "$ROOT_DIR/prompts/tiers"
+
+# Your chat model: any OpenAI-compatible server (llama-server, vLLM,
+# Ollama). Change the endpoint to yours.
 [[models]]
-id = "anthropic/claude-sonnet-4-6"
-provider = "anthropic"
-endpoint = "https://api.anthropic.com"
-vault_key = "anthropic_api_key"
-context_window = 200000
-capabilities = ["tool_use", "vision", "reasoning"]
-latency_profile = "remote"
-max_concurrent = 5
+id = "local/chat"
+provider = "llama-server"
+endpoint = "http://127.0.0.1:8080"
+chat = true
+context_window = 32768
+capabilities = ["tools", "conversation"]
 TOML
-    ok "Default config written to $GATEWAY_CONFIG"
+    )
+    ok "Default config written to $GATEWAY_CONFIG (edit the [[models]] endpoint)"
 else
     ok "Config already exists at $GATEWAY_CONFIG"
 fi
@@ -322,8 +316,9 @@ echo "    - Config:         $GATEWAY_CONFIG"
 echo "    - PostgreSQL:     localhost:5432/familiar"
 echo ""
 echo "  Next steps:"
-echo "    1. Store API keys via the admin UI or psql vault entries"
-echo "    2. Run:             ./run.sh"
+echo "    1. Point [[models]] in $GATEWAY_CONFIG at your model server"
+echo "       (a hosted API key goes in api_key, or \${VAR} from the environment)"
+echo "    2. Run:             ./run.sh --http"
 echo ""
 echo "  Optional:"
 echo "    - Add local models: edit [models] in $GATEWAY_CONFIG"

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -313,5 +314,24 @@ func TestTurnContext_BoundToCallerEndsWithCaller(t *testing.T) {
 
 	if CallerBound(context.Background()) || !CallerBound(dl) {
 		t.Error("CallerBound doesn't reflect the mark")
+	}
+}
+
+// Drain waits for post-turn work and gives up at its timeout.
+func TestPipeline_DrainWaitsForBackgroundWork(t *testing.T) {
+	p := &Pipeline{}
+	var done atomic.Bool
+	p.goBackground(func() { time.Sleep(100 * time.Millisecond); done.Store(true) })
+	if !p.Drain(2*time.Second) || !done.Load() {
+		t.Error("Drain returned before the post-turn work finished")
+	}
+	block := make(chan struct{})
+	p.goBackground(func() { <-block })
+	if p.Drain(50 * time.Millisecond) {
+		t.Error("Drain reported done with work still running")
+	}
+	close(block)
+	if !p.Drain(2 * time.Second) {
+		t.Error("Drain didn't see the work finish")
 	}
 }

@@ -79,6 +79,7 @@ type MemoryStore interface {
 // depend on for triple persistence.
 type RelationshipStore interface {
 	UpsertRelationships(ctx context.Context, rels []memory.Relationship) error
+	ReplacePageLinks(ctx context.Context, subject, userID, scopeTag string, objects []string) error
 }
 
 // EmbedFunc computes an embedding for a fact's content. Pipeline
@@ -524,16 +525,18 @@ func (p *Pipeline) upsertExtractedRelationships(ctx context.Context, evt SaveEve
 	}
 }
 
-// upsertLinkTriples emits one "links_to" triple per resolved
-// outbound link. Subjects + objects use the canonical
+// upsertLinkTriples sets the page's "links_to" triples to its resolved
+// outbound links, one per link. Subjects + objects use the canonical
 // "page:{book_slug}/{page_slug}" form so they sit alongside
-// content-extracted entities in the same relationship graph.
+// content-extracted entities in the same relationship graph. The set
+// is replaced, not added to: a link removed from the page loses its
+// edge, and a page saved with no links has none (it used to keep
+// whatever it had).
 func (p *Pipeline) upsertLinkTriples(ctx context.Context, evt SaveEvent, scopeTag string) {
-	if p.deps.RelStore == nil || len(evt.Links) == 0 {
+	if p.deps.RelStore == nil {
 		return
 	}
-	out := make([]memory.Relationship, 0, len(evt.Links))
-	subject := pageEntityKey(evt.BookSlug, evt.PageSlug)
+	var objects []string
 	for _, l := range evt.Links {
 		if l.TargetPageID == nil {
 			continue // broken link
@@ -542,20 +545,11 @@ func (p *Pipeline) upsertLinkTriples(ctx context.Context, evt SaveEvent, scopeTa
 		if targetBook == "" {
 			targetBook = evt.BookSlug
 		}
-		out = append(out, memory.Relationship{
-			Subject:    subject,
-			Predicate:  "links_to",
-			Object:     pageEntityKey(targetBook, l.TargetPageSlug),
-			UserID:     evt.UserID,
-			ScopeTag:   scopeTag,
-			Confidence: 1.0,
-		})
+		objects = append(objects, pageEntityKey(targetBook, l.TargetPageSlug))
 	}
-	if len(out) == 0 {
-		return
-	}
-	if err := p.deps.RelStore.UpsertRelationships(ctx, out); err != nil {
-		log.Printf("[wikiknowledge] upsert link triples failed for %s/%s: %v",
+	subject := pageEntityKey(evt.BookSlug, evt.PageSlug)
+	if err := p.deps.RelStore.ReplacePageLinks(ctx, subject, evt.UserID, scopeTag, objects); err != nil {
+		log.Printf("[wikiknowledge] replace link triples failed for %s/%s: %v",
 			evt.BookSlug, evt.PageSlug, err)
 	}
 }

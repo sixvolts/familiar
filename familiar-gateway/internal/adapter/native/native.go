@@ -351,9 +351,12 @@ func listenAddr(configured string) string {
 	return configured
 }
 
+// shutdownGrace is how long a shutdown waits for in-flight requests.
+const shutdownGrace = 5 * time.Second
+
 // Run starts the HTTP server. Blocks until ctx is cancelled or the
-// server fails. Graceful shutdown waits up to 5s for in-flight
-// requests.
+// server fails; on cancellation it returns once in-flight requests have
+// finished, or after shutdownGrace.
 func (a *Adapter) Run(ctx context.Context) error {
 
 	addr := listenAddr(a.cfg.ListenAddr)
@@ -371,18 +374,33 @@ func (a *Adapter) Run(ctx context.Context) error {
 		IdleTimeout:       60 * time.Second,
 	}
 
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		server.Shutdown(shutdownCtx)
-	}()
-
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("HTTP server error: %w", err)
+	}
 	log.Printf("[http] Listening on %s", addr)
 	log.Printf("[http] Native chat at POST /api/chat; memlog at /events/{session_id}")
+	return serve(ctx, server, ln, shutdownGrace)
+}
 
-	if err := server.ListenAndServe(); err != http.ErrServerClosed {
+// serve runs server on ln until ctx is cancelled, then shuts it down and
+// returns once the in-flight requests finish (or grace runs out).
+// Serve returns as soon as Shutdown begins, not when it's done, so
+// returning then let the process exit mid-request (a wiki save cut off
+// in its transaction) while the drain was still going.
+func serve(ctx context.Context, server *http.Server, ln net.Listener, grace time.Duration) error {
+	drained := make(chan error, 1)
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), grace)
+		defer cancel()
+		drained <- server.Shutdown(shutdownCtx)
+	}()
+	if err := server.Serve(ln); err != http.ErrServerClosed {
 		return fmt.Errorf("HTTP server error: %w", err)
+	}
+	if err := <-drained; err != nil {
+		log.Printf("[http] shutdown: in-flight requests still running after %v were cut (%v)", grace, err)
 	}
 	return nil
 }

@@ -1,26 +1,24 @@
 package main
 
 import (
-	"context"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/familiar/gateway/internal/config"
 	"github.com/familiar/gateway/internal/engine"
 )
 
-// loadConfig finds and loads the gateway config, falling back to defaults.
+// loadConfig finds and loads the gateway config, falling back to defaults:
+// $FAMILIAR_HOME/gateway.toml (~/.familiar without it), then ./gateway.toml.
 func loadConfig(explicit string) (*config.Config, error) {
 	if explicit != "" {
 		return config.Load(explicit)
 	}
 
-	home, _ := os.UserHomeDir()
 	candidates := []string{
-		filepath.Join(home, ".familiar", "gateway.toml"),
+		filepath.Join(config.FamiliarHome(), "gateway.toml"),
 		"./gateway.toml",
 	}
 
@@ -35,9 +33,13 @@ func loadConfig(explicit string) (*config.Config, error) {
 	return config.DefaultConfig(), nil
 }
 
-// makeAPIKeyFn returns a function that resolves vault keys to API key strings.
-// Resolution order: engine vault → model's api_key field → env var FAMILIAR_<ID>_KEY.
-func makeAPIKeyFn(eng engine.Service, models []config.ModelConfig) func(string) string {
+// makeAPIKeyFn returns a function that resolves a model's vault_key to its
+// API key (the router asks only for models that set one): the model's
+// api_key field, else the env var FAMILIAR_<ID>_KEY (the ID uppercased,
+// anything but letters, digits and _ as _). There is no vault: the
+// engine's VaultGet is unsupported, and asking it first cost a 3s
+// timeout per resolution for nothing.
+func makeAPIKeyFn(_ engine.Service, models []config.ModelConfig) func(string) string {
 	// Build a map from model ID to ModelConfig for env-var fallback.
 	modelsByVaultKey := make(map[string]config.ModelConfig)
 	modelsByID := make(map[string]config.ModelConfig)
@@ -49,21 +51,12 @@ func makeAPIKeyFn(eng engine.Service, models []config.ModelConfig) func(string) 
 	}
 
 	return func(vaultKey string) string {
-		// 1. Try engine vault.
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-
-		val, found, err := eng.VaultGet(ctx, vaultKey)
-		if err == nil && found && val != "" {
-			return val
-		}
-
-		// 2. Try direct api_key from config.
+		// 1. The model's api_key from config.
 		if m, ok := modelsByVaultKey[vaultKey]; ok {
 			if m.APIKey != "" {
 				return m.APIKey
 			}
-			// 3. Try env var FAMILIAR_<UPPERCASE_ID>_KEY.
+			// 2. The env var FAMILIAR_<UPPERCASE_ID>_KEY.
 			envKey := "FAMILIAR_" + strings.ToUpper(strings.ReplaceAll(m.ID, "/", "_")) + "_KEY"
 			// Replace non-alphanumeric characters with underscores.
 			envKey = sanitizeEnvKey(envKey)

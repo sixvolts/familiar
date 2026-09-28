@@ -27,12 +27,11 @@ type PromptTier struct {
 	MemoryConfig      TierMemoryConfig
 }
 
-// TierMemoryConfig lets a tier override global memory retrieval settings.
-// Zero values mean "use global default".
+// TierMemoryConfig is a tier's memory retrieval policy. How many
+// memories and how close comes from the effort resolver
+// ([effort.memory_depth.*]), not the tier.
 type TierMemoryConfig struct {
 	Enabled       bool
-	Threshold     float64
-	MaxResults    int
 	ExpandQueries bool
 }
 
@@ -57,14 +56,14 @@ var tiers = map[string]PromptTier{
 		OverlayFile:       "tier_reasoning.md",
 		IncludeToolPolicy: true,
 		MaxWebSearches:    5,
-		MemoryConfig:      TierMemoryConfig{Enabled: true, Threshold: 0.45, MaxResults: 10, ExpandQueries: true},
+		MemoryConfig:      TierMemoryConfig{Enabled: true, ExpandQueries: true},
 	},
 	"deep_reasoning": {
 		Name:              "deep",
 		OverlayFile:       "tier_deep.md",
 		IncludeToolPolicy: true,
 		MaxWebSearches:    10,
-		MemoryConfig:      TierMemoryConfig{Enabled: true, Threshold: 0.40, MaxResults: 15, ExpandQueries: true},
+		MemoryConfig:      TierMemoryConfig{Enabled: true, ExpandQueries: true},
 	},
 }
 

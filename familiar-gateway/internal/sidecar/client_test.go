@@ -16,14 +16,13 @@ type fakeEndpoints struct {
 	models map[string]string
 }
 
-func (f fakeEndpoints) EndpointForRole(role string) string { return "" }
-func (f fakeEndpoints) EndpointForModel(id string) string  { return f.models[id] }
+func (f fakeEndpoints) EndpointForModel(id string) string { return f.models[id] }
 
 // newTestClient wires a Client from explicit role chains + a health map,
 // mirroring how main.go composes the real resolver over the registry.
 func newTestClient(chains map[string][]string, health map[string]string, endpoints map[string]string) *Client {
 	res := modelrole.New(chains, func(id string) string { return health[id] })
-	return NewClient(config.SidecarConfig{Enabled: true}, config.RouterConfig{},
+	return NewClient(config.SidecarConfig{Enabled: true},
 		fakeEndpoints{models: endpoints}, res)
 }
 
@@ -33,7 +32,6 @@ func newTestClient(chains map[string][]string, health map[string]string, endpoin
 func TestTaskNamesMatchConfigRoles(t *testing.T) {
 	pairs := map[string]string{
 		TaskClassify:      config.RoleClassify,
-		TaskCondense:      config.RoleCondense,
 		TaskExpandQueries: config.RoleExpandQueries,
 		TaskExtract:       config.RoleExtract,
 		TaskExtractLarge:  config.RoleExtractLarge,
@@ -95,7 +93,7 @@ func TestTaskUnconfiguredReturnsErrNoModel(t *testing.T) {
 		t.Fatalf("unconfigured task err = %v, want ErrNoModelConfigured", err)
 	}
 	// A nil RoleResolver disables everything too.
-	c2 := NewClient(config.SidecarConfig{Enabled: true}, config.RouterConfig{}, nil, nil)
+	c2 := NewClient(config.SidecarConfig{Enabled: true}, nil, nil)
 	if _, err := c2.taskReady(TaskClassify); !errors.Is(err, ErrNoModelConfigured) {
 		t.Fatalf("nil resolver err = %v, want ErrNoModelConfigured", err)
 	}
@@ -104,18 +102,18 @@ func TestTaskUnconfiguredReturnsErrNoModel(t *testing.T) {
 func TestSharedEndpointSharesRouterAndGate(t *testing.T) {
 	c := newTestClient(
 		map[string][]string{
-			TaskClassify: {"fast"},
-			TaskCondense: {"fast"},
-			TaskExtract:  {"capable"},
+			TaskClassify:      {"fast"},
+			TaskExpandQueries: {"fast"},
+			TaskExtract:       {"capable"},
 		},
 		map[string]string{"fast": modelrole.StatusOnline, "capable": modelrole.StatusOnline},
 		map[string]string{"fast": "http://127.0.0.1:8400", "capable": "http://127.0.0.1:8200"},
 	)
-	if c.routerFor(TaskClassify) != c.routerFor(TaskCondense) {
-		t.Error("classify + condense resolve to the same endpoint — expected one shared router")
+	if c.routerFor(TaskClassify) != c.routerFor(TaskExpandQueries) {
+		t.Error("classify + expand_queries resolve to the same endpoint — expected one shared router")
 	}
-	if c.gateForTask(TaskClassify) != c.gateForTask(TaskCondense) {
-		t.Error("classify + condense should share a gate")
+	if c.gateForTask(TaskClassify) != c.gateForTask(TaskExpandQueries) {
+		t.Error("classify + expand_queries should share a gate")
 	}
 	if c.gateForTask(TaskClassify) == c.gateForTask(TaskExtract) {
 		t.Error("classify + extract are on distinct endpoints — gates must differ")
@@ -202,40 +200,4 @@ func writeAndLoadConfig(t *testing.T, body string) *config.Config {
 		t.Fatalf("loading test config: %v", err)
 	}
 	return cfg
-}
-
-func TestAvailableDefault(t *testing.T) {
-	c := &Client{stopCh: make(chan struct{})}
-	if c.Available() {
-		t.Error("new client with no resolver should not be available")
-	}
-}
-
-func TestAvailableTrueWhenATaskResolves(t *testing.T) {
-	c := newTestClient(
-		map[string][]string{TaskClassify: {"fast"}},
-		map[string]string{"fast": modelrole.StatusOnline},
-		map[string]string{"fast": "http://127.0.0.1:8400"},
-	)
-	if !c.Available() {
-		t.Error("a resolvable, online task should make the client available")
-	}
-}
-
-func TestSlotStateString(t *testing.T) {
-	tests := []struct {
-		state SlotState
-		want  string
-	}{
-		{SlotReady, "ready"},
-		{SlotLoading, "loading"},
-		{SlotError, "error"},
-		{SlotUnloading, "unloading"},
-		{SlotUnknown, "unknown"},
-	}
-	for _, tt := range tests {
-		if got := slotStateString(tt.state); got != tt.want {
-			t.Errorf("slotStateString(%d) = %q, want %q", tt.state, got, tt.want)
-		}
-	}
 }

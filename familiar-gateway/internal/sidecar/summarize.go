@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 )
@@ -43,6 +44,13 @@ type Turn struct {
 // chatComplete sends a non-streaming chat completion to the sidecar llama-server
 // and returns the first choice's message content. Thinking is disabled.
 func (r *HTTPRouter) chatComplete(ctx context.Context, systemPrompt, userPrompt string, maxTokens int, temperature float64) (string, error) {
+	content, _, err := r.chatCompleteFinish(ctx, systemPrompt, userPrompt, maxTokens, temperature)
+	return content, err
+}
+
+// chatCompleteFinish is chatComplete plus the choice's finish_reason
+// ("length" when max_tokens cut it off).
+func (r *HTTPRouter) chatCompleteFinish(ctx context.Context, systemPrompt, userPrompt string, maxTokens int, temperature float64) (content, finish string, err error) {
 	type chatMsg struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
@@ -58,6 +66,7 @@ func (r *HTTPRouter) chatComplete(ctx context.Context, systemPrompt, userPrompt 
 		Message struct {
 			Content string `json:"content"`
 		} `json:"message"`
+		FinishReason string `json:"finish_reason"`
 	}
 	type chatResp struct {
 		Choices []chatChoice `json:"choices"`
@@ -80,42 +89,42 @@ func (r *HTTPRouter) chatComplete(ctx context.Context, systemPrompt, userPrompt 
 		ChatTemplateKwargs: map[string]any{"enable_thinking": false},
 	})
 	if err != nil {
-		return "", fmt.Errorf("marshal chat request: %w", err)
+		return "", "", fmt.Errorf("marshal chat request: %w", err)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		r.endpoint+"/v1/chat/completions", bytes.NewReader(reqBody))
 	if err != nil {
-		return "", fmt.Errorf("build chat request: %w", err)
+		return "", "", fmt.Errorf("build chat request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := r.client.Do(httpReq)
 	if err != nil {
-		return "", fmt.Errorf("chat request to %s: %w", r.endpoint, err)
+		return "", "", fmt.Errorf("chat request to %s: %w", r.endpoint, err)
 	}
 	defer resp.Body.Close()
 
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("read chat response: %w", err)
+		return "", "", fmt.Errorf("read chat response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("chat HTTP %d: %s", resp.StatusCode, string(respBytes))
+		return "", "", fmt.Errorf("chat HTTP %d: %s", resp.StatusCode, string(respBytes))
 	}
 
 	var cr chatResp
 	if err := json.Unmarshal(respBytes, &cr); err != nil {
-		return "", fmt.Errorf("parse chat response: %w", err)
+		return "", "", fmt.Errorf("parse chat response: %w", err)
 	}
 	if cr.Error != nil {
-		return "", fmt.Errorf("chat API error: %s", cr.Error.Message)
+		return "", "", fmt.Errorf("chat API error: %s", cr.Error.Message)
 	}
 	if len(cr.Choices) == 0 {
-		return "", fmt.Errorf("empty chat response")
+		return "", "", fmt.Errorf("empty chat response")
 	}
-	return cr.Choices[0].Message.Content, nil
+	return cr.Choices[0].Message.Content, cr.Choices[0].FinishReason, nil
 }
 
 const summarizeSystemPrompt = `You produce concise narrative summaries of conversations.
@@ -148,7 +157,59 @@ func (r *HTTPRouter) Summarize(ctx context.Context, prevSummary string, turns []
 		user.WriteString("\nUpdate the summary to incorporate the new turns. Keep it under 300 tokens.")
 	}
 
-	return r.chatComplete(ctx, summarizeSystemPrompt, user.String(), 450, 0.3)
+	out, finish, err := r.chatCompleteFinish(ctx, summarizeSystemPrompt, user.String(), 450, 0.3)
+	if err != nil {
+		return prevSummary, err
+	}
+	summary, err := checkSummary(out, finish)
+	if err != nil {
+		return prevSummary, err
+	}
+	return summary, nil
+}
+
+// minSummaryChars is the shortest text accepted as a rolling summary.
+const minSummaryChars = 40
+
+// checkSummary vets a summarizer reply before it replaces the rolling
+// summary, which the caller then saves while dropping the turns it
+// covers. Summarize returned whatever came back: an empty reply (a
+// reasoning model that spent its tokens thinking) or a refusal ("I can't
+// help with that.") replaced the summary, and the turns it had folded
+// in were lost. A <think> block is stripped; what is left must be a
+// plausible summary.
+func checkSummary(out, finish string) (string, error) {
+	s := strings.TrimSpace(stripThink(out))
+	if len(s) < minSummaryChars {
+		return "", fmt.Errorf("summarizer returned %d characters (finish=%q); keeping the previous summary", len(s), finish)
+	}
+	if looksLikeRefusal(s) {
+		return "", fmt.Errorf("summarizer declined (%q); keeping the previous summary", truncate(s, 80))
+	}
+	return s, nil
+}
+
+// stripThink drops a <think>…</think> block a reasoning model inlined
+// despite enable_thinking=false.
+func stripThink(s string) string {
+	if i := strings.LastIndex(s, "</think>"); i >= 0 {
+		return s[i+len("</think>"):]
+	}
+	return s
+}
+
+// looksLikeRefusal reports a short reply that opens by declining.
+func looksLikeRefusal(s string) bool {
+	if len(s) > 400 {
+		return false
+	}
+	l := strings.ToLower(s)
+	for _, p := range []string{"i can't", "i cannot", "i can’t", "i won't", "i'm sorry", "i am sorry", "sorry,", "i'm unable", "i am unable", "as an ai"} {
+		if strings.HasPrefix(l, p) {
+			return true
+		}
+	}
+	return false
 }
 
 const extractSystemPrompt = `You extract specific, actionable facts AND entity-relationship triples from conversations.
@@ -214,6 +275,25 @@ func (r *HTTPRouter) ExtractFacts(ctx context.Context, turns []Turn) (Extraction
 // anything FROM the context itself. context may be nil (document extraction,
 // or no prior turns), which is exactly ExtractFacts.
 func (r *HTTPRouter) ExtractFactsWithContext(ctx context.Context, turns, context []Turn) (ExtractionResult, error) {
+	return r.extractFacts(ctx, turns, context, extractMaxTokens)
+}
+
+// extractMaxTokens is the output budget for extracting from a chat turn.
+// extractLargeMaxTokens is the budget for a large document: a 12K-char
+// write-up yields ~40 facts plus triples, ~1500 tokens, and at the chat
+// budget of 900 the reply was cut mid-array and the whole of it lost.
+const (
+	extractMaxTokens      = 900
+	extractLargeMaxTokens = 4096
+)
+
+// ExtractFactsLarge is ExtractFacts for a large document, with the large
+// output budget.
+func (r *HTTPRouter) ExtractFactsLarge(ctx context.Context, turns []Turn) (ExtractionResult, error) {
+	return r.extractFacts(ctx, turns, nil, extractLargeMaxTokens)
+}
+
+func (r *HTTPRouter) extractFacts(ctx context.Context, turns, context []Turn, maxTokens int) (ExtractionResult, error) {
 	if len(turns) == 0 {
 		return ExtractionResult{}, nil
 	}
@@ -232,7 +312,7 @@ func (r *HTTPRouter) ExtractFactsWithContext(ctx context.Context, turns, context
 	}
 	user.WriteString("</conversation>\n\nExtract facts and relationships as a single JSON object.")
 
-	raw, err := r.chatComplete(ctx, extractSystemPrompt, user.String(), 900, 0.2)
+	raw, err := r.chatComplete(ctx, extractSystemPrompt, user.String(), maxTokens, 0.2)
 	if err != nil {
 		return ExtractionResult{}, err
 	}
@@ -269,9 +349,61 @@ func parseExtractionResult(raw string) (ExtractionResult, error) {
 		Relationships []ExtractedRelationship `json:"relationships"`
 	}
 	if err := json.Unmarshal([]byte(raw[start:end+1]), &env); err != nil {
+		// A reply cut off by max_tokens: keep the complete elements
+		// before the cut rather than discarding every fact.
+		if got, ok := salvageExtraction(raw[start:]); ok {
+			log.Printf("[sidecar] extraction reply truncated; kept %d facts and %d triples before the cut", len(got.Facts), len(got.Relationships))
+			return got, nil
+		}
 		return ExtractionResult{}, fmt.Errorf("parse extraction envelope: %w (raw: %q)", err, truncate(raw, 200))
 	}
 	return ExtractionResult{Facts: env.Facts, Relationships: env.Relationships}, nil
+}
+
+// salvageExtraction decodes the complete facts and relationships at the
+// front of a truncated envelope, element by element, stopping at the
+// first incomplete one. ok is false when nothing was recovered.
+func salvageExtraction(raw string) (ExtractionResult, bool) {
+	var out ExtractionResult
+	dec := json.NewDecoder(strings.NewReader(raw))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return out, false
+	}
+	for dec.More() {
+		k, err := dec.Token()
+		if err != nil {
+			break
+		}
+		key, _ := k.(string)
+		if t, err := dec.Token(); err != nil || t != json.Delim('[') {
+			break
+		}
+		for dec.More() {
+			var err error
+			switch key {
+			case "facts":
+				var f ExtractedFact
+				if err = dec.Decode(&f); err == nil {
+					out.Facts = append(out.Facts, f)
+				}
+			case "relationships":
+				var r ExtractedRelationship
+				if err = dec.Decode(&r); err == nil {
+					out.Relationships = append(out.Relationships, r)
+				}
+			default:
+				var skip json.RawMessage
+				err = dec.Decode(&skip)
+			}
+			if err != nil {
+				return out, len(out.Facts)+len(out.Relationships) > 0
+			}
+		}
+		if _, err := dec.Token(); err != nil { // the array's ']'
+			break
+		}
+	}
+	return out, len(out.Facts)+len(out.Relationships) > 0
 }
 
 const relationshipExtractionPrompt = `You extract entity-relationship triples from a list of facts.
@@ -449,53 +581,4 @@ func parseEntityGroups(raw string) ([]EntityGroup, error) {
 		out = append(out, g)
 	}
 	return out, nil
-}
-
-// Conflict classification labels returned by ClassifyConflict. The
-// write-time conflict resolver maps these to distinct commit actions:
-// ADD stores as new, UPDATE sets supersedes on the prior row, DUPLICATE
-// drops the incoming fact, CONTRADICTS stores the incoming fact with a
-// needs_review tag for sleep-cycle adjudication.
-const (
-	ConflictADD         = "ADD"
-	ConflictUPDATE      = "UPDATE"
-	ConflictDUPLICATE   = "DUPLICATE"
-	ConflictCONTRADICTS = "CONTRADICTS"
-)
-
-const classifyConflictSystemPrompt = `You classify the relationship between two facts about the same subject.
-Output exactly one token — one of: ADD, UPDATE, DUPLICATE, CONTRADICTS.
-No other text, no punctuation, no explanation.
-
-Definitions:
-- ADD: the new fact adds information that is compatible with the existing fact (different attribute, orthogonal detail).
-- UPDATE: the new fact replaces the existing fact because the underlying value changed over time (e.g. version bumped, IP moved, status changed).
-- DUPLICATE: the new fact conveys the same information as the existing fact in different words.
-- CONTRADICTS: the new fact directly conflicts with the existing fact and it is not clear which is correct.`
-
-// ClassifyConflict asks the sidecar to classify the relationship between
-// an existing fact and a new candidate fact. Returns one of the Conflict*
-// constants. On any parse failure the safe fallback is ADD (store both
-// and let the sleep cycle reconcile).
-func (r *HTTPRouter) ClassifyConflict(ctx context.Context, existing, incoming string) (string, error) {
-	var user strings.Builder
-	user.WriteString("Existing fact: ")
-	user.WriteString(existing)
-	user.WriteString("\nNew fact: ")
-	user.WriteString(incoming)
-	user.WriteString("\n\nClassification:")
-
-	raw, err := r.chatComplete(ctx, classifyConflictSystemPrompt, user.String(), 8, 0.0)
-	if err != nil {
-		return "", err
-	}
-	label := strings.ToUpper(strings.TrimSpace(raw))
-	// The model may echo a trailing period or extra tokens despite the
-	// instruction — accept the first recognised keyword.
-	for _, want := range []string{ConflictUPDATE, ConflictDUPLICATE, ConflictCONTRADICTS, ConflictADD} {
-		if strings.Contains(label, want) {
-			return want, nil
-		}
-	}
-	return "", fmt.Errorf("unrecognised conflict label: %q", truncate(raw, 80))
 }

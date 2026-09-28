@@ -49,10 +49,12 @@ const (
 	// supersede this constant entirely.
 	VerbatimWindow = 24
 
-	// SummarizeBatch is how many turns get summarized away per pass, once the
-	// threshold fires. Leaving a few turns above the verbatim window buffers
-	// against the next trigger.
-	SummarizeBatch = 8
+	// SummarizeBatch is the most turns folded into the summary in one
+	// pass; a pass folds everything above the verbatim window, up to this
+	// many. It was a fixed 8, but one tool-heavy exchange adds 2 plus two
+	// per tool call, so research turns outran it and the excess reached
+	// the buffer's cap and fell off unsummarized.
+	SummarizeBatch = 32
 
 	// The identical-enough cutoff (above which an extracted fact is
 	// skipped without asking the medium slot) and the supersede floor now
@@ -72,6 +74,11 @@ const (
 // downstream both carry the shard's scope_tag.
 func (p *Pipeline) maybeSummarize(sess *session.Session, overrides *ShardOverrides) {
 	if p.sidecarClient == nil {
+		return
+	}
+	// The persisted summary failed to load (hydration retries it): a
+	// summary written now would start from nothing and replace it.
+	if sess.SummaryUnknown() {
 		return
 	}
 	_, turnCount := sess.Snapshot()
@@ -108,10 +115,10 @@ func (p *Pipeline) runSummarize(sess *session.Session, overrides *ShardOverrides
 	// Snapshot the turns we intend to summarize without mutating yet — if the
 	// sidecar call fails, leave the session untouched.
 	prevSummary, localTurns := sess.SnapshotForSummarize(dropCount)
-	toSummarize := make([]sidecar.Turn, len(localTurns))
-	for i, t := range localTurns {
-		toSummarize[i] = sidecar.Turn{Role: t.Role, Content: t.Content}
+	if len(localTurns) == 0 {
+		return
 	}
+	toSummarize := summarizerTurns(localTurns)
 	dropCount = len(localTurns)
 
 	p.events.Emit(sess.ID, memevents.KindCompactionStarted, memevents.CompactionStartedPayload{
@@ -130,7 +137,7 @@ func (p *Pipeline) runSummarize(sess *session.Session, overrides *ShardOverrides
 		return
 	}
 
-	dropped := sess.CompactSummary(newSummary, dropCount)
+	dropped := sess.CompactSummary(newSummary, localTurns[len(localTurns)-1].Seq)
 	log.Printf("[pipeline] summarized %d turns for session %s (summary: %d chars)",
 		len(dropped), sess.ID, len(newSummary))
 	p.events.Emit(sess.ID, memevents.KindSummaryGenerated, memevents.SummaryGeneratedPayload{
@@ -164,6 +171,42 @@ func (p *Pipeline) runSummarize(sess *session.Session, overrides *ShardOverrides
 	})
 }
 
+// summarizerTurns renders buffered turns for the summarizer. A tool
+// result becomes a line naming the tool, and a tool-calling turn its
+// prose and the list of calls. Results are whatever a web page or a
+// shared page said, and the summary is replayed in the system message
+// of every later turn (and persisted), where an instruction planted in
+// a page reads as the user's own. The results themselves stay in the
+// verbatim history the model sees as tool messages.
+func summarizerTurns(turns []session.Turn) []sidecar.Turn {
+	out := make([]sidecar.Turn, 0, len(turns))
+	names := map[string]string{} // tool call id -> tool name
+	for _, t := range turns {
+		switch {
+		case t.Role == "tool":
+			name := names[t.ToolCallID]
+			if name == "" {
+				name = "a tool"
+			}
+			out = append(out, sidecar.Turn{Role: "tool", Content: "[" + name + " result omitted]"})
+		case len(t.ToolCalls) > 0:
+			var called []string
+			for _, c := range unmarshalToolCalls(t.ToolCalls) {
+				names[c.ID] = c.Name
+				called = append(called, c.Name)
+			}
+			line := "[called " + strings.Join(called, ", ") + "]"
+			if prose := strings.TrimSpace(t.Content); prose != "" {
+				line = prose + "\n" + line
+			}
+			out = append(out, sidecar.Turn{Role: t.Role, Content: line})
+		default:
+			out = append(out, sidecar.Turn{Role: t.Role, Content: t.Content})
+		}
+	}
+	return out
+}
+
 // approxTokenCount is a rough char/4 proxy used only for the
 // SummaryGenerated event payload. Precise token counts need a
 // tokenizer matched to the chat model — not worth the dep weight
@@ -183,12 +226,18 @@ func previewString(s string, n int) string {
 	return s[:n] + "…"
 }
 
-// postTurnDeadline is the soft budget for the entire post-turn write
-// pipeline (fact extraction → batched conflict + relationship pass →
-// commit). On miss the goroutine logs and drops; the next turn runs
-// fresh. Per CHAT-REARCH §"Soft Deadline" — we'd rather store an
-// occasional duplicate than block the write pipeline indefinitely.
-const postTurnDeadline = 10 * time.Second
+// postTurnDeadline is the backstop for the post-turn write pipeline
+// (fact extraction → batched conflict + relationship pass → commit),
+// including any wait for the sidecar's slot behind other background
+// work. Each sidecar request is bounded by [sidecar].request_timeout_ms
+// on its own. It was 10s for the whole pipeline, gate wait included, and
+// a miss during the batch dropped every candidate: the facts the user
+// had just stated were never stored. A variable so tests can shorten it.
+var postTurnDeadline = 60 * time.Second
+
+// postTurnCommitBudget bounds committing candidates after the backstop
+// fired.
+const postTurnCommitBudget = 10 * time.Second
 
 // extractContextTurns is how many prior turns we hand the extractor as
 // read-only context so it can resolve pronouns/back-references in the current
@@ -200,14 +249,14 @@ const extractContextTurns = 6
 // fresh goroutine with a 10s soft deadline. Returns immediately so
 // the user-facing response isn't held up. Safe to call when the
 // sidecar is unavailable (no-ops).
-func (p *Pipeline) kickoffPostTurnExtract(sess *session.Session, userMsg, responseText string, retrievedRels []memory.Relationship, overrides *ShardOverrides) {
+func (p *Pipeline) kickoffPostTurnExtract(sess *session.Session, userMsg, responseText string, prior []sidecar.Turn, retrievedRels []memory.Relationship, overrides *ShardOverrides) {
 	if p.sidecarClient == nil {
 		return
 	}
 	if strings.TrimSpace(userMsg) == "" && strings.TrimSpace(responseText) == "" {
 		return
 	}
-	go p.runPostTurnExtract(sess, userMsg, responseText, retrievedRels, overrides)
+	go p.runPostTurnExtract(sess, userMsg, responseText, prior, retrievedRels, overrides)
 }
 
 // runPostTurnExtract executes the per-turn memory write pipeline:
@@ -218,10 +267,15 @@ func (p *Pipeline) kickoffPostTurnExtract(sess *session.Session, userMsg, respon
 //  4. Apply decisions: ADD → commit; UPDATE → commit with Supersedes;
 //     DUPLICATE → skip. Upsert relationships emitted by the batch.
 //
-// Wraps the whole flow in a 10s deadline. Any miss logs and exits;
-// the next turn re-extracts fresh. Best-effort — every step is
-// allowed to fail without rolling back earlier writes.
-func (p *Pipeline) runPostTurnExtract(sess *session.Session, userMsg, responseText string, retrievedRels []memory.Relationship, overrides *ShardOverrides) {
+// Wraps the whole flow in postTurnDeadline. A miss before candidates
+// exist logs and exits; a miss during the batched pass commits them as
+// ADD, as a failed pass does (a duplicate is preferred to a lost fact).
+// Best-effort — every step is allowed to fail without rolling back
+// earlier writes.
+//
+// prior is the conversation before this turn (conversationTurns), which
+// the extractor may resolve references against but not extract from.
+func (p *Pipeline) runPostTurnExtract(sess *session.Session, userMsg, responseText string, prior []sidecar.Turn, retrievedRels []memory.Relationship, overrides *ShardOverrides) {
 	defer recoverBackground("runPostTurnExtract")
 	// No durable extract without a resolved identity. pgvector and the
 	// relationships table both treat a NULL/empty user_id as "visible to
@@ -247,17 +301,10 @@ func (p *Pipeline) runPostTurnExtract(sess *session.Session, userMsg, responseTe
 		{Role: "user", Content: userMsg},
 		{Role: "assistant", Content: responseText},
 	}
-	// Prior turns, read-only, for reference resolution only. The current pair
-	// is already appended to the session by the time this goroutine runs, so
-	// drop it by content — we extract from `turns`, not from the context.
-	var contextTurns []sidecar.Turn
-	for _, t := range sess.RecentTurns(extractContextTurns + 2) {
-		if t.Content == userMsg || t.Content == responseText {
-			continue
-		}
-		contextTurns = append(contextTurns, sidecar.Turn{Role: t.Role, Content: t.Content})
-	}
-	extraction, err := p.sidecarClient.ExtractFactsWithContext(ctx, turns, contextTurns)
+	// Prior turns, read-only, for reference resolution only. They used to be
+	// the session's last 8 messages minus this turn's pair, which after a
+	// tool-heavy turn were this turn's own tool results and tool-call stubs.
+	extraction, err := p.sidecarClient.ExtractFactsWithContext(ctx, turns, prior)
 	if err != nil {
 		deferred := ctx.Err() != nil
 		if deferred {
@@ -357,10 +404,15 @@ func (p *Pipeline) runPostTurnExtract(sess *session.Session, userMsg, responseTe
 		batchResult, berr := p.sidecarClient.BatchClassifyAndRelate(ctx, batchIn)
 		if berr != nil {
 			if ctx.Err() != nil {
-				log.Printf("[pipeline] post-turn extract deadline (batch) for session %s: %v", sess.ID, ctx.Err())
-				return
+				log.Printf("[pipeline] post-turn extract deadline (batch) for session %s: %v (committing candidates as ADD)", sess.ID, ctx.Err())
+				// The rest runs on a fresh, short context: the expired
+				// one would fail every write below.
+				var cancelCommit context.CancelFunc
+				ctx, cancelCommit = context.WithTimeout(context.Background(), postTurnCommitBudget)
+				defer cancelCommit()
+			} else {
+				log.Printf("[pipeline] batch classify failed for session %s: %v (defaulting all to ADD)", sess.ID, berr)
 			}
-			log.Printf("[pipeline] batch classify failed for session %s: %v (defaulting all to ADD)", sess.ID, berr)
 			// Synthesize ADD decisions so we still commit the
 			// candidates — preferring duplicates to dropped writes.
 			batchResult.Decisions = make([]sidecar.BatchDecision, len(batchCands))
@@ -417,7 +469,6 @@ func (p *Pipeline) runPostTurnExtract(sess *session.Session, userMsg, responseTe
 			CreatedAt:         timestamppb.New(now),
 			LastAccessed:      timestamppb.New(now),
 			ScopeTag:          scopeTagFor(overrides),
-			ExcludeFromHot:    excludeFromHotFor(overrides),
 		}
 		pbFacts = append(pbFacts, fact)
 		decided = append(decided, decision{action: action, targetID: targetID, category: p2.fact.Category})
@@ -607,14 +658,19 @@ func supersedesFor(action, targetID string) string {
 // DUPLICATE gets the same target check, because dropping a write is also
 // lossy: a DUPLICATE naming a hallucinated id used to discard the candidate
 // entirely, which contradicts this path's own preference for a redundant
-// fact over a lost one. It still requires a neighbour to exist — a
-// duplicate of nothing is not a duplicate — but not the floor, since the
-// model judged the content and that is more informative than cosine.
+// fact over a lost one. It requires a neighbour to exist — a duplicate of
+// nothing is not a duplicate. A DUPLICATE naming a shown neighbour needs no
+// floor (the model compared the two); an UNNAMED one needs the nearest
+// neighbour to clear supersedeFloor, like an unnamed UPDATE: "my dog is
+// named Biscuit" was dropped as a duplicate of "prefers dark mode" at 0.21.
+//
+// The decision for candidate i is the one naming i as its candidate, or
+// else the i-th (see decisionFor).
 func resolveDecision(i int, decisions []sidecar.BatchDecision, neighbors []memory.NearestFact, supersedeFloor float64) (action, targetID string) {
 	action = "ADD"
-	if i < len(decisions) {
-		action = decisions[i].Action
-		targetID = decisions[i].TargetID
+	if d, ok := decisionFor(i, decisions); ok {
+		action = d.Action
+		targetID = d.TargetID
 	}
 	hasNeighbor := len(neighbors) > 0
 
@@ -658,9 +714,33 @@ func resolveDecision(i int, decisions []sidecar.BatchDecision, neighbors []memor
 			// Nothing to be a duplicate OF; keep the write.
 			return "ADD", ""
 		}
-		return action, targetID
+		if targetID != "" {
+			return action, targetID // validated against the shown set above
+		}
+		if neighbors[0].Similarity >= supersedeFloor {
+			return action, neighbors[0].ID
+		}
+		log.Printf("[pipeline] conflict resolver: DUPLICATE with no target and nearest fact at %.2f < %.2f floor — keeping the write",
+			neighbors[0].Similarity, supersedeFloor)
+		return "ADD", ""
 	}
 	return action, targetID
+}
+
+// decisionFor finds the batch decision for candidate i: the one naming i
+// as its candidate, else the i-th if that names no candidate. Decisions
+// were purely positional, so a model that skipped one shifted the rest:
+// candidate [0] took [1]'s DUPLICATE and was dropped.
+func decisionFor(i int, decisions []sidecar.BatchDecision) (sidecar.BatchDecision, bool) {
+	for _, d := range decisions {
+		if d.Candidate != nil && *d.Candidate == i {
+			return d, true
+		}
+	}
+	if i < len(decisions) && decisions[i].Candidate == nil {
+		return decisions[i], true
+	}
+	return sidecar.BatchDecision{}, false
 }
 
 // recordVersions writes admin-timeline rows for a batch of committed

@@ -1,1 +1,1 @@
-Respond directly and concisely. No tools needed.
+Respond directly and concisely. If the user asks about something they told you before (a name, a preference) and it isn't in Relevant context, use search_memory rather than guessing.

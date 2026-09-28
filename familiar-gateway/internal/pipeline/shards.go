@@ -5,6 +5,7 @@ import (
 	"log"
 	"strings"
 
+	"github.com/familiar/gateway/internal/ctxbuild"
 	"github.com/familiar/gateway/internal/llm"
 	"github.com/familiar/gateway/internal/session"
 )
@@ -19,8 +20,6 @@ import (
 //   - SystemPrompt replaces the layered (base + tier + tool_policy)
 //     prompt. The shard's prompt is the only non-user context the LLM
 //     sees.
-//   - SkipMemoryRetrieval disables engine.AssembleContext, pgvector
-//     search, working-context zone, and relationship graph injection.
 //   - SkipSessionHydration skips the persistent-summary load. Set for
 //     ephemeral shards.
 //   - SkipCommit skips commitAndExtract entirely. Set for ephemeral
@@ -46,7 +45,6 @@ type ShardOverrides struct {
 
 	SystemPrompt string
 
-	SkipMemoryRetrieval  bool
 	SkipSessionHydration bool
 	SkipCommit           bool
 
@@ -62,17 +60,6 @@ type ShardOverrides struct {
 	// "empty book_access = all owner books" semantics); the wiki skill
 	// reads it off SessionContext.BookScope and denies anything else.
 	BookAccess []string
-
-	// ExcludeFromHot, when true, instructs the engine to bypass the
-	// hot RAM tier on every commit this invocation produces — both
-	// the pipeline's conversation fact and any facts a tool dispatch
-	// writes via the memory skill. Set by the shardapi handler when
-	// the shard's visibility is `isolated`. Closes the leak path
-	// where an isolated-shard write could be returned by top-level
-	// retrieval through the engine's hot cache before the
-	// gateway-side pgvector filter could re-hide it
-	// (FAMILIAR-SHARDS-PHASE1-FINDINGS Issue 3).
-	ExcludeFromHot bool
 
 	ModelOverride string
 	TierHint      string
@@ -169,42 +156,53 @@ func diffNames(requested, kept []string) []string {
 // relationship graph, no tool results block. The shard is the whole
 // context envelope.
 //
-// This intentionally does NOT go through ctxbuild. ctxbuild exists to
-// pack the trusted-surface's many context zones under a token budget;
-// shards have no zones to pack. If a future shard use-case turns out
-// to need budgeted packing (e.g., very long system prompts that need
-// to crowd out session turns), we can fold ctxbuild back in at that
-// point — there's no value in it yet.
-func (p *Pipeline) buildShardMessages(sess *session.Session, userMsg string, overrides *ShardOverrides, info *RouteInfo) []llm.Message {
-	var messages []llm.Message
-	if overrides.SystemPrompt != "" {
-		messages = append(messages, llm.Message{
-			Role:    "system",
-			Content: overrides.SystemPrompt,
-		})
-	}
+// Persistent shards (SkipSessionHydration unset) see prior turns the
+// way the trusted path does: the rolling summary, and as much history as
+// the model's window holds, packed by ctxbuild and opening on a user
+// turn. They used to get a fixed last 20 messages with no summary and no
+// token budget: two tool-heavy exchanges pushed the user's instructions
+// out, the summary kept for them went unread, and 20 large tool results
+// could overflow a small model.
+func (p *Pipeline) buildShardMessages(sess *session.Session, userMsg, modelID string, overrides *ShardOverrides, info *RouteInfo) []llm.Message {
+	sys := overrides.SystemPrompt
+	var turns []session.Turn
 	if !overrides.SkipSessionHydration && sess != nil {
-		// Persistent shards see prior turns the same way the trusted
-		// path does — the session.Session struct carries them in memory
-		// after hydration. The tool shape must survive the replay: an
-		// assistant turn that only carried tool_calls has empty content,
-		// and OpenAI-shaped servers reject an assistant message with
-		// neither content nor tool_calls.
-		turns := sess.RecentTurns(20)
-		// If the window opens mid tool-exchange (a tool result whose
-		// assistant tool-call parent was cut off), the transcript is
-		// invalid; trim to the first user turn.
-		for len(turns) > 0 && turns[0].Role != "user" {
-			turns = turns[1:]
+		summary, _ := sess.Snapshot()
+		reserved := ctxbuild.EstimateTokens(userMsg)
+		if p.modelSupportsTools(modelID) {
+			reserved += p.toolSchemaTokens()
 		}
-		for _, t := range turns {
-			messages = append(messages, llm.Message{
-				Role:       t.Role,
-				Content:    t.Content,
-				ToolCalls:  unmarshalToolCalls(t.ToolCalls),
-				ToolCallID: t.ToolCallID,
-			})
+		packed := ctxbuild.New(p.windowConfig(modelID)).Build(ctxbuild.Input{
+			SystemPrompt:   overrides.SystemPrompt,
+			Summary:        summary,
+			Turns:          sess.RecentTurns(0),
+			ReservedTokens: reserved,
+		})
+		turns = packed.RecentTurns
+		if packed.ConversationSummary != "" {
+			block := contextDataNotice + "\n\n<conversation_summary>\n" + packed.ConversationSummary + "\n</conversation_summary>"
+			if sys != "" {
+				sys += "\n\n"
+			}
+			sys += block
 		}
+	}
+
+	var messages []llm.Message
+	if sys != "" {
+		messages = append(messages, llm.Message{Role: "system", Content: sys})
+	}
+	// The tool shape must survive the replay: an assistant turn that
+	// only carried tool_calls has empty content, and OpenAI-shaped
+	// servers reject an assistant message with neither content nor
+	// tool_calls.
+	for _, t := range turns {
+		messages = append(messages, llm.Message{
+			Role:       t.Role,
+			Content:    t.Content,
+			ToolCalls:  unmarshalToolCalls(t.ToolCalls),
+			ToolCallID: t.ToolCallID,
+		})
 	}
 	messages = append(messages, llm.Message{Role: "user", Content: userMsg})
 
@@ -286,16 +284,6 @@ func bookScopeFor(overrides *ShardOverrides) []string {
 		return nil
 	}
 	return overrides.BookAccess
-}
-
-// excludeFromHotFor mirrors scopeTagFor for the RAM-bypass flag. Used
-// by every commit site that needs to stamp ExcludeFromHot on a
-// FactProto and by runCompletion when populating skills.SessionContext.
-func excludeFromHotFor(overrides *ShardOverrides) bool {
-	if overrides == nil {
-		return false
-	}
-	return overrides.ExcludeFromHot
 }
 
 // shardModelOverride resolves overrides.ModelOverride / overrides.TierHint

@@ -321,3 +321,24 @@ func TestClaimIdentity_RefusesAnotherUsersSession(t *testing.T) {
 		t.Fatal("an empty identity claimed a session")
 	}
 }
+
+// ReplaceTurnsIf swaps the buffer only if nothing was added since the
+// caller looked: hydration must not drop a turn another request
+// committed while the load ran.
+func TestReplaceTurnsIf(t *testing.T) {
+	s := NewManager().GetOrCreate("cli", "u")
+	s.AddTurn("user", "live")
+	if s.ReplaceTurnsIf([]Turn{{Role: "user", Content: "loaded"}}, 0) {
+		t.Fatal("replaced a buffer that changed since it was counted")
+	}
+	if got := s.RecentTurns(0); len(got) != 1 || got[0].Content != "live" {
+		t.Fatalf("buffer = %v, want the live turn", got)
+	}
+	if !s.ReplaceTurnsIf([]Turn{{Role: "user", Content: "a"}, {Role: "assistant", Content: "b"}}, 1) {
+		t.Fatal("did not replace an unchanged buffer")
+	}
+	got := s.RecentTurns(0)
+	if len(got) != 2 || got[0].Seq == 0 || got[1].Seq <= got[0].Seq {
+		t.Errorf("replaced turns %v, want two with increasing Seq", got)
+	}
+}

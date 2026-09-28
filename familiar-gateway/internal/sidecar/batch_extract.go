@@ -50,9 +50,12 @@ type BatchExtractInput struct {
 // BatchDecision is the per-candidate action emitted by the model.
 // Action ∈ {"ADD", "UPDATE", "DUPLICATE"}. TargetID is the existing
 // memory ID this candidate updates or duplicates — empty for ADD.
+// Candidate is the [n] index of the candidate it decides, when the
+// model gave one (older replies are positional).
 type BatchDecision struct {
-	Action   string `json:"action"`
-	TargetID string `json:"target_id,omitempty"`
+	Candidate *int   `json:"candidate,omitempty"`
+	Action    string `json:"action"`
+	TargetID  string `json:"target_id,omitempty"`
 }
 
 // BatchExtractResult is the parsed output of one batched call.
@@ -76,8 +79,8 @@ INPUT SHAPE:
 - Recently extracted facts from earlier in this session (no ids — context only).
 - Raw retrieved relationships that were available to the assistant when it composed its response.
 
-DECISIONS — one per candidate, IN INPUT ORDER:
-{"action": "ADD" | "UPDATE" | "DUPLICATE", "target_id": "<existing-id>"}
+DECISIONS — one per candidate, IN INPUT ORDER, each naming its candidate's [n]:
+{"candidate": <n>, "action": "ADD" | "UPDATE" | "DUPLICATE", "target_id": "<existing-id>"}
 
   ADD       — candidate is new information. Neighbors don't cover it. Omit target_id.
   UPDATE    — candidate refines or replaces a neighbor (same subject + predicate, new value;
@@ -108,7 +111,7 @@ Candidates:
   [0] {"content":"gpu-host has 192GB RAM","category":"technical_fact"}
       neighbors: [{"id":"abc-123","content":"gpu-host has 256GB of RAM","similarity":0.91}]
 Output:
-{"decisions":[{"action":"UPDATE","target_id":"abc-123"}],
+{"decisions":[{"candidate":0,"action":"UPDATE","target_id":"abc-123"}],
  "relationships":[{"subject":"gpu-host","predicate":"has_ram","object":"192GB"}]}`
 
 // BatchClassifyAndRelate runs the medium-slot conflict +

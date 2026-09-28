@@ -105,44 +105,6 @@ func (r *Registry) GetProvider(modelID string, apiKeyFn func(string) string) (ll
 	return buildProvider(entry.Config, apiKey)
 }
 
-// ByRole returns the ID of the model carrying the given role
-// (classifier / embedder / summarizer), or "" if none. Validation
-// has already enforced at-most-one model per role at config load
-// time, so this is an O(n) scan looking for first hit.
-func (r *Registry) ByRole(role string) string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	for id, e := range r.entries {
-		if e.Config.Role == role {
-			return id
-		}
-	}
-	return ""
-}
-
-// EndpointForRole returns the Endpoint of the model carrying the
-// given role, or "" if none. Used by the sidecar Client to derive
-// its slot endpoints from registry entries instead of the literal
-// URLs in [sidecar]. Satisfies sidecar.EndpointResolver.
-//
-// "small" matches the legacy "classifier" role too — pre-CHAT-REARCH
-// gateway.toml configs labeled the slot "classifier", and we accept
-// either spelling so existing deployments don't have to migrate
-// config to upgrade.
-func (r *Registry) EndpointForRole(role string) string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	for _, e := range r.entries {
-		if e.Config.Role == role {
-			return e.Config.Endpoint
-		}
-		if role == config.ModelSlotSmall && e.Config.Role == config.ModelRoleClassifier {
-			return e.Config.Endpoint
-		}
-	}
-	return ""
-}
-
 // EndpointForModel returns the Endpoint of the model with the given
 // ID, or "" if no such model is registered. Used by the sidecar
 // Client to resolve the explicit task→model assignments from

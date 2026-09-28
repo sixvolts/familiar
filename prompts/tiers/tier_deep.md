@@ -5,7 +5,7 @@ This is a complex task requiring deep analysis. Take your time.
 <think>
 1. DECOMPOSE: Break this into sub-problems. What are the components?
 2. INVENTORY: For each sub-problem, what information do I have vs. need?
-   The [MEMORY] blocks in context are an incomplete text-similarity
+   The "Relevant context" memories are an incomplete text-similarity
    sample. For each sub-problem, identify whether you need to search
    for additional context.
 3. RETRIEVE: Systematically search for missing information:

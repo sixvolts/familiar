@@ -1,24 +1,21 @@
 package sidecar
 
-// CHAT-REARCH §"Smaller Hardening" — slot priority gate.
+// Slot priority gate, one per sidecar endpoint.
 //
-// The small sidecar slot handles both sync pre-turn work (classifier,
-// query expansion) and async post-turn work (fact extraction). Under
-// rapid-follow-up load, async work from turn N can still be running
-// when a classifier call for turn N+1 needs to fly. Plain FIFO at the
-// upstream slot means the user's next response waits behind async
-// extraction.
+// A model server with one slot serves both critical-path work (classify,
+// expand_queries: the user is waiting for the first token) and
+// background work (post-turn extraction and the conflict/relationship
+// batch, summarizing, titles, the memory backfills). Plain FIFO at the
+// server means the next turn's classify can wait behind a 1500-token
+// batch from the last one.
 //
-// True preemption isn't feasible at the HTTP layer — we can't cancel
-// a partially-generated llama-server response cleanly. The next best
-// thing: rate-limit async to one request in flight per slot, AND
-// have async yield briefly to any sync request that appears while
-// it's waiting. Sync requests bypass the gate entirely.
-//
-// Operators with hardware to spare can sidestep the contention
-// entirely by configuring a separate small_async slot (CHAT-REARCH
-// §"Concurrency Concern"). The gate is the cheap fallback for
-// single-instance deployments.
+// True preemption isn't feasible at the HTTP layer — we can't cancel a
+// partially-generated response cleanly. The next best thing: background
+// work runs one request at a time per endpoint (acquireAsync) and never
+// starts while a critical-path request is in flight; critical-path work
+// only registers itself (syncEnter) and never waits. Tasks on different
+// endpoints never contend. Client.background is the one entry point for
+// background work.
 
 import (
 	"context"

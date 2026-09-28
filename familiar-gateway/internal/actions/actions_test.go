@@ -544,8 +544,7 @@ func TestRunner_ShardEnvelopeReachesInvoke(t *testing.T) {
 	}
 	ov := h.overrides[0]
 	if ov.ShardID != sh.ID || ov.ScopeTag != "shard:env-shard" ||
-		len(ov.ToolAllowlist) != 1 || ov.ToolAllowlist[0] != "read_page" ||
-		!ov.ExcludeFromHot {
+		len(ov.ToolAllowlist) != 1 || ov.ToolAllowlist[0] != "read_page" {
 		t.Errorf("overrides = %+v", ov)
 	}
 }
@@ -1014,7 +1013,7 @@ func TestRunner_EphemeralEnvelopeReachesInvoke(t *testing.T) {
 	if ov.ToolAllowlist == nil || len(ov.ToolAllowlist) != 0 {
 		t.Errorf("ephemeral allowlist = %v, want empty non-nil", ov.ToolAllowlist)
 	}
-	if !ov.SkipMemoryRetrieval || !ov.SkipSessionHydration || !ov.SkipCommit {
+	if !ov.SkipSessionHydration || !ov.SkipCommit {
 		t.Errorf("ephemeral skips not all set: %+v", ov)
 	}
 }

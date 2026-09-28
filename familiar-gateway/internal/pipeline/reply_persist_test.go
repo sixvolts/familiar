@@ -21,7 +21,7 @@ type recordedAppend struct {
 	msgs          []IntermediateMessage
 }
 
-func (r *recordingConversations) LoadRecentTurns(context.Context, string, string, int, func(string, string, []byte, string)) error {
+func (r *recordingConversations) LoadRecentTurns(context.Context, string, string, int, int, func(string, string, []byte, string)) error {
 	return nil
 }
 

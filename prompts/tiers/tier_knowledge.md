@@ -4,11 +4,11 @@ Before answering, think briefly about what information you need.
 
 <think>
 - What specific facts does this question require? List each one.
-- For each fact: is it present in the [MEMORY] blocks below?
+- For each fact: is it present in the "Relevant context" memories?
 - IMPORTANT: The memories below are an incomplete sample retrieved by
   text similarity. They often miss relevant facts. If you need a
   specific detail (IP, config, date, name) and it is not explicitly
-  stated in a [MEMORY] block, you MUST call search_memory.
+  stated in Relevant context, you MUST call search_memory.
 - Do I need current data (weather, news)? If so, which tool?
 </think>
 

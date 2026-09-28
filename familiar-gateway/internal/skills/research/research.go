@@ -945,10 +945,8 @@ func (s *Skill) dispatchWriter(userID string, book *admin.Book, page *admin.Wiki
 			overrides := &pipeline.ShardOverrides{
 				ShardID:              "research-writer",
 				SystemPrompt:         s.writerPrompt,
-				SkipMemoryRetrieval:  true,
 				SkipSessionHydration: true,
 				SkipCommit:           true,
-				ExcludeFromHot:       true,
 				// No tools at all: the writer is a pure completion —
 				// evidence in, note markdown out. An empty allowlist
 				// advertises nothing and dispatches nothing.
@@ -1127,15 +1125,10 @@ func (s *Skill) dispatch(userID string, book *admin.Book, page *admin.WikiPage, 
 			overrides := &pipeline.ShardOverrides{
 				ShardID:              "research-worker",
 				SystemPrompt:         systemPrompt,
-				SkipMemoryRetrieval:  true,
 				SkipSessionHydration: true,
 				SkipCommit:           true,
-				// Belt over the SkipCommit suspenders (§6.3): even if a
-				// future allowlist grows a memory-writing tool, worker
-				// writes bypass the hot tier.
-				ExcludeFromHot: true,
-				ToolAllowlist:  append([]string(nil), workerAllowlist...),
-				BookAccess:     []string{book.ID},
+				ToolAllowlist:        append([]string(nil), workerAllowlist...),
+				BookAccess:           []string{book.ID},
 				// ModelOverride (when configured) pins workers to an
 				// explicit registry model; TierHint still shapes the
 				// thinking budget either way (shardModelOverride

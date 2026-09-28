@@ -144,7 +144,7 @@ func TestStopTurn_CancelsTurnStuckInClassification(t *testing.T) {
 	routes := classifyOnlyRoutes{endpoint: clf.URL}
 	pl.sidecarClient = sidecar.NewClient(
 		config.SidecarConfig{Enabled: true, RequestTimeoutMs: 30000}, // long, so Stop is what cuts it
-		config.RouterConfig{}, routes, routes)
+		routes, routes)
 
 	sess := pl.sessions.GetOrCreate("cli", "stop-user")
 
@@ -212,7 +212,7 @@ func TestPrepContext_ClientDisconnectCancelsClassification(t *testing.T) {
 	pl.sidecarClient = sidecar.NewClient(
 		// Long enough that the sidecar deadline is not what frees us.
 		config.SidecarConfig{Enabled: true, RequestTimeoutMs: 30000},
-		config.RouterConfig{}, routes, routes)
+		routes, routes)
 
 	sess := pl.sessions.GetOrCreate("cli", "disc-user")
 	reqCtx, disconnect := context.WithCancel(context.Background())
@@ -240,5 +240,41 @@ func TestPrepContext_ClientDisconnectCancelsClassification(t *testing.T) {
 	case <-time.After(8 * time.Second):
 		t.Fatal("classification did not unwind on client disconnect — " +
 			"prepContext is not honouring the request context")
+	}
+}
+
+// Two turns on one session (a reload leaves the first running while the
+// user sends another): Stop cuts both, and the session reads as running
+// until both end. The registry held one turn per session, so the second
+// overwrote the first, which could no longer be stopped and read as
+// finished once the second ended.
+func TestStopTurn_ConcurrentTurnsOnOneSession(t *testing.T) {
+	p := &Pipeline{}
+	first, cancelFirst := p.turnContext(context.Background(), "sess-two")
+	second, cancelSecond := p.turnContext(context.Background(), "sess-two")
+
+	cancelSecond()
+	if !p.TurnRunning("sess-two") {
+		t.Fatal("the first turn reads as finished once the second ended")
+	}
+	if !p.StopTurn("sess-two") {
+		t.Fatal("StopTurn found nothing to stop")
+	}
+	if context.Cause(first) != errUserStopped {
+		t.Errorf("first turn not stopped: cause %v", context.Cause(first))
+	}
+	_ = second
+	cancelFirst()
+	if p.TurnRunning("sess-two") {
+		t.Error("session still running after both turns ended")
+	}
+
+	a, ca := p.turnContext(context.Background(), "sess-three")
+	b, cb := p.turnContext(context.Background(), "sess-three")
+	defer ca()
+	defer cb()
+	p.StopTurn("sess-three")
+	if context.Cause(a) != errUserStopped || context.Cause(b) != errUserStopped {
+		t.Errorf("Stop cut %v / %v, want both turns", context.Cause(a), context.Cause(b))
 	}
 }

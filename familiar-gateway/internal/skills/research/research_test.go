@@ -379,12 +379,9 @@ func TestSpawn_WorkerEnvelope(t *testing.T) {
 		if ov.MaxTokens != workerMaxTokens {
 			t.Errorf("call %d: MaxTokens = %d, want %d", i, ov.MaxTokens, workerMaxTokens)
 		}
-		if !ov.SkipMemoryRetrieval || !ov.SkipSessionHydration || !ov.SkipCommit {
-			t.Errorf("call %d: Skip flags = (%t,%t,%t), want all true",
-				i, ov.SkipMemoryRetrieval, ov.SkipSessionHydration, ov.SkipCommit)
-		}
-		if !ov.ExcludeFromHot {
-			t.Errorf("call %d: ExcludeFromHot = false, want true", i)
+		if !ov.SkipSessionHydration || !ov.SkipCommit {
+			t.Errorf("call %d: Skip flags = (%t,%t), want both true",
+				i, ov.SkipSessionHydration, ov.SkipCommit)
 		}
 		if strings.TrimSpace(ov.SystemPrompt) == "" {
 			t.Errorf("call %d: SystemPrompt is empty", i)

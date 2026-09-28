@@ -675,41 +675,6 @@ func TestInvoke_Streaming200SSE(t *testing.T) {
 // Pipeline failure mapping
 // ---------------------------------------------------------------------------
 
-// TestInvoke_IsolatedShardSetsExcludeFromHot covers the
-// FAMILIAR-SHARDS-PHASE1-FINDINGS Issue 3 wiring: an
-// isolated-visibility shard's overrides flip ExcludeFromHot so any
-// downstream commit (pipeline conversation fact, memory-skill writes)
-// is routed past the engine's RAM tier. The fixture shard in
-// buildFixtures is already visibility=isolated, so we just assert
-// the flag landed; a parallel test flips it to promoted and asserts
-// the inverse.
-func TestInvoke_IsolatedShardSetsExcludeFromHot(t *testing.T) {
-	_, _, pipe, h := buildFixtures(t)
-	rr := doInvoke(t, h, testShard, testEmail, testToken, validBody)
-	if rr.Code != 200 {
-		t.Fatalf("code = %d", rr.Code)
-	}
-	if pipe.lastOverrides == nil || !pipe.lastOverrides.ExcludeFromHot {
-		t.Errorf("isolated shard overrides should set ExcludeFromHot=true; got %+v",
-			pipe.lastOverrides)
-	}
-}
-
-func TestInvoke_PromotedShardLeavesExcludeFromHotFalse(t *testing.T) {
-	st, _, pipe, h := buildFixtures(t)
-	st.mu.Lock()
-	st.shards[testShard].Visibility = shards.VisibilityPromoted
-	st.mu.Unlock()
-	rr := doInvoke(t, h, testShard, testEmail, testToken, validBody)
-	if rr.Code != 200 {
-		t.Fatalf("code = %d", rr.Code)
-	}
-	if pipe.lastOverrides == nil || pipe.lastOverrides.ExcludeFromHot {
-		t.Errorf("promoted shard overrides should leave ExcludeFromHot=false; got %+v",
-			pipe.lastOverrides)
-	}
-}
-
 func TestInvoke_PipelineErrorReturns500(t *testing.T) {
 	_, _, pipe, h := buildFixtures(t)
 	pipe.err = errors.New("upstream LLM boom")

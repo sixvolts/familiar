@@ -114,7 +114,7 @@ func TestEnsureExternalConversation_IdempotentAndHydrates(t *testing.T) {
 	}
 
 	var got []string
-	err = s.LoadRecentTurns(ctx, first.ID, userID, 10, func(role, content string, _ []byte, _ string) {
+	err = s.LoadRecentTurns(ctx, first.ID, userID, 10, 0, func(role, content string, _ []byte, _ string) {
 		got = append(got, role+":"+content)
 	})
 	if err != nil {
@@ -122,6 +122,15 @@ func TestEnsureExternalConversation_IdempotentAndHydrates(t *testing.T) {
 	}
 	if len(got) != 2 || got[0] != "assistant:your daily digest" || got[1] != "user:same as yesterday?" {
 		t.Fatalf("hydration replay = %v, want [assistant:digest, user:reply]", got)
+	}
+
+	// skip leaves out the messages a rolling summary already covers.
+	got = nil
+	err = s.LoadRecentTurns(ctx, first.ID, userID, 10, 1, func(role, content string, _ []byte, _ string) {
+		got = append(got, role+":"+content)
+	})
+	if err != nil || len(got) != 1 || got[0] != "user:same as yesterday?" {
+		t.Fatalf("replay after skipping 1 = %v (%v), want [user:reply]", got, err)
 	}
 
 	// A different key is a different conversation.
@@ -214,13 +223,13 @@ func TestConversationStore_TurnsAreOwnerScoped(t *testing.T) {
 
 	var loaded []string
 	visit := func(_, content string, _ []byte, _ string) { loaded = append(loaded, content) }
-	if err := s.LoadRecentTurns(ctx, c.ID, other, 10, visit); err != nil {
+	if err := s.LoadRecentTurns(ctx, c.ID, other, 10, 0, visit); err != nil {
 		t.Fatalf("load as other: %v", err)
 	}
 	if len(loaded) != 0 {
 		t.Fatalf("another user's session hydrated %d turn(s) of this conversation", len(loaded))
 	}
-	if err := s.LoadRecentTurns(ctx, c.ID, owner, 10, visit); err != nil || len(loaded) != 1 {
+	if err := s.LoadRecentTurns(ctx, c.ID, owner, 10, 0, visit); err != nil || len(loaded) != 1 {
 		t.Fatalf("owner hydrate: %d turn(s), err=%v; want 1", len(loaded), err)
 	}
 

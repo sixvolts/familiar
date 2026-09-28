@@ -40,14 +40,6 @@ type SessionContext struct {
 	// empty = all of the owner's books). A non-empty set restricts every
 	// book lookup to these IDs; membership is still required on top.
 	BookScope []string
-
-	// ExcludeFromHot, when true, signals memory-writing skills to set
-	// the same flag on the FactProto they emit so the engine routes
-	// the write straight to the persistent tier and skips the hot RAM
-	// stage. Set by the pipeline when running an isolated-visibility
-	// shard. Trusted path leaves this false and behavior is unchanged
-	// (FAMILIAR-SHARDS-PHASE1-FINDINGS Issue 3).
-	ExcludeFromHot bool
 }
 
 type sessionCtxKey struct{}

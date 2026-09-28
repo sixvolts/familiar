@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -255,5 +256,32 @@ func TestProfile_UnwiredReturns503(t *testing.T) {
 	h.getProfile(rec, req)
 	if rec.Code != 503 {
 		t.Errorf("status = %d, want 503", rec.Code)
+	}
+}
+
+// A personality prompt rides in every turn's system message; one past
+// the limit is refused rather than stored and clipped (or crowding out
+// the conversation) on every turn.
+func TestProfile_PatchRefusesAnOverlongPrompt(t *testing.T) {
+	store := newFakeProfileStore()
+	store.rows["alison"] = "kept"
+	h := &Handler{}
+	h.AttachProfileStore(store)
+	patch := func(prompt string) int {
+		body, _ := json.Marshal(map[string]string{"user_prompt": prompt})
+		req := httptest.NewRequest("PATCH", "/console/api/profile", bytes.NewReader(body)).WithContext(
+			ctxWithAuth(context.Background(), alisonUser()))
+		rec := httptest.NewRecorder()
+		h.patchProfile(rec, req)
+		return rec.Code
+	}
+	if code := patch(strings.Repeat("é", MaxUserPromptChars+1)); code != 400 {
+		t.Errorf("over-limit prompt: status %d, want 400", code)
+	}
+	if store.rows["alison"] != "kept" {
+		t.Error("over-limit prompt was stored")
+	}
+	if code := patch(strings.Repeat("é", MaxUserPromptChars)); code != 200 {
+		t.Errorf("at-limit prompt: status %d, want 200", code)
 	}
 }

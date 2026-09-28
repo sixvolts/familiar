@@ -634,14 +634,10 @@ type FactProto struct {
 	// facts whose scope_tag belongs to an `isolated` shard. Ephemeral
 	// shards never populate this — they don't commit memory at all.
 	ScopeTag string `protobuf:"bytes,22,opt,name=scope_tag,json=scopeTag,proto3" json:"scope_tag,omitempty"`
-	// Skip the engine's hot RAM tier on commit
-	// (FAMILIAR-SHARDS-PHASE1-FINDINGS Issue 3). When true, the
-	// engine writes the fact directly to the persistent tier and
-	// does NOT add it to RAM — closing the leak path where an
-	// isolated-shard write would otherwise be visible to top-level
-	// retrieval through the hot cache before the gateway-side
-	// pgvector filter could re-hide it. Set by the gateway when
-	// committing on behalf of an isolated-visibility shard.
+	// Unused. It asked the engine to skip its hot RAM tier, which no
+	// longer exists; nothing sets or reads it. Isolated-shard writes
+	// are kept out of top-level retrieval by scope_tag. Kept so the
+	// field number isn't reused.
 	ExcludeFromHot bool `protobuf:"varint,23,opt,name=exclude_from_hot,json=excludeFromHot,proto3" json:"exclude_from_hot,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache

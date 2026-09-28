@@ -6,8 +6,9 @@ import "fmt"
 //
 // We use len/4 as a deliberate under-engineering choice: accurate tokenization
 // would require a BPE/tiktoken table per model, and the builder is managing a
-// budget, not computing an exact fit. Over-reserving by 10% is fine; clipping
-// a real message because our count was off by a token is not.
+// budget, not computing an exact fit. len/4 fits English prose; JSON, code and
+// tool arguments tokenize denser (nearer len/3), so for those it under-counts,
+// and the zones' slack, not this estimate, is what absorbs the difference.
 func EstimateTokens(s string) int {
 	return len(s) / 4
 }

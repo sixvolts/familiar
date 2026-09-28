@@ -22,7 +22,7 @@ func classifyClient(t *testing.T, endpoint string, cfg config.SidecarConfig) *Cl
 		map[string][]string{TaskClassify: {"m/clf"}},
 		func(string) string { return modelrole.StatusOnline },
 	)
-	return NewClient(cfg, config.RouterConfig{},
+	return NewClient(cfg,
 		fakeEndpoints{models: map[string]string{"m/clf": endpoint}}, res)
 }
 
@@ -194,7 +194,7 @@ func lastRunes(s string, n int) string {
 
 // No classifier configured at all must not mean max effort forever.
 func TestClassifyNoModelUsesStaticDefault(t *testing.T) {
-	c := NewClient(config.SidecarConfig{Enabled: true}, config.RouterConfig{}, nil, nil)
+	c := NewClient(config.SidecarConfig{Enabled: true}, nil, nil)
 	out, st := c.ClassifyWithStats(context.Background(), nil, "hi")
 	if out.Source != classifier.SourceStatic {
 		t.Errorf("Source = %q, want static", out.Source)

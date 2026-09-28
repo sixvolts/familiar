@@ -217,49 +217,30 @@ func TestTierDeepInjectsOverlayAndToolPolicy(t *testing.T) {
 	}
 }
 
-// TestTierReasoningOverridesMemoryConfig verifies that the reasoning tier
-// widens the memory retrieval net per its TierMemoryConfig (threshold
-// 0.45, max_results 10), overriding the global MemoryConfig values.
-func TestTierReasoningOverridesMemoryConfig(t *testing.T) {
-	// Drive this via searchPgVector directly so we don't have to force the
-	// router into a non-fallback classification. That's the unit under
-	// test anyway — Handle is covered by the knowledge-tier case above.
+// The memory search runs with the effort resolver's limit and threshold
+// for the turn's memory depth, not [memory] max_injected_memories /
+// relevance_threshold or a tier's. This used to be "tested" by a test
+// that computed the tier override itself and handed it to
+// searchPgVector, so it passed while production never used those values.
+func TestMemorySearchUsesTheEffortResolversBudget(t *testing.T) {
 	srv, _ := fakeOpenAIRecordingServer("ok")
 	defer srv.Close()
-
 	pl := makePipeline(&mockEngine{}, srv)
 	rec := &recordingMemStore{}
 	pl.memStore = rec
-	pl.memoryCfg = config.MemoryConfig{MaxInjected: 5, RelevanceThreshold: 0.55}
+	pl.embedder = func(context.Context, string) ([]float32, error) { return []float32{0.1, 0.2, 0.3}, nil }
+	pl.memoryCfg = config.MemoryConfig{MaxInjected: 99, RelevanceThreshold: 0.99}
 
-	reasoningTier := ctxbuild.TierFor("analytical")
-	limit := pl.memoryCfg.MaxInjected
-	if reasoningTier.MemoryConfig.MaxResults > 0 {
-		limit = reasoningTier.MemoryConfig.MaxResults
+	sess := pl.sessions.GetOrCreate("cli", "user1")
+	if _, _, err := pl.Handle(context.Background(), sess, "why does thing X happen", nil); err != nil {
+		t.Fatal(err)
 	}
-	threshold := pl.memoryCfg.RelevanceThreshold
-	if reasoningTier.MemoryConfig.Threshold > 0 {
-		threshold = reasoningTier.MemoryConfig.Threshold
-	}
-
-	_ = pl.searchPgVector(
-		context.Background(),
-		"test-user",
-		"why does thing X happen",
-		[]float32{0.1, 0.2, 0.3},
-		reasoningTier,
-		limit,
-		threshold,
-		nil,
-	)
-
 	if len(rec.searches) == 0 {
-		t.Fatal("expected Search to be called")
+		t.Fatal("no memory search ran")
 	}
-	if rec.searches[0].limit != 10 {
-		t.Errorf("limit = %d, want 10 (reasoning override)", rec.searches[0].limit)
-	}
-	if rec.searches[0].threshold != 0.45 {
-		t.Errorf("threshold = %v, want 0.45 (reasoning override)", rec.searches[0].threshold)
+	// No classifier: the static default verdict, shallow memory.
+	want := pl.effort.MemoryFor(classifier.StaticDefault().MemoryDepth)
+	if got := rec.searches[0]; got.limit != want.TopK || got.threshold != want.SimilarityThreshold {
+		t.Errorf("search (limit %d, threshold %v), want the resolver's (%d, %v)", got.limit, got.threshold, want.TopK, want.SimilarityThreshold)
 	}
 }

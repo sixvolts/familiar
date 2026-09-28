@@ -39,7 +39,6 @@ func (e extractOnlyRoutes) Chain(role string) []string {
 	}
 	return nil
 }
-func (e extractOnlyRoutes) EndpointForRole(string) string { return "" }
 func (e extractOnlyRoutes) EndpointForModel(id string) string {
 	if id == testExtractModelID {
 		return e.endpoint
@@ -85,10 +84,10 @@ func TestPostTurnExtract_ReinforcesCheapGateDuplicate(t *testing.T) {
 		Embedder:    embed,
 	})
 	routes := extractOnlyRoutes{endpoint: extractSrv.URL}
-	pl.sidecarClient = sidecar.NewClient(config.SidecarConfig{Enabled: true}, config.RouterConfig{}, routes, routes)
+	pl.sidecarClient = sidecar.NewClient(config.SidecarConfig{Enabled: true}, routes, routes)
 
 	sess := pl.sessions.GetOrCreate("cli", "user1")
-	pl.runPostTurnExtract(sess, "bump gpu-host to 64GB", "done", nil, nil)
+	pl.runPostTurnExtract(sess, "bump gpu-host to 64GB", "done", nil, nil, nil)
 
 	if len(store.reinforced) != 1 || store.reinforced[0] != "dup-target-id" {
 		t.Fatalf("cheap-gate duplicate must reinforce its survivor: got reinforced=%v, want [dup-target-id]", store.reinforced)
@@ -141,9 +140,9 @@ func TestPostTurnExtract_EventsNameStoredRow(t *testing.T) {
 			Events:      bus,
 		})
 		routes := extractOnlyRoutes{endpoint: extractSrv.URL}
-		pl.sidecarClient = sidecar.NewClient(config.SidecarConfig{Enabled: true}, config.RouterConfig{}, routes, routes)
+		pl.sidecarClient = sidecar.NewClient(config.SidecarConfig{Enabled: true}, routes, routes)
 		sess := pl.sessions.GetOrCreate("cli", "user1")
-		pl.runPostTurnExtract(sess, "I moved back to Portland", "welcome back", nil, nil)
+		pl.runPostTurnExtract(sess, "I moved back to Portland", "welcome back", nil, nil, nil)
 		var extracted []memevents.Event
 		for _, ev := range bus.Replay(sess.ID, 0) {
 			if ev.Kind == memevents.KindFactExtracted {
@@ -184,7 +183,6 @@ func (c classifyRoutes) Resolve(role string) (string, int, bool) {
 }
 func (c classifyRoutes) Status(string) string           { return "online" }
 func (c classifyRoutes) Chain(string) []string          { return []string{"sidecar/fast-model"} }
-func (c classifyRoutes) EndpointForRole(string) string  { return "" }
 func (c classifyRoutes) EndpointForModel(string) string { return c.endpoint }
 
 // The preamble follows the classify role (so its failover) and names
@@ -211,7 +209,7 @@ func TestPreamble_UsesClassifyRoleTarget(t *testing.T) {
 		SidecarEndpoint: "http://127.0.0.1:1", // captured at boot; gone since
 	})
 	routes := classifyRoutes{endpoint: srv.URL}
-	pl.sidecarClient = sidecar.NewClient(config.SidecarConfig{Enabled: true}, config.RouterConfig{}, routes, routes)
+	pl.sidecarClient = sidecar.NewClient(config.SidecarConfig{Enabled: true}, routes, routes)
 
 	got := pl.generatePreamble(context.Background(), "summarize my notes", "standard", func(string) {})
 	if !strings.Contains(got, "On it.") {
@@ -219,5 +217,31 @@ func TestPreamble_UsesClassifyRoleTarget(t *testing.T) {
 	}
 	if gotModel != "fast-model" {
 		t.Errorf("preamble model = %q, want the classify model's request name", gotModel)
+	}
+}
+
+// offlineClassifyRoutes is classifyRoutes with the model offline.
+type offlineClassifyRoutes struct{ classifyRoutes }
+
+func (offlineClassifyRoutes) Status(string) string { return "offline" }
+
+// With the classify chain offline there's no preamble. It fell back to
+// the endpoint captured at boot, stalling each thinking=high turn up to
+// 15s on a host that was down.
+func TestPreamble_SkippedWhenClassifyIsOffline(t *testing.T) {
+	hits := 0
+	boot := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits++ }))
+	defer boot.Close()
+	pl := New(Deps{
+		Engine:          &mockEngine{},
+		Router:          router.NewRouter(config.RouterConfig{Enabled: true}, router.NewRegistry(nil)),
+		Sessions:        session.NewManager(),
+		AgentID:         "test-agent",
+		SidecarEndpoint: boot.URL,
+	})
+	routes := offlineClassifyRoutes{classifyRoutes{endpoint: boot.URL}}
+	pl.sidecarClient = sidecar.NewClient(config.SidecarConfig{Enabled: true}, routes, routes)
+	if got := pl.generatePreamble(context.Background(), "q", "standard", func(string) {}); got != "" || hits != 0 {
+		t.Errorf("preamble %q with %d request(s) while classify is offline, want none", got, hits)
 	}
 }

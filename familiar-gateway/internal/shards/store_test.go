@@ -23,7 +23,7 @@ import (
 
 func setupShardStore(t *testing.T) *PGStore {
 	t.Helper()
-	pool := testutil.PgTestPool(t)
+	pool := testutil.PgScopedPool(t, "shards_test")
 	// Clear prior rows. Every table that FK-references shards must
 	// ride along (shard_passkeys, scheduled_actions + its runs,
 	// shard_skills): TRUNCATE refuses a referenced table unless every

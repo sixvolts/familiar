@@ -279,16 +279,35 @@ func stripToolMessages(msgs []openAIMessage) []openAIMessage {
 // sanitizeToolHistory fixes malformed tool messages in conversation
 // history. Tool messages without tool_call_id crash Cohere2's Jinja
 // template. Remove them and their orphaned assistant counterparts.
+//
+// A tool message must also answer a call of the assistant message
+// before it. One whose call isn't there (a history window that opened
+// after the call, a result after the final reply) is an HTTP 400 on
+// servers that check the pairing, and was sent as-is because it had an
+// id.
 func sanitizeToolHistory(msgs []openAIMessage) []openAIMessage {
 	out := make([]openAIMessage, 0, len(msgs))
+	var calls map[string]bool // ids of the tool calls awaiting results
 	for _, m := range msgs {
-		// Remove tool messages with empty tool_call_id
-		if m.Role == "tool" && m.ToolCallID == "" {
+		if m.Role == "tool" {
+			// Remove tool messages with empty tool_call_id, and results
+			// no preceding assistant message asked for.
+			if m.ToolCallID == "" || !calls[m.ToolCallID] {
+				continue
+			}
+			out = append(out, m)
 			continue
 		}
 		// Remove stub assistant messages that lost their tool_calls
 		if m.Role == "assistant" && m.Content == "..." && len(m.ToolCalls) == 0 {
 			continue
+		}
+		calls = nil
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			calls = make(map[string]bool, len(m.ToolCalls))
+			for _, tc := range m.ToolCalls {
+				calls[tc.ID] = true
+			}
 		}
 		out = append(out, m)
 	}

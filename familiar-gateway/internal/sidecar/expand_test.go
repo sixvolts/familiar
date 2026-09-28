@@ -42,6 +42,16 @@ func TestParseExpandedQueries(t *testing.T) {
 			want: []string{"alpha", "beta"},
 		},
 		{
+			name: "leading numbers that are part of the query are kept",
+			in:   "10.0.0.21 open ports\n3090 vram\n2024 tax deadline",
+			want: []string{"10.0.0.21 open ports", "3090 vram", "2024 tax deadline"},
+		},
+		{
+			name: "at most four",
+			in:   "a\nb\nc\nd\ne\nf",
+			want: []string{"a", "b", "c", "d"},
+		},
+		{
 			name: "single line fallback",
 			in:   "hey",
 			want: []string{"hey"},

@@ -58,8 +58,9 @@ func New(cfg Config) *Builder {
 //  2. System prompt: take as-is, truncate if it overflows its zone.
 //  3. Memories: include in order until the memory budget is exhausted.
 //  4. Tool results: newest-first, drop oldest to fit the tool budget.
-//  5. Conversation: if a summary is present, reserve 40% of the conv budget
-//     for it and 60% for verbatim turns; otherwise give turns the full zone.
+//  5. Conversation: if a summary is present, reserve its size (at most 40%
+//     of the conv budget) for it and the rest for verbatim turns; otherwise
+//     give turns the full zone.
 //     Walk turns newest-first, keep what fits, evict the rest.
 //  6. Fill the TokenBreakdown.
 func (b *Builder) Build(in Input) AssembledContext {
@@ -107,6 +108,16 @@ func (b *Builder) Build(in Input) AssembledContext {
 	out := AssembledContext{
 		SystemPrompt: truncateToTokens(in.SystemPrompt, budget.System),
 		UserPrompt:   truncateToTokens(in.UserPrompt, budget.System),
+	}
+
+	// The user's personality prompt and the relationship lines are sent
+	// whole but belong to no zone of their own: both were packed as if
+	// free, so a long personality prompt (up to a second System zone)
+	// and 20 triples overran the window. They come out of the elastic
+	// conversation zone, as the reserved tokens do.
+	budget.Conversation -= EstimateTokens(out.UserPrompt) + linesTokens(in.RelationshipLines)
+	if budget.Conversation < 0 {
+		budget.Conversation = 0
 	}
 
 	out.Memories = fitMemories(in.Memories, budget.Memories)
@@ -168,7 +179,8 @@ func fitToolResults(results []ToolResult, zoneBudget, maxResultTokens int) []Too
 	return kept
 }
 
-// fitConversation applies the 60/40 turn-vs-summary split from spec §2.
+// fitConversation splits the conversation zone between the summary (its
+// size, capped at the 40% of spec §2) and the verbatim turns.
 //
 // Returns (possibly truncated) summary, the kept turns in original order,
 // and the evicted turns (oldest first) so the caller can feed them to the
@@ -178,9 +190,15 @@ func fitConversation(summary string, turns []session.Turn, zoneBudget int) (stri
 		return "", nil, append([]session.Turn(nil), turns...)
 	}
 
+	// The summary gets what it needs, up to 40% of the zone. A flat 40%
+	// (4k tokens on a 32k model) held back for a ~300-token summary
+	// evicted the turns just before this one.
 	summaryBudget := 0
 	if summary != "" {
 		summaryBudget = zoneBudget * 40 / 100
+		if need := EstimateTokens(summary); need < summaryBudget {
+			summaryBudget = need
+		}
 	}
 	turnBudget := zoneBudget - summaryBudget
 
@@ -189,7 +207,7 @@ func fitConversation(summary string, turns []session.Turn, zoneBudget int) (stri
 	used := 0
 	cutoff := 0 // index of first kept turn in the original slice
 	for i := len(turns) - 1; i >= 0; i-- {
-		tk := EstimateTokens(turns[i].Content)
+		tk := TurnTokens(turns[i])
 		if used+tk > turnBudget && len(keptRev) > 0 {
 			cutoff = i + 1
 			break
@@ -205,6 +223,16 @@ func fitConversation(summary string, turns []session.Turn, zoneBudget int) (stri
 		kept[len(keptRev)-1-i] = t
 	}
 
+	// A window must open on a user turn. A cut inside a tool exchange
+	// keeps tool results whose assistant tool call was cut off, and an
+	// orphan tool message is an HTTP 400 on servers that check pairing
+	// (a lenient template renders a dangling result instead). The
+	// trimmed rows are evicted with the rest.
+	for len(kept) > 0 && kept[0].Role != "user" {
+		kept = kept[1:]
+		cutoff++
+	}
+
 	var evicted []session.Turn
 	if cutoff > 0 {
 		evicted = append([]session.Turn(nil), turns[:cutoff]...)
@@ -212,6 +240,23 @@ func fitConversation(summary string, turns []session.Turn, zoneBudget int) (stri
 
 	fittedSummary := truncateToTokens(summary, summaryBudget)
 	return fittedSummary, kept, evicted
+}
+
+// linesTokens estimates lines sent one per line.
+func linesTokens(lines []string) int {
+	n := 0
+	for _, l := range lines {
+		n += EstimateTokens(l) + 1
+	}
+	return n
+}
+
+// TurnTokens estimates one history message: its text and, for an
+// assistant message that called tools, the calls. A tool-calling turn
+// usually has no text and carries its payload (a whole page body, for
+// update_page) in the calls, which are sent in full.
+func TurnTokens(t session.Turn) int {
+	return EstimateTokens(t.Content) + len(t.ToolCalls)/4
 }
 
 // breakdown totals the tokens across every zone of an assembled context.
@@ -225,12 +270,13 @@ func breakdown(ctx AssembledContext, budget Budget) TokenBreakdown {
 	for _, m := range ctx.Memories {
 		bd.Memories += EstimateTokens(m.Content)
 	}
+	bd.Memories += linesTokens(ctx.RelationshipLines)
 	for _, t := range ctx.ToolResults {
 		bd.Tools += EstimateTokens(t.Content)
 	}
 	bd.Conversation = EstimateTokens(ctx.ConversationSummary)
 	for _, t := range ctx.RecentTurns {
-		bd.Conversation += EstimateTokens(t.Content)
+		bd.Conversation += TurnTokens(t)
 	}
 	bd.Total = bd.System + bd.Memories + bd.Tools + bd.Conversation
 	bd.Headroom = bd.Budget - bd.Total

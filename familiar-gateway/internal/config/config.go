@@ -59,6 +59,9 @@ type Config struct {
 	// and lenient about derived ones, so an upgrade can't start failing
 	// on a legacy config that previously only warned.
 	explicitRoles map[string]bool `toml:"-"`
+	// ignored names the keys in the file that nothing reads (see
+	// ignoredKeys); Validate warns about each.
+	ignored []string `toml:"-"`
 }
 
 // PushConfig holds the VAPID keypair the Web Push subsystem signs with
@@ -1269,9 +1272,11 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("reading config %s: %w", path, err)
 	}
 
-	if _, err := toml.Decode(string(data), cfg); err != nil {
+	md, err := toml.Decode(string(data), cfg)
+	if err != nil {
 		return nil, fmt.Errorf("parsing config %s: %w", path, err)
 	}
+	cfg.ignored = ignoredKnobs(md)
 
 	// Apply expansions.
 	expandConfig(cfg)
@@ -1425,10 +1430,35 @@ func (c *Config) deriveChatModelID() string {
 // the older role="small"/"medium"/"small_async" slot tags) into the
 // per-task role chains, at the model-ID level. Mirrors the resolution
 // order in sidecar.NewClient: explicit <task>_model (with default_model
-// applied) wins, else the legacy slot mapping. The literal
-// router_endpoint fallback has no model ID, so tasks that would only
-// resolve through it are left empty — sidecar keeps that legacy path.
+// applied) wins, else the legacy slot mapping.
+//
+// A legacy router_endpoint with no model in the small slot becomes one
+// (legacyRouterModelID), which that mapping then routes every otherwise
+// unassigned task to. The client only routes through role chains, so a
+// config with router_endpoint and nothing else validated as configured
+// while every task (classify, extract, summarize) was disabled.
 func (c *Config) normalizeSidecarRoles() {
+	if c.Sidecar.Enabled && c.Sidecar.RouterEndpoint != "" {
+		hasSmall := false
+		for _, m := range c.Models {
+			if m.Role == ModelSlotSmall || m.Role == ModelRoleClassifier || m.ID == legacyRouterModelID {
+				hasSmall = true
+				break
+			}
+		}
+		if !hasSmall {
+			c.Models = append(c.Models, ModelConfig{
+				ID:          legacyRouterModelID,
+				Provider:    "llama-server",
+				Endpoint:    c.Sidecar.RouterEndpoint,
+				DisplayName: "Sidecar (legacy [sidecar].router_endpoint)",
+				Role:        ModelSlotSmall,
+			})
+			log.Printf("[config] sidecar: promoted legacy router_endpoint %q to model %q (role=small); tasks without a model use it. Prefer [roles.<task>] chains",
+				c.Sidecar.RouterEndpoint, legacyRouterModelID)
+		}
+	}
+
 	// Legacy slot → model ID (first match; "classifier" aliases small).
 	slotID := map[string]string{}
 	for _, m := range c.Models {
@@ -1498,6 +1528,10 @@ func (c *Config) normalizeSidecarRoles() {
 		c.Roles.ExtractLarge.Primary = c.Sidecar.ExtractLargeModel
 	}
 }
+
+// legacyRouterModelID is the synthetic [[models]] id that carries a
+// legacy [sidecar].router_endpoint into the registry and the task roles.
+const legacyRouterModelID = "sidecar/router-endpoint"
 
 // legacyEmbedderModelID is the synthetic [[models]] id that carries a
 // pre-roles [embedder] block into the registry so it gets a heartbeat.

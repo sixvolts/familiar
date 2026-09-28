@@ -18,8 +18,10 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 )
 
 // ProfileStore is the narrow interface the profile handlers consume.
@@ -79,6 +81,9 @@ func (h *Handler) getProfile(w http.ResponseWriter, r *http.Request) {
 //
 // An empty string is a valid "no personality" state and clears any
 // prior prompt.
+// MaxUserPromptChars bounds a user's personality prompt (~2k tokens).
+const MaxUserPromptChars = 8000
+
 func (h *Handler) patchProfile(w http.ResponseWriter, r *http.Request) {
 	if h.profiles == nil {
 		writeJSONError(w, http.StatusServiceUnavailable, "user profile not configured on this deploy")
@@ -96,6 +101,12 @@ func (h *Handler) patchProfile(w http.ResponseWriter, r *http.Request) {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+		return
+	}
+	// The prompt rides in every turn's system message; past this it
+	// would crowd out the conversation (and be clipped anyway).
+	if n := utf8.RuneCountInString(body.UserPrompt); n > MaxUserPromptChars {
+		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("the personality prompt is %d characters; the limit is %d", n, MaxUserPromptChars))
 		return
 	}
 	if err := h.profiles.Set(r.Context(), userID, body.UserPrompt); err != nil {

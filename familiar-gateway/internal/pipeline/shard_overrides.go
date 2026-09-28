@@ -9,28 +9,19 @@ import "github.com/familiar/gateway/internal/shards"
 // and silently miss the other.
 //
 // Ephemeral shards get every "skip" flag set + no commit; persistent
-// shards get session hydration enabled and commits on.
-//
-// Isolated-visibility shards also flip ExcludeFromHot so any commit
-// the invocation produces (pipeline conversation fact, extracted
-// facts, memory-skill writes) bypasses the engine's RAM cache and
-// goes straight to pgvector. Without this flag the gateway-side
-// pgvector filter would correctly hide the fact from a top-level
-// search, but the engine's hot tier could still surface it for the
-// brief window before consolidation
-// (FAMILIAR-SHARDS-PHASE1-FINDINGS Issue 3).
+// shards get session hydration enabled and commits on. An isolated
+// shard's writes stay out of top-level retrieval through their scope
+// tag.
 func OverridesForShard(sh *shards.Shard) *ShardOverrides {
 	ov := &ShardOverrides{
-		ShardID:             sh.ID,
-		SystemPrompt:        sh.SystemPrompt,
-		SkipMemoryRetrieval: true, // shards never run the retrieval block
-		ToolAllowlist:       append([]string(nil), sh.ToolAllowlist...),
-		ScopeTag:            sh.ScopeTag,
-		BookAccess:          append([]string(nil), sh.BookAccess...),
-		ExcludeFromHot:      sh.Visibility == shards.VisibilityIsolated,
-		ModelOverride:       sh.ModelPreference,
-		TierHint:            sh.TierPreference,
-		MaxTokens:           sh.MaxTokens,
+		ShardID:       sh.ID,
+		SystemPrompt:  sh.SystemPrompt,
+		ToolAllowlist: append([]string(nil), sh.ToolAllowlist...),
+		ScopeTag:      sh.ScopeTag,
+		BookAccess:    append([]string(nil), sh.BookAccess...),
+		ModelOverride: sh.ModelPreference,
+		TierHint:      sh.TierPreference,
+		MaxTokens:     sh.MaxTokens,
 	}
 	if sh.Temperature != 0 {
 		t := sh.Temperature
@@ -51,7 +42,6 @@ func OverridesForShard(sh *shards.Shard) *ShardOverrides {
 // prompt text.
 func EphemeralOverrides() *ShardOverrides {
 	return &ShardOverrides{
-		SkipMemoryRetrieval:  true,
 		SkipSessionHydration: true,
 		SkipCommit:           true,
 		ToolAllowlist:        []string{},

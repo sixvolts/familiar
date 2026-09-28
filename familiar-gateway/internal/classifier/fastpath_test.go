@@ -9,7 +9,7 @@ func TestTrivialFastPath_FiresOnPleasantries(t *testing.T) {
 		"ty", "thx", "much appreciated", "appreciate it", "cheers",
 		"hi", "Hello", "hey there", "good morning", "yo",
 		"bye", "see you later", "ttyl", "take care", "good night",
-		"lol", "haha", "cool", "nice", "awesome", "perfect", "well done",
+		"lol", "haha", "good bot",
 		"  thanks  ", "thanks 🙏", "🙏 thanks",
 	}
 	for _, msg := range cases {
@@ -39,6 +39,9 @@ func TestTrivialFastPath_FallsThroughWhenAmbiguousOrReal(t *testing.T) {
 		// excluded affirmations/negations — could be "yes, save it"
 		"yes", "no", "yeah", "nope", "sure", "ok", "okay", "k", "got it",
 		"do it", "go ahead", "sounds good", "no problem",
+		// approving reactions are the yes to a pending question
+		"perfect", "great", "cool", "nice", "awesome", "sweet", "excellent",
+		"wonderful", "amazing", "brilliant", "well done", "nice one", "later",
 		// questions are never trivial
 		"thanks?", "what's up?", "hi, what's the weather?",
 		// real requests that merely start social

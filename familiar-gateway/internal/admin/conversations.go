@@ -485,7 +485,10 @@ func (s *ConversationStore) MessagesAll(ctx context.Context, conversationID stri
 // owner check a colliding id loaded someone else's history (tool
 // results included) into the caller's prompt. An empty ownerID loads
 // nothing.
-func (s *ConversationStore) LoadRecentTurns(ctx context.Context, conversationID, ownerID string, limit int, visit func(role, content string, toolCalls []byte, toolCallID string)) error {
+//
+// skip leaves out the conversation's first skip messages: the ones the
+// session's rolling summary already covers.
+func (s *ConversationStore) LoadRecentTurns(ctx context.Context, conversationID, ownerID string, limit, skip int, visit func(role, content string, toolCalls []byte, toolCallID string)) error {
 	if visit == nil || limit <= 0 || ownerID == "" {
 		return nil
 	}
@@ -494,16 +497,20 @@ func (s *ConversationStore) LoadRecentTurns(ctx context.Context, conversationID,
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT role, content, tool_calls, COALESCE(tool_call_id, '') FROM (
-			SELECT m.role, m.content, m.tool_calls, m.tool_call_id, m.seq
-			  FROM messages m
-			  JOIN conversations c ON c.id = m.conversation_id AND c.user_id = $3
-			 WHERE m.conversation_id = $1::uuid
-			   AND m.role IN ('user', 'assistant', 'tool')
-			 ORDER BY m.seq DESC
+			SELECT role, content, tool_calls, tool_call_id, seq FROM (
+				SELECT m.role, m.content, m.tool_calls, m.tool_call_id, m.seq,
+				       row_number() OVER (ORDER BY m.seq) AS n
+				  FROM messages m
+				  JOIN conversations c ON c.id = m.conversation_id AND c.user_id = $3
+				 WHERE m.conversation_id = $1::uuid
+				   AND m.role IN ('user', 'assistant', 'tool')
+			) numbered
+			 WHERE n > $4
+			 ORDER BY seq DESC
 			 LIMIT $2
 		) sub
 		ORDER BY seq ASC`,
-		conversationID, limit, ownerID)
+		conversationID, limit, ownerID, skip)
 	if err != nil {
 		return fmt.Errorf("messages: recent turns: %w", err)
 	}

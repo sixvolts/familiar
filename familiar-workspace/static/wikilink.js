@@ -331,7 +331,7 @@
     }
 
     // uploadImage POSTs one blob to a page's media endpoint and
-    // resolves {url, thumb_url, alt_text, ...}. Shared by the paste
+    // resolves {id, url, width, height, alt_text}. Shared by the paste
     // hook and the ⋯-menu "Add image" flow.
     function uploadImage(ctx, blob) {
         var form = new FormData();
@@ -362,6 +362,14 @@
                 return false;
             }
             uploadImage(ctx, blob).then(function (d) {
+                // The editor is shared by every page the tab shows: if
+                // another page is open by now, the image (which belongs
+                // to the page it was pasted into) must not go into it.
+                var now = typeof getPageContext === "function" ? getPageContext() : null;
+                if (!now || now.pageId !== ctx.pageId) {
+                    mediaNotify("The image wasn't inserted: the page you pasted it into is no longer open.");
+                    return;
+                }
                 callback(d.url, d.alt_text || (blob && blob.name) || "image");
             }).catch(function (e) {
                 mediaNotify("Image upload failed: " + (e.message || e));

@@ -939,3 +939,38 @@ func TestUpdatePage_WithoutAReadStillConditional(t *testing.T) {
 		t.Fatalf("unconditional write (If-Match %v)", b.lastIfMatch)
 	}
 }
+
+// stripReadAffixes removes only what read_page added: its exact footer
+// for this page, and the title heading when the page doesn't have one.
+func TestStripReadAffixes(t *testing.T) {
+	bk := &admin.Book{Name: "Reading", Slug: "reading"}
+	page := func(title, slug, content string) *admin.WikiPage {
+		return &admin.WikiPage{Title: title, Slug: slug, Content: content}
+	}
+	footer := "\n\n---\nbook: Reading (slug: reading)\npage_slug: log\ncreated: 2 days ago\nupdated: just now"
+	log := "Notes\n\n---\nbook: Piranesi\nrating: 4"
+	cases := []struct {
+		name    string
+		content string
+		cur     *admin.WikiPage
+		want    string
+	}{
+		{"whole read echoed back", "# Log\n\n" + log + footer, page("Log", "log", log), log},
+		{"a reading log's last entry stays", log, page("Log", "log", log), log},
+		{"another page's footer stays", "body" + strings.Replace(footer, "page_slug: log", "page_slug: other", 1),
+			page("Log", "log", "body"), "body" + strings.Replace(footer, "page_slug: log", "page_slug: other", 1)},
+		{"a page's own title heading stays", "# Grocery List\n\n- milk\n- eggs",
+			page("Grocery List", "grocery-list", "# Grocery List\n\n- milk"), "# Grocery List\n\n- milk\n- eggs"},
+		{"an echoed title heading goes", "# Grocery List\n\n- milk\n- eggs",
+			page("Grocery List", "grocery-list", "- milk"), "- milk\n- eggs"},
+		{"echo of a page that has the heading keeps one",
+			"# Grocery List\n\n# Grocery List\n\n- milk" + strings.Replace(footer, "page_slug: log", "page_slug: grocery-list", 1),
+			page("Grocery List", "grocery-list", "# Grocery List\n\n- milk"), "# Grocery List\n\n- milk"},
+		{"a different heading stays", "# Shopping\n\n- milk", page("Grocery List", "grocery-list", "- milk"), "# Shopping\n\n- milk"},
+	}
+	for _, c := range cases {
+		if got := stripReadAffixes(c.content, bk, c.cur); got != c.want {
+			t.Errorf("%s:\n got %q\nwant %q", c.name, got, c.want)
+		}
+	}
+}

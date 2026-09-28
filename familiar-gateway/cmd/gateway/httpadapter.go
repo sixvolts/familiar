@@ -153,13 +153,6 @@ func runHTTPAdapter(ctx context.Context, d httpAdapterDeps, adminHOut **admin.Ha
 					adminH.AttachConversationStore(convStore)
 					log.Printf("[admin] conversation store attached")
 				}
-				// Workspace notes store (FAMILIAR-WORKSPACE-SPEC
-				// Phase 2a). Same shared pool. The notes skill
-				// switches over to this in Phase 2c.
-				if notesStore := admin.NewNotesStore(sharedPool); notesStore != nil {
-					adminH.AttachNotesStore(notesStore)
-					log.Printf("[admin] notes store ready")
-				}
 				// Weather skill powers the Home weather widget
 				// (/console/api/home/weather). Same instance the
 				// LLM tools use, so the TTL cache is shared.
@@ -536,16 +529,30 @@ func runHTTPAdapter(ctx context.Context, d httpAdapterDeps, adminHOut **admin.Ha
 
 					// Page media (MEDIA-DIAGRAMS Phase 1): images
 					// on the filesystem, metadata in page_media.
-					// The sweep reaps files orphaned by page
-					// deletes (rows CASCADE; bytes don't).
+					// The sweep reaps files whose rows are gone. Rows
+					// go only when their page is hard-deleted, which
+					// only the opt-in purge does: soft-deleted pages
+					// keep theirs.
 					if mediaStore, mErr := media.NewStore(sharedPool, cfg.Media.Dir, int64(cfg.Media.MaxUploadMB)<<20); mErr == nil {
 						adminH.AttachMedia(mediaStore)
 						log.Printf("[media] page-media store at %s (max %dMB)", cfg.Media.Dir, cfg.Media.MaxUploadMB)
+						purgeWiki := adminH.WikiStore()
+						purgeAfter := time.Duration(cfg.Media.PurgeDeletedAfterDays) * 24 * time.Hour
+						if purgeWiki != nil && purgeAfter > 0 {
+							log.Printf("[media] deleted pages are purged after %d days", cfg.Media.PurgeDeletedAfterDays)
+						}
 						go func() {
 							tick := time.NewTicker(24 * time.Hour)
 							defer tick.Stop()
 							for {
 								sweepCtx, cancelSweep := context.WithTimeout(context.Background(), 5*time.Minute)
+								if purgeWiki != nil && purgeAfter > 0 {
+									if n, err := purgeWiki.PurgeDeletedPages(sweepCtx, purgeAfter); err != nil {
+										log.Printf("[media] purge deleted pages: %v", err)
+									} else if n > 0 {
+										log.Printf("[media] purged %d page(s) deleted over %d days ago", n, cfg.Media.PurgeDeletedAfterDays)
+									}
+								}
 								if n, err := mediaStore.SweepOrphans(sweepCtx, 24*time.Hour); err != nil {
 									log.Printf("[media] orphan sweep: %v", err)
 								} else if n > 0 {

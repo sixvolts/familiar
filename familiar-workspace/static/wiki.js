@@ -115,6 +115,31 @@
         return '<pre class="chat-md-fallback">' + escapeHTML(md || "") + '</pre>';
     }
 
+    // Menu keyboard: Escape closes and returns focus to the button;
+    // the arrow keys move between the visible items.
+    function focusFirstItem(menu) {
+        const first = [...menu.querySelectorAll(".notes-overflow-item")]
+            .find((el) => !el.hidden && el.style.display !== "none");
+        if (first) first.focus();
+    }
+    function menuKeys(e, overflow, menu, btn, setOpen) {
+        if (!overflow.classList.contains("is-open")) return;
+        if (e.key === "Escape") {
+            e.preventDefault();
+            setOpen(false);
+            btn.focus();
+            return;
+        }
+        if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+        const items = [...menu.querySelectorAll(".notes-overflow-item")]
+            .filter((el) => !el.hidden && el.style.display !== "none");
+        if (!items.length) return;
+        e.preventDefault();
+        const at = items.indexOf(document.activeElement);
+        const next = e.key === "ArrowDown" ? (at + 1) % items.length : (at - 1 + items.length) % items.length;
+        items[next].focus();
+    }
+
     function render(host, tab) {
         // Mark every OTHER shell as background — render() is the
         // workspace's signal that `tab` is the active wiki tab in
@@ -204,6 +229,14 @@
             research: null,
         };
 
+        // The shell's document listeners are tied to this signal, and
+        // teardown() (tab closed) aborts it. The book splash re-renders
+        // with a signal of its own (splashAbort): it added a document
+        // listener on every render, each holding its detached menu.
+        const shellAbort = new AbortController();
+        const signal = shellAbort.signal;
+        let splashAbort = null;
+
         // ── Shell DOM ─────────────────────────────────────────
         const root = document.createElement("div");
         root.className = "notes-shell wiki-shell";
@@ -217,6 +250,7 @@
 
         const bookSelect = document.createElement("select");
         bookSelect.className = "wiki-book-select";
+        bookSelect.setAttribute("aria-label", "Book");
 
         const newBookBtn = document.createElement("button");
         newBookBtn.type = "button";
@@ -238,6 +272,7 @@
         newPageBtn.className = "wiki-new-page-btn";
         newPageBtn.textContent = "+";
         newPageBtn.title = "New page";
+        newPageBtn.setAttribute("aria-label", "New page");
         newPageBtn.disabled = true;
         pagesHead.append(pagesEyebrow, newPageBtn);
         left.appendChild(pagesHead);
@@ -272,12 +307,15 @@
         const titleInput = document.createElement("input");
         titleInput.className = "notes-title";
         titleInput.placeholder = "Untitled";
+        titleInput.setAttribute("aria-label", "Page title");
         titleInput.spellcheck = true;
 
         const meta = document.createElement("div");
         meta.className = "notes-meta";
         const savedDot = document.createElement("span");
         savedDot.className = "notes-saved";
+        // Saving… / Saved / Conflict, spoken as it changes.
+        savedDot.setAttribute("aria-live", "polite");
         savedDot.textContent = "";
         meta.appendChild(savedDot);
 
@@ -288,6 +326,9 @@
         overflowBtn.className = "notes-overflow-btn";
         overflowBtn.textContent = "⋯";
         overflowBtn.title = "More actions";
+        overflowBtn.setAttribute("aria-label", "Page actions");
+        overflowBtn.setAttribute("aria-haspopup", "menu");
+        overflowBtn.setAttribute("aria-expanded", "false");
         overflowBtn.addEventListener("click", (e) => {
             e.stopPropagation();
             // Refresh role-gated items each time the menu opens so
@@ -305,19 +346,28 @@
             shareItem.style.display = canWritePages() ? "" : "none";
             shareItem.textContent = shared ? "Stop sharing publicly" : "Share publicly";
             copyLinkItem.hidden = !shared;
-            overflow.classList.toggle("is-open");
+            const open = !overflow.classList.contains("is-open");
+            setMenuOpen(open);
+            if (open) focusFirstItem(overflowMenu);
         });
         const overflowMenu = document.createElement("div");
         overflowMenu.className = "notes-overflow-menu";
+        overflowMenu.setAttribute("role", "menu");
+        function setMenuOpen(open) {
+            overflow.classList.toggle("is-open", open);
+            overflowBtn.setAttribute("aria-expanded", open ? "true" : "false");
+        }
+        overflow.addEventListener("keydown", (e) => menuKeys(e, overflow, overflowMenu, overflowBtn, setMenuOpen));
         // Pin — a per-user preference, so it's available to ANY member
         // (not write-gated like delete/share). Surfaces the page on Home.
         const pinItem = document.createElement("button");
         pinItem.type = "button";
+        pinItem.setAttribute("role", "menuitem");
         pinItem.className = "notes-overflow-item";
         pinItem.textContent = "Pin page";
         pinItem.addEventListener("click", (e) => {
             e.stopPropagation();
-            overflow.classList.remove("is-open");
+            setMenuOpen(false);
             togglePinPage();
         });
         overflowMenu.appendChild(pinItem);
@@ -331,9 +381,16 @@
             const file = imagePicker.files && imagePicker.files[0];
             imagePicker.value = "";
             if (!file || !localState.page || !tuiEditor) return;
+            // Insert only into the page the image was added to (see
+            // notes.js): the upload belongs to it.
+            const forPage = localState.page.id;
             window.familiarWikiLink.uploadImage(
-                { bookSlug: localState.bookSlug, pageId: localState.page.id }, file,
+                { bookSlug: localState.bookSlug, pageId: forPage }, file,
             ).then((d) => {
+                if (!localState.page || localState.page.id !== forPage || !tuiEditor) {
+                    notifyErr("The image wasn't inserted: the page you added it to is no longer open.");
+                    return;
+                }
                 tuiEditor.exec("addImage", { imageUrl: d.url, altText: d.alt_text || file.name });
             }).catch((e) => {
                 notifyErr("Image upload failed: " + (e.message || e));
@@ -341,25 +398,30 @@
         });
         const addImageItem = document.createElement("button");
         addImageItem.type = "button";
+        addImageItem.setAttribute("role", "menuitem");
         addImageItem.className = "notes-overflow-item";
         addImageItem.textContent = "Add image…";
         addImageItem.addEventListener("click", (e) => {
             e.stopPropagation();
-            overflow.classList.remove("is-open");
+            setMenuOpen(false);
             imagePicker.click();
         });
         overflowMenu.appendChild(addImageItem);
         overflowMenu.appendChild(imagePicker);
         const addDiagramItem = document.createElement("button");
         addDiagramItem.type = "button";
+        addDiagramItem.setAttribute("role", "menuitem");
         addDiagramItem.className = "notes-overflow-item";
         addDiagramItem.textContent = "Add diagram";
         addDiagramItem.addEventListener("click", (e) => {
             e.stopPropagation();
-            overflow.classList.remove("is-open");
+            setMenuOpen(false);
             if (!tuiEditor || !localState.page) return;
             const md = tuiEditor.getMarkdown();
-            const fenceIndex = (md.match(/```mermaid/g) || []).length;
+            // Counted as the diagram tab counts them (mermaid-blocks.js).
+            const fenceIndex = window.familiarMermaid && window.familiarMermaid.fences
+                ? window.familiarMermaid.fences(md).length
+                : (md.match(/```mermaid/g) || []).length;
             const starter = "graph TD;\n  A[Start] --> B[Next];";
             tuiEditor.setMarkdown(
                 md.replace(/\n*$/, "") + "\n\n```mermaid\n" + starter + "\n```\n",
@@ -383,22 +445,24 @@
         // readers. The copy-link row appears once a share exists.
         const shareItem = document.createElement("button");
         shareItem.type = "button";
+        shareItem.setAttribute("role", "menuitem");
         shareItem.className = "notes-overflow-item";
         shareItem.textContent = "Share publicly";
         shareItem.addEventListener("click", (e) => {
             e.stopPropagation();
-            overflow.classList.remove("is-open");
+            setMenuOpen(false);
             toggleSharePage();
         });
         overflowMenu.appendChild(shareItem);
         const copyLinkItem = document.createElement("button");
         copyLinkItem.type = "button";
+        copyLinkItem.setAttribute("role", "menuitem");
         copyLinkItem.className = "notes-overflow-item";
         copyLinkItem.textContent = "Copy public link";
         copyLinkItem.hidden = true;
         copyLinkItem.addEventListener("click", (e) => {
             e.stopPropagation();
-            overflow.classList.remove("is-open");
+            setMenuOpen(false);
             copySharePageLink();
         });
         overflowMenu.appendChild(copyLinkItem);
@@ -407,11 +471,12 @@
         // page's menu.
         const deletePageItem = document.createElement("button");
         deletePageItem.type = "button";
+        deletePageItem.setAttribute("role", "menuitem");
         deletePageItem.className = "notes-overflow-item danger";
         deletePageItem.textContent = "Delete page";
         deletePageItem.addEventListener("click", (e) => {
             e.stopPropagation();
-            overflow.classList.remove("is-open");
+            setMenuOpen(false);
             deletePage();
         });
         overflowMenu.appendChild(deletePageItem);
@@ -516,7 +581,7 @@
         }
 
         // Click-outside closes the menu — same pattern as notes.
-        document.addEventListener("click", () => overflow.classList.remove("is-open"));
+        document.addEventListener("click", () => setMenuOpen(false), { signal });
 
         header.append(backBtn, titleInput, meta, overflow);
 
@@ -564,19 +629,11 @@
         editor.className = "notes-editor";
         // Toast UI Editor renders into a div (not a textarea) and
         // owns its chrome inside. notes-editor-host is the stable
-        // class CSS uses to size the editor surface, distinct from
-        // the page-links footer below.
+        // class CSS uses to size the editor surface.
         const editorContainer = document.createElement("div");
         editorContainer.id = "tui-editor-wiki-" + tab.id;
         editorContainer.className = "notes-editor-host";
         editor.appendChild(editorContainer);
-        // Page-links footer — outbound + inbound link sections
-        // populated by renderPageLinks() on each page load. Hidden
-        // until the first non-empty render.
-        const linksHost = document.createElement("div");
-        linksHost.className = "notes-page-links";
-        linksHost.hidden = true;
-        editor.appendChild(linksHost);
         right.appendChild(editor);
 
         // currentBookRole reads the caller's role on the active
@@ -883,6 +940,7 @@
             } else {
                 localState.pageSlug = null;
                 localState.page = null;
+                localState.pageGone = false;
                 tab.state = { ...(tab.state || {}), pageSlug: null, pageId: null };
                 showBookSplash();
             }
@@ -975,6 +1033,7 @@
                     "/console/api/books/" + encodeURIComponent(localState.bookSlug) +
                     "/pages/" + encodeURIComponent(pageSlug));
                 localState.page = p;
+                localState.pageGone = false;
                 // If the flush above failed (409 / network), the editor
                 // is still dirty on the same page: keep the local edits
                 // and let the banner/poll reconcile, rather than
@@ -1007,9 +1066,6 @@
                 }
                 renderPageList();
                 updateShareIndicator();
-                // Page-links footer (outbound + backlinks) disabled
-                // until graph-based UI is designed.
-                // renderPageLinks(p.id);
                 if (window.FamiliarWorkspace && window.FamiliarWorkspace.updateTabTitle) {
                     window.FamiliarWorkspace.updateTabTitle(tab.id, p.title || "Untitled");
                 }
@@ -1020,115 +1076,6 @@
                 console.warn("wiki: load page failed", e);
                 showBookSplash();
             }
-        }
-
-        // renderPageLinks fetches outbound + inbound for the page
-        // and paints the footer below the editor. Hides the host
-        // when both lists are empty so a fresh page doesn't show
-        // an empty pane.
-        async function renderPageLinks(pageID) {
-            linksHost.innerHTML = "";
-            linksHost.hidden = true;
-            if (!pageID || !localState.bookSlug) return;
-            const base = "/console/api/books/" + encodeURIComponent(localState.bookSlug) +
-                "/page-by-id/" + encodeURIComponent(pageID);
-            let outbound = [], inbound = [];
-            try {
-                const [linksResp, backResp] = await Promise.all([
-                    apiJSON(base + "/links"),
-                    apiJSON(base + "/backlinks"),
-                ]);
-                outbound = (linksResp && linksResp.items) || [];
-                inbound = (backResp && backResp.items) || [];
-            } catch (e) {
-                // Endpoint may 404 on a page that just got
-                // recreated by an external write; render empty
-                // and try again on the next load.
-                console.warn("wiki: renderPageLinks failed", e);
-                return;
-            }
-            if (outbound.length === 0 && inbound.length === 0) return;
-            if (outbound.length > 0) {
-                linksHost.appendChild(buildLinksSection(
-                    "Links from this page", outbound, makeOutboundClick));
-            }
-            if (inbound.length > 0) {
-                linksHost.appendChild(buildLinksSection(
-                    "Linked from", inbound, makeInboundClick));
-            }
-            linksHost.hidden = false;
-        }
-
-        function buildLinksSection(label, items, makeClick) {
-            const section = document.createElement("div");
-            section.className = "notes-page-links-section";
-            const eyebrow = document.createElement("div");
-            eyebrow.className = "notes-page-links-eyebrow";
-            eyebrow.textContent = label + " (" + items.length + ")";
-            section.appendChild(eyebrow);
-            for (const it of items) {
-                section.appendChild(buildLinkRow(it, makeClick));
-            }
-            return section;
-        }
-
-        function buildLinkRow(it, makeClick) {
-            const row = document.createElement("div");
-            row.className = "notes-page-link-row";
-            // Outbound rows have target_*; inbound have source_*.
-            const isOutbound = it.target_page_slug !== undefined;
-            const isBroken = isOutbound && !it.target_page_id;
-            if (isBroken) row.classList.add("is-broken");
-            const title = document.createElement("span");
-            title.className = "notes-page-link-title";
-            if (isOutbound) {
-                title.textContent = it.display_text || it.target_page_title ||
-                    it.target_page_slug;
-            } else {
-                title.textContent = it.source_page_title || it.source_page_slug;
-            }
-            row.appendChild(title);
-            // Show book name on cross-book links so the source is
-            // clear at a glance.
-            if (isOutbound && it.target_book_slug && it.target_book_slug !== localState.bookSlug) {
-                const book = document.createElement("span");
-                book.className = "notes-page-link-book";
-                book.textContent = it.target_book_slug;
-                row.appendChild(book);
-            } else if (!isOutbound && it.source_book_slug && it.source_book_slug !== localState.bookSlug) {
-                const book = document.createElement("span");
-                book.className = "notes-page-link-book";
-                book.textContent = it.source_book_slug;
-                row.appendChild(book);
-            }
-            if (!isBroken) {
-                row.addEventListener("click", makeClick(it));
-            }
-            return row;
-        }
-
-        // makeOutboundClick / makeInboundClick close over `it` and
-        // return the click handler. Same-book targets go through
-        // loadPage; cross-book targets need a focusBook → loadPage
-        // sequence.
-        function makeOutboundClick(it) {
-            return () => {
-                const targetBook = it.target_book_slug || localState.bookSlug;
-                if (targetBook === localState.bookSlug) {
-                    loadPage(it.target_page_slug);
-                } else {
-                    focusBook(targetBook).then(() => loadPage(it.target_page_slug));
-                }
-            };
-        }
-        function makeInboundClick(it) {
-            return () => {
-                if (it.source_book_slug === localState.bookSlug) {
-                    loadPage(it.source_page_slug);
-                } else {
-                    focusBook(it.source_book_slug).then(() => loadPage(it.source_page_slug));
-                }
-            };
         }
 
         // ── View-mode dispatch ────────────────────────────────
@@ -1322,7 +1269,10 @@
             titleEl.textContent = bookName;
             titleRow.appendChild(titleEl);
 
+            if (splashAbort) splashAbort.abort();
+            splashAbort = null;
             if (currentBookRole() === "owner") {
+                splashAbort = new AbortController();
                 const overflow = document.createElement("div");
                 overflow.className = "notes-overflow wiki-splash-overflow";
                 const overflowBtn = document.createElement("button");
@@ -1330,19 +1280,31 @@
                 overflowBtn.className = "notes-overflow-btn";
                 overflowBtn.textContent = "⋯";
                 overflowBtn.title = "More actions";
-                overflowBtn.addEventListener("click", (e) => {
-                    e.stopPropagation();
-                    overflow.classList.toggle("is-open");
-                });
+                overflowBtn.setAttribute("aria-label", "Book actions");
+                overflowBtn.setAttribute("aria-haspopup", "menu");
+                overflowBtn.setAttribute("aria-expanded", "false");
+                const setOpen = (open) => {
+                    overflow.classList.toggle("is-open", open);
+                    overflowBtn.setAttribute("aria-expanded", open ? "true" : "false");
+                };
                 const menu = document.createElement("div");
                 menu.className = "notes-overflow-menu";
+                menu.setAttribute("role", "menu");
+                overflowBtn.addEventListener("click", (e) => {
+                    e.stopPropagation();
+                    const open = !overflow.classList.contains("is-open");
+                    setOpen(open);
+                    if (open) focusFirstItem(menu);
+                });
+                overflow.addEventListener("keydown", (e) => menuKeys(e, overflow, menu, overflowBtn, setOpen));
                 const manageItem = document.createElement("button");
                 manageItem.type = "button";
+                manageItem.setAttribute("role", "menuitem");
                 manageItem.className = "notes-overflow-item";
                 manageItem.textContent = "Manage users";
                 manageItem.addEventListener("click", (e) => {
                     e.stopPropagation();
-                    overflow.classList.remove("is-open");
+                    setOpen(false);
                     const name = (localState.book && localState.book.name) || localState.bookSlug;
                     openMembersModal(localState.bookSlug, name);
                 });
@@ -1351,18 +1313,20 @@
                 // page's overflow, since it's a book-level action.
                 const archiveItem = document.createElement("button");
                 archiveItem.type = "button";
+                archiveItem.setAttribute("role", "menuitem");
                 archiveItem.className = "notes-overflow-item danger";
                 archiveItem.textContent = "Archive book";
                 archiveItem.addEventListener("click", (e) => {
                     e.stopPropagation();
-                    overflow.classList.remove("is-open");
+                    setOpen(false);
                     archiveBook();
                 });
                 menu.appendChild(archiveItem);
                 overflow.append(overflowBtn, menu);
                 // Click-outside closes — same pattern as the page-
-                // editor overflow menu.
-                document.addEventListener("click", () => overflow.classList.remove("is-open"));
+                // editor overflow menu. One listener per render, dropped
+                // by the next render or the tab's teardown.
+                document.addEventListener("click", () => setOpen(false), { signal: splashAbort.signal });
                 titleRow.appendChild(overflow);
             }
 
@@ -1499,6 +1463,7 @@
             localState.pageSlug = null;
             localState.book = null;
             localState.page = null;
+            localState.pageGone = false;
             localState.pages = [];
             tab.state = { ...(tab.state || {}), bookSlug: null, pageSlug: null, pageId: null };
             if (window.FamiliarWorkspace && window.FamiliarWorkspace.updateTabTitle) {
@@ -1512,6 +1477,7 @@
 
         function scheduleSave() {
             if (!localState.page) return;
+            if (localState.pageGone) return;
             savedDot.textContent = "Saving…";
             if (localState.saveTimer) clearTimeout(localState.saveTimer);
             localState.saveTimer = setTimeout(() => {
@@ -1529,7 +1495,7 @@
         }
 
         function flushSave(immediate, keepalive) {
-            if (!localState.page) return Promise.resolve();
+            if (!localState.page || localState.pageGone) return Promise.resolve();
             if (localState.saving) {
                 // A save is in flight. Returning here dropped the
                 // keystrokes typed during its round trip (the status then
@@ -1584,6 +1550,10 @@
                 let body = null;
                 try { body = text ? JSON.parse(text) : null; } catch (_) { /* ignore */ }
                 const stillHere = localState.page && localState.page.id === savingId;
+                if (resp.status === 404 && stillHere) {
+                    showPageGone();
+                    return;
+                }
                 if (resp.status === 409) {
                     if (stillHere) handleStaleConflict(body && body.current);
                     return;
@@ -1604,9 +1574,14 @@
                     savedDot.textContent = "Merging…";
                     return;
                 }
-                // PATCH responses don't join share state (only GET
-                // does) — carry it forward for the render trigger.
-                if (!p.share && localState.page && localState.page.share) p.share = localState.page.share;
+                // The response says whether the page is shared (it names
+                // the share, with its link); fill in the link only if it
+                // was left out. Carrying the old share forward whenever the
+                // response had none hid a share turned off elsewhere.
+                const knownShare = localState.page && localState.page.share;
+                if (p.share && !p.share.public_url && knownShare && knownShare.share_key === p.share.share_key) {
+                    p.share.public_url = knownShare.public_url;
+                }
                 localState.page = p;
                 seedSyncBase(p);
                 clearBanner();
@@ -1812,6 +1787,12 @@
                     swapInRemote(fresh, /*silent=*/!localState.isForeground);
                 }
             } catch (e) {
+                // Deleted elsewhere: say so (poll swallowed the 404, and
+                // every later save just failed).
+                if (/not found|HTTP 404/i.test((e && e.message) || "")) {
+                    showPageGone();
+                    return;
+                }
                 // Polling is best-effort; a transient network blip
                 // shouldn't surface as an error to the user.
                 console.debug("wiki: poll failed", e);
@@ -1880,6 +1861,67 @@
             }
         }
 
+        // showPageGone: the open page was deleted elsewhere. Saving stops
+        // (each save failed silently while the user kept writing), and
+        // the banner offers the text back, which nothing else can.
+        function showPageGone() {
+            if (!localState.page || localState.pageGone) return;
+            localState.pageGone = true;
+            if (localState.saveTimer) { clearTimeout(localState.saveTimer); localState.saveTimer = null; }
+            savedDot.textContent = "Deleted";
+            clearBanner();
+            const banner = document.createElement("div");
+            banner.className = "wiki-sync-banner";
+            banner.setAttribute("role", "alert");
+            const msg = document.createElement("div");
+            msg.className = "wiki-sync-banner-msg";
+            msg.textContent = "This page was deleted elsewhere. Nothing you type here will be saved.";
+            const actions = document.createElement("div");
+            actions.className = "wiki-sync-banner-actions";
+            const copy = document.createElement("button");
+            copy.type = "button";
+            copy.className = "wiki-sync-banner-btn";
+            copy.textContent = "Copy the text";
+            copy.addEventListener("click", async () => {
+                try {
+                    await navigator.clipboard.writeText(tuiEditor ? tuiEditor.getMarkdown() : "");
+                    toast("Page text copied", "success");
+                } catch (e) {
+                    notifyErr("Couldn't copy: " + (e.message || String(e)));
+                }
+            });
+            actions.appendChild(copy);
+            if (canWritePages()) {
+                const recreate = document.createElement("button");
+                recreate.type = "button";
+                recreate.className = "wiki-sync-banner-btn wiki-sync-banner-btn-primary";
+                recreate.textContent = "Save as a new page";
+                recreate.addEventListener("click", async () => {
+                    try {
+                        const p = await apiJSON("/console/api/books/" + encodeURIComponent(localState.bookSlug) + "/pages", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                                title: titleInput.value || "Untitled",
+                                content: tuiEditor ? tuiEditor.getMarkdown() : "",
+                            }),
+                        });
+                        localState.page = null;
+                        localState.pageGone = false;
+                        clearBanner();
+                        await refreshPages();
+                        loadPage(p.slug);
+                    } catch (e) {
+                        notifyErr("Couldn't save: " + (e.message || String(e)));
+                    }
+                });
+                actions.appendChild(recreate);
+            }
+            banner.append(msg, actions);
+            bannerHost.appendChild(banner);
+            localState.banner = banner;
+        }
+
         // showStaleBanner is the dirty-editor conflict UI. Sits
         // above the editor surface, offers a deterministic choice:
         // discard local + reload, or overwrite remote with local.
@@ -1889,6 +1931,7 @@
             clearBanner();
             const banner = document.createElement("div");
             banner.className = "wiki-sync-banner";
+            banner.setAttribute("role", "alert");
             const msg = document.createElement("div");
             msg.className = "wiki-sync-banner-msg";
             msg.textContent = "This page was updated by " +
@@ -2009,6 +2052,7 @@
                 const idx = localState.pages.findIndex((x) => x.id === localState.page.id);
                 if (idx >= 0) localState.pages.splice(idx, 1);
                 localState.page = null;
+                localState.pageGone = false;
                 localState.pageSlug = null;
                 tab.state = { ...(tab.state || {}), pageSlug: null, pageId: null };
                 renderPageList();
@@ -2034,6 +2078,7 @@
                 localState.bookSlug = null;
                 localState.pageSlug = null;
                 localState.page = null;
+                localState.pageGone = false;
                 renderBookSelect();
                 if (localState.books.length > 0) {
                     bookSelect.value = localState.books[0].slug;
@@ -2058,6 +2103,7 @@
             if (slug && slug !== localState.bookSlug) {
                 localState.pageSlug = null;
                 localState.page = null;
+                localState.pageGone = false;
                 localState.history.length = 0;
                 tab.state = { ...(tab.state || {}), bookSlug: slug, pageSlug: null, pageId: null };
                 loadBook(slug);
@@ -2221,6 +2267,7 @@
             }
             stopPolling();
             localState.page = null;
+            localState.pageGone = false;
             localState.pageSlug = null;
             localState.research = { bookSlug, pageSlug, pageId: null };
             localState.viewMode = "research";
@@ -2288,12 +2335,20 @@
                 return;
             }
             if (localState.page && detail.page_id === localState.page.id) {
-                poll();
+                if (detail.kind === "page-deleted") showPageGone();
+                else poll();
                 return;
             }
-            // Different page in the same book (or a book change) —
-            // bump the index so its row's updated_at is current.
-            refreshPages().then(renderPageList).catch(() => {});
+            // Another page: only this book's list shows it. Every event
+            // from any book (the user's own autosaves in a note, a
+            // research run appending evidence) refetched and rebuilt
+            // the list, twice, in every open wiki tab.
+            if (!localState.book || !detail.book_id || detail.book_id !== localState.book.id) return;
+            if (localState.listRefreshTimer) clearTimeout(localState.listRefreshTimer);
+            localState.listRefreshTimer = setTimeout(() => {
+                localState.listRefreshTimer = null;
+                refreshPages();
+            }, 400);
         }
 
         return {
@@ -2315,7 +2370,15 @@
             setForeground,
             // teardown stops the background pollers when a tab is
             // closed so a phantom tab doesn't keep fetching.
-            teardown() { stopPolling(); unregisterUnloadFlush(); clearBanner(); localState.research = null; },
+            teardown() {
+                stopPolling();
+                unregisterUnloadFlush();
+                clearBanner();
+                localState.research = null;
+                shellAbort.abort();
+                if (splashAbort) splashAbort.abort();
+                if (localState.listRefreshTimer) clearTimeout(localState.listRefreshTimer);
+            },
         };
     }
 
@@ -2403,6 +2466,7 @@
 
             const select = document.createElement("select");
             select.className = "wiki-members-role";
+            select.setAttribute("aria-label", "Role for " + m.user_id);
             select.dataset.userId = m.user_id;
             for (const r of ["owner", "writer", "reader"]) {
                 const opt = document.createElement("option");
@@ -2422,6 +2486,7 @@
             removeBtn.title = m.role === "owner"
                 ? "Demote to writer first to remove an owner"
                 : "Remove member";
+            removeBtn.setAttribute("aria-label", "Remove " + m.user_id);
             removeBtn.dataset.userId = m.user_id;
             removeBtn.dataset.role = m.role;
             // Owners can't be removed directly per backend rule.

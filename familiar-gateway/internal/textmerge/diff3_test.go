@@ -204,3 +204,21 @@ func TestMerge_ScatteredRewriteOfLargePageIsAConflict(t *testing.T) {
 		t.Errorf("refusing the merge allocated %d MB", alloc>>20)
 	}
 }
+
+// Both sides inserting overlapping lines at one place keeps each line
+// once: the retried save, and two people who both added "eggs".
+func TestMerge_OverlappingInsertionsNotDuplicated(t *testing.T) {
+	cases := []struct{ base, mine, theirs, want string }{
+		{"- milk\n", "- milk\n- eggs\n", "- milk\n- eggs\n- bread\n", "- milk\n- eggs\n- bread\n"},
+		{"- milk\n", "- milk\n- eggs\n- bread\n", "- milk\n- eggs\n", "- milk\n- eggs\n- bread\n"},
+		{"- milk\n", "- milk\n- eggs\n- jam\n", "- milk\n- bread\n- eggs\n", "- milk\n- bread\n- eggs\n- jam\n"},
+		// Disjoint insertions still keep both.
+		{"- milk\n", "- milk\n- eggs\n", "- milk\n- bread\n", "- milk\n- eggs\n- bread\n"},
+	}
+	for _, c := range cases {
+		got, conflict := Merge(c.base, c.mine, c.theirs)
+		if conflict || got != c.want {
+			t.Errorf("Merge(%q, %q, %q) = %q, %v; want %q", c.base, c.mine, c.theirs, got, conflict, c.want)
+		}
+	}
+}

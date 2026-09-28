@@ -19,27 +19,24 @@ import (
 	"errors"
 	"fmt"
 	"image"
-	_ "image/gif" // register decoders for sniffing + thumbnails
-	"image/jpeg"
+	_ "image/gif" // register the formats DecodeConfig sniffs
+	_ "image/jpeg"
 	_ "image/png"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
-	"golang.org/x/image/draw"
 	_ "golang.org/x/image/webp" // decode-only webp support
 
 	"github.com/familiar/gateway/internal/db"
 )
 
-// thumbWidth is the long-edge cap for generated thumbnails. Images
-// already at or under it get no thumbnail — the original serves.
-const thumbWidth = 400
-
 // maxDimension rejects header-claimed dimensions beyond anything a
-// real photo produces — 12k×12k RGBA is already ~575MB decoded.
+// real photo produces. Uploads are never decoded past the header here
+// (thumbnails were: a 1MB PNG claiming 12000×12000 at 16 bits cost a
+// 1.15GB decode, for thumbnails no client used), but every viewer's
+// browser decodes the image.
 const maxDimension = 12000
 
 var ErrNotFound = errors.New("media: not found")
@@ -112,9 +109,7 @@ func (s *Store) SaveImage(ctx context.Context, pageID, userID, filename string, 
 		return nil, ErrUnsupported
 	}
 	// A "valid" header with degenerate or absurd dimensions is not an
-	// image anyone meant to upload. DecodeConfig reads ONLY the
-	// header, so claimed-huge dimensions are also the decompression-
-	// bomb vector for the thumbnail decode below — cap them.
+	// image anyone meant to upload.
 	if cfg.Width <= 0 || cfg.Height <= 0 ||
 		cfg.Width > maxDimension || cfg.Height > maxDimension {
 		return nil, ErrUnsupported
@@ -125,14 +120,9 @@ func (s *Store) SaveImage(ctx context.Context, pageID, userID, filename string, 
 		return nil, fmt.Errorf("media: write: %w", err)
 	}
 
-	// Thumbnail: best-effort. A failed decode (corrupt tail, exotic
-	// subformat) downgrades to "no thumbnail", never a failed upload.
+	// No thumbnail: nothing displays one. Rows from before keep theirs
+	// (Open serves it for ?thumb=1).
 	thumbKey := ""
-	if cfg.Width > thumbWidth {
-		if tk, err := s.writeThumb(key, data, cfg.Width); err == nil {
-			thumbKey = tk
-		}
-	}
 
 	row := s.pool.QueryRowContext(ctx, `
 		INSERT INTO page_media (
@@ -151,41 +141,18 @@ func (s *Store) SaveImage(ctx context.Context, pageID, userID, filename string, 
 	if err := row.Scan(&m.ID, &m.CreatedAt); err != nil {
 		// Index failed — don't leave the bytes orphaned for a day.
 		_ = os.Remove(filepath.Join(s.root, key))
-		if thumbKey != "" {
-			_ = os.Remove(filepath.Join(s.root, thumbKey))
-		}
 		return nil, fmt.Errorf("media: insert: %w", err)
 	}
 	return m, nil
 }
 
-func (s *Store) writeThumb(key string, data []byte, srcWidth int) (string, error) {
-	img, _, err := image.Decode(bytes.NewReader(data))
-	if err != nil {
-		return "", err
-	}
-	b := img.Bounds()
-	h := int(float64(b.Dy()) * float64(thumbWidth) / float64(b.Dx()))
-	if h < 1 {
-		h = 1
-	}
-	dst := image.NewRGBA(image.Rect(0, 0, thumbWidth, h))
-	draw.CatmullRom.Scale(dst, dst.Bounds(), img, b, draw.Over, nil)
-	thumbKey := strings.TrimSuffix(key, filepath.Ext(key)) + "_thumb.jpg"
-	f, err := os.Create(filepath.Join(s.root, thumbKey))
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	if err := jpeg.Encode(f, dst, &jpeg.Options{Quality: 80}); err != nil {
-		_ = os.Remove(filepath.Join(s.root, thumbKey))
-		return "", err
-	}
-	return thumbKey, nil
-}
-
 // Get loads one row plus the owning book id (joined for authz).
 func (s *Store) Get(ctx context.Context, id string) (*Media, error) {
+	// A malformed id is a missing one; cast in SQL it was a 500 carrying
+	// the driver's error text.
+	if _, err := uuid.Parse(id); err != nil {
+		return nil, ErrNotFound
+	}
 	var m Media
 	err := s.pool.QueryRowContext(ctx, `
 		SELECT pm.id::text, pm.page_id::text, pm.user_id, pm.filename,
@@ -223,7 +190,10 @@ func (s *Store) Open(m *Media, thumb bool) (*os.File, string, error) {
 }
 
 // SweepOrphans removes files in the root that no page_media row
-// references (page deletes CASCADE the rows; the bytes land here).
+// references: rows removed with a hard-deleted page (only
+// WikiStore.PurgeDeletedPages hard-deletes; a soft-deleted page keeps
+// its rows and files), deleted diagram renders, or an upload that
+// crashed between the write and the insert.
 // minAge protects in-flight uploads. Returns the number removed.
 func (s *Store) SweepOrphans(ctx context.Context, minAge time.Duration) (int, error) {
 	rows, err := s.pool.QueryContext(ctx,

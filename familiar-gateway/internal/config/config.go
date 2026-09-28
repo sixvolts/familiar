@@ -342,6 +342,13 @@ type MediaConfig struct {
 	Dir string `toml:"dir"`
 	// MaxUploadMB caps a single upload. Default 10.
 	MaxUploadMB int `toml:"max_upload_mb"`
+	// PurgeDeletedAfterDays hard-deletes notes and wiki pages deleted
+	// more than this many days ago, with their history, public shares
+	// and images (files included). 0 (the default) never purges:
+	// deleted pages then stay in the database, and their images on
+	// disk, indefinitely. The app has no way to restore a deleted
+	// page either way; until the purge, an operator can.
+	PurgeDeletedAfterDays int `toml:"purge_deleted_after_days"`
 }
 
 type SkillsConfig struct {

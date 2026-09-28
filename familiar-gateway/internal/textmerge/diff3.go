@@ -65,10 +65,15 @@ func Merge(base, mine, theirs string) (string, bool) {
 			// nothing from base was changed or removed here. Standard
 			// diff3 calls this a conflict, but for a shared list it's
 			// the common case (two people each add an item at the end),
-			// so we keep both rather than clobber. Deterministic order
-			// (mine then theirs); for a list the order doesn't matter.
-			out = append(out, mReg...)
-			out = append(out, tReg...)
+			// so we keep both rather than clobber: their union, each
+			// line both inserted kept once. Appending one after the other
+			// doubled such lines: a save retried after its response was
+			// lost merged its own earlier "eggs" in again.
+			u, ok := unionLines(mReg, tReg)
+			if !ok {
+				return false
+			}
+			out = append(out, u...)
 		default:
 			// Both sides changed or removed the SAME base line(s)
 			// differently — a genuine conflict, resolve manually.
@@ -96,6 +101,28 @@ func Merge(base, mine, theirs string) (string, bool) {
 	}
 
 	return joinLines(out), false
+}
+
+// unionLines merges two insertions made at the same place: the lines
+// both contain (their LCS) once, in order, and between them each
+// side's own lines, mine then theirs. False when they're too large to
+// diff.
+func unionLines(m, t []string) ([]string, bool) {
+	pairs, ok := lcs(m, t)
+	if !ok {
+		return nil, false
+	}
+	out := make([]string, 0, len(m)+len(t)-len(pairs))
+	pm, pt := 0, 0
+	for _, p := range pairs {
+		out = append(out, m[pm:p[0]]...)
+		out = append(out, t[pt:p[1]]...)
+		out = append(out, m[p[0]])
+		pm, pt = p[0]+1, p[1]+1
+	}
+	out = append(out, m[pm:]...)
+	out = append(out, t[pt:]...)
+	return out, true
 }
 
 // matchMap runs an LCS over (base, other) and returns base-index ->

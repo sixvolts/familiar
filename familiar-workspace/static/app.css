@@ -4398,20 +4398,6 @@ code {
     overflow-y: auto;
     padding: 6px;
 }
-.notes-folder-group {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    margin-bottom: 8px;
-}
-.notes-folder-name {
-    font-family: var(--font-mono);
-    font-size: var(--text-2xs);
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: var(--fg-3);
-    padding: 6px 10px 2px;
-}
 .notes-row {
     display: flex;
     flex-direction: column;
@@ -4701,70 +4687,6 @@ code {
     flex-direction: column;
 }
 
-/* Page links footer — sits below the editor, shows outbound +
-   inbound links for the current page. flex: 0 0 auto so it
-   takes only as much vertical space as it needs (capped by
-   max-height + internal scroll). Hidden when the page has no
-   links in either direction. */
-.notes-page-links {
-    flex: 0 0 auto;
-    max-height: 220px;
-    overflow-y: auto;
-    background: var(--bg-surface);
-    border-top: 1px solid var(--border-subtle);
-    padding: 8px 14px 12px;
-    font-size: var(--text-sm);
-    color: var(--fg-2);
-}
-.notes-page-links[hidden] { display: none; }
-.notes-page-links-section {
-    margin-top: 6px;
-}
-.notes-page-links-section:first-child { margin-top: 0; }
-.notes-page-links-eyebrow {
-    font-family: var(--font-mono);
-    font-size: 10.5px;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    color: var(--fg-3);
-    margin-bottom: 4px;
-}
-.notes-page-link-row {
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
-    padding: 3px 0;
-    cursor: pointer;
-    color: var(--fg-1);
-    line-height: 1.4;
-}
-.notes-page-link-row:hover .notes-page-link-title {
-    text-decoration: underline;
-    color: var(--iris-300);
-}
-.notes-page-link-title {
-    font-weight: 500;
-}
-.notes-page-link-book {
-    font-size: 11px;
-    color: var(--fg-3);
-    font-family: var(--font-mono);
-}
-.notes-page-link-row.is-broken {
-    color: var(--danger);
-    cursor: default;
-}
-.notes-page-link-row.is-broken:hover .notes-page-link-title {
-    text-decoration: none;
-    color: var(--danger);
-}
-.notes-page-link-row.is-broken .notes-page-link-title::after {
-    content: " (not yet)";
-    color: var(--fg-3);
-    font-weight: 400;
-    font-size: 11px;
-}
-
 /* Inline wiki-links rendered inside the editor by wikilink.js.
    Each surface's links match its icon color, hover to the other's:
    notes (purple iris) ↔ wiki (blue slate).
@@ -4984,7 +4906,6 @@ code {
     .notes-row-title,
     .notes-row-snippet,
     .notes-search { display: none; }
-    .notes-folder-name { display: none; }
 }
 
 /* ══════════════════════════════════════════════════════════════════

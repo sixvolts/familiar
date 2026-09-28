@@ -417,6 +417,12 @@ allow_cidrs = []
 # gateway with book-membership checks.
 dir           = "~/.familiar/media"
 max_upload_mb = 10
+# Hard-delete notes and wiki pages deleted more than this many days ago,
+# with their history, public shares and images (files too). 0 = never:
+# deleted pages and their images then stay in the database and on disk.
+# The app can't restore a deleted page either way; until the purge, an
+# operator can (from the database).
+purge_deleted_after_days = 0
 
 [push]
 # Web Push (PWA notifications). When VAPID keys are set, users can enable

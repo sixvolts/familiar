@@ -86,7 +86,7 @@ type HomePin struct {
 // unified Pinned section without separate fetches.
 //
 // Note pins come exclusively from user_page_prefs via the wiki store
-// — NOT the legacy notes table. The notesmigration copied notes into
+// — NOT the legacy notes table. The notes migration copied notes into
 // personal-book pages keeping the same id, so the notes table and
 // wiki_pages diverged: deleting a note in the panel soft-deletes the
 // page but leaves the notes-table row pinned. Reading notes.pinned

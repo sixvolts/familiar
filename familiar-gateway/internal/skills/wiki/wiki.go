@@ -68,7 +68,7 @@ type WikiBackend interface {
 	SetPagePinned(ctx context.Context, userID, pageID string, pinned bool) error
 }
 
-// Skill implements the eight wiki tools. Backend resolution is lazy
+// Skill implements the nine wiki tools. Backend resolution is lazy
 // for the same reason the notes skill is lazy — main.go registers
 // the skill before the admin pool block constructs the store.
 type Skill struct {
@@ -824,29 +824,32 @@ func pageLocationData(bookSlug, pageSlug, title string) json.RawMessage {
 // formatPageFull injects for read_page, if an agent echoed them back into
 // update_page content. read_page shows "# {title}\n\n{body}\n\n---\nbook: ...";
 // update_page stores raw body, so an agent that copies what it read would
-// otherwise double the header and bake the footer into the page. Only strips
-// a leading "# {title}" that matches this page's actual title (so a real,
-// intentional H1 with different text is preserved), and only a trailing
-// "---\nbook: ..." block that matches the footer shape.
-func stripReadAffixes(content, title string) string {
+// otherwise double the header and bake the footer into the page.
+//
+// Only what read_page added goes. The footer only when it is that
+// page's footer, line for line (book and page slugs included): cutting
+// from the last "---" whose next line began "book: " took the last
+// entry of a reading log. The "# {title}" line when that footer was
+// there too (the whole read came back), or when the stored page
+// doesn't itself start with it: a page that begins with its title as a
+// heading lost it on every update.
+func stripReadAffixes(content string, bk *admin.Book, cur *admin.WikiPage) string {
 	out := content
-	// Leading injected title header: "# {title}" as the first line,
-	// followed by a blank line. Match against the real title only.
-	if strings.TrimSpace(title) != "" {
-		lead := "# " + strings.TrimSpace(title)
-		trimmed := strings.TrimLeft(out, "\n")
-		if trimmed == lead || strings.HasPrefix(trimmed, lead+"\n") {
-			rest := strings.TrimPrefix(trimmed, lead)
-			out = strings.TrimLeft(rest, "\n")
-		}
+	footer := regexp.MustCompile(`\n---\nbook: [^\n]* \(slug: ` + regexp.QuoteMeta(bk.Slug) +
+		`\)\npage_slug: ` + regexp.QuoteMeta(cur.Slug) + `\ncreated: [^\n]*\nupdated: [^\n]*\s*$`)
+	echoed := false
+	if loc := footer.FindStringIndex(out); loc != nil {
+		out = strings.TrimRight(out[:loc[0]], "\n")
+		echoed = true
 	}
-	// Trailing metadata footer: a "---" fence line followed by a
-	// "book: " line (the formatPageFull footer). Cut from the last such
-	// fence to the end when the block looks like the injected footer.
-	if idx := strings.LastIndex(out, "\n---\n"); idx != -1 {
-		tail := out[idx+len("\n---\n"):]
-		if strings.HasPrefix(strings.TrimLeft(tail, " "), "book: ") {
-			out = strings.TrimRight(out[:idx], "\n")
+	if title := strings.TrimSpace(cur.Title); title != "" {
+		lead := "# " + title
+		startsWith := func(s string) bool {
+			s = strings.TrimLeft(s, "\n")
+			return s == lead || strings.HasPrefix(s, lead+"\n")
+		}
+		if startsWith(out) && (echoed || !startsWith(cur.Content)) {
+			out = strings.TrimLeft(strings.TrimPrefix(strings.TrimLeft(out, "\n"), lead), "\n")
 		}
 	}
 	return out
@@ -878,7 +881,7 @@ func (s *Skill) updatePage(ctx context.Context, userID, bookSlug, pageSlug, newT
 	if err != nil {
 		return skills.ToolResult{}, fmt.Errorf("update/read: %w", err)
 	}
-	content = stripReadAffixes(content, cur.Title)
+	content = stripReadAffixes(content, bk, cur)
 	// Write against the version the model read (see readVersions). If
 	// it never read the page this session, the version just fetched at
 	// least closes the gap between that read and this write.
@@ -1073,17 +1076,6 @@ func formatPageFull(bk *admin.Book, p *admin.WikiPage) string {
 		humanizeTimestamp(p.CreatedAt),
 		humanizeTimestamp(p.UpdatedAt),
 	)
-}
-
-// appendParagraph adds text as a fresh paragraph at the bottom of body.
-// Mirrors NotesStore.Append semantics: separate from existing content
-// by a blank line.
-func appendParagraph(body, text string) string {
-	body = strings.TrimRight(body, "\n")
-	if body == "" {
-		return text
-	}
-	return body + "\n\n" + text
 }
 
 func bookNotFoundMsg(slug string) string {

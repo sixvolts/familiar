@@ -37,7 +37,7 @@ to search-budget+3, pipeline.go); `web_search` per trusted turn = effort
 shallow 1 / deep 5 (tier fallback 1/2/5/10); **shard turns had
 `web_search` hard-disabled** (`shardClassifierOutput` stamps
 `SearchNone`); per-tool-result cap 2000 tokens; whole-turn tool zone =
-12% × (window − 4096); 300 s turn wall clock; `fetch_page` ≤12K chars,
+12% × (window − 4096); 30-minute turn cap (`turnHardCap`); `fetch_page` ≤12K chars,
 no PDF/JS; Brave ≤10 results, no freshness param, no client rate-limit.
 
 Two consequences drive everything: **budgets reset per turn** (tool
@@ -175,8 +175,15 @@ The `MaxWorkers` semaphore lives on the skill, **gateway-wide** —
 overlapping runs (re-spawns, concurrent users) share one pool so total
 in-flight workers never exceed the cap (default 3: ≤ inference
 slots − 2). Detached contexts parented on the skill's root context,
-300 s per worker, 10 min per run; `Close()` cancels the root so gateway
-shutdown cuts workers instead of leaving them racing teardown.
+600 s per worker (`workerTimeout`), 20 min per round (`runDeadline`);
+`Close()` cancels the root so gateway shutdown cuts workers instead of
+leaving them racing teardown. Worker, writer and synthesis turns are
+started with `pipeline.BoundToCaller`, so these deadlines, `Close()`
+and a user's stop reach the running turn (a pipeline turn is otherwise
+detached from its caller and runs to the 30-minute `turnHardCap`).
+A worker succeeds only if the evidence page gained findings during its
+turn; one that ends without appending any is a failure (retried by
+gap-fill).
 Supervisor appends a completion line (`run <id> complete: n/total …`)
 and per-worker failure lines; partial results are normal — re-spawn
 only missing tasks.
@@ -298,12 +305,18 @@ the skill** and invoking the model only to write the final note:
      workers for *only the failed tasks* — a new supervisor repeats this
      step. No model call, no marker parsing; the gap signal is the
      worker error itself.
-   - **Synthesize:** otherwise `status=synthesizing`, and the skill runs
-     one **owner-path turn** (`pl.Handle` in a dedicated
-     `research:run:{id}` session) prompted to read the evidence page,
-     write the final note to the personal book, run the memory pass, and
-     reply with a ≤200-word summary. `spawn_research_workers` is refused
-     inside a run session, so this turn can only synthesize.
+   - **Synthesize:** otherwise `status=synthesizing`. If the evidence
+     page has no worker findings (every worker failed or came back
+     empty), the run fails instead. Otherwise the skill reads the
+     evidence server-side and runs two envelope turns in a dedicated
+     `research:run:{id}` session (`synthesize.go`): the **note**, a
+     no-tools completion over the evidence (inlined, capped at
+     `maxEvidenceChars`, fenced as data), whose reply the skill writes
+     into the personal-book stub; then the **memory pass**, whose only
+     tool is `save_fact`, over the note, whose reply is the ≤200-word
+     summary. Neither turn retrieves memory or can fetch, search, or
+     write pages. `spawn_research_workers` is refused inside a run
+     session.
 3. **Deliver:** append the summary as an assistant message to the
    *originating conversation* (`convStore.AppendMessage`, `model="research"`),
    set `status=done` + the note location, and send a **mobile Web Push**
@@ -324,9 +337,12 @@ bounds depth.
 - Terminal status writes + delivery run on a **detached context**, not
   the (cancellable) synthesis-turn context, so a shutdown or transient
   error mid-synthesis still marks the run terminal instead of wedging it.
+  Status writes at a transition are retried; if they still fail, or
+  synthesis panics, the run is failed and the user told.
 - A boot-time **`FailOrphanedRuns`** marks any run still non-terminal at
   startup failed — its driving goroutine died with the old process, so
-  it can't resume; reconciling unblocks the conversation.
+  it can't resume; reconciling unblocks the conversation, and each such
+  run's conversation gets a "didn't finish (gateway restart)" message.
 - One active run per conversation is enforced by a **partial-unique
   index** (`conversation_id WHERE status IN (researching,
   synthesizing)`); `Create` returns `ErrActiveRunExists` on conflict —
@@ -340,15 +356,14 @@ and the user notified at that point, unconditionally. `wikiknowledge`
 extraction (the note → knowledge-graph enrichment) is a *best-effort
 post-pass*, never a gate on delivery. Three properties enforce this:
 
-1. **Success = the note landed, not the turn's exit code.** A deep
-   synthesis routinely writes the note + a 20-fact memory pass, then hits
-   the pipeline's 300 s turn cap before emitting a final summary. The
-   synthesizer re-reads the note stub after the turn: if the placeholder
-   is gone, the run is `done` regardless of `turnErr` (a delivered note
-   that reports `failed` with an error push was the exact bug here).
+1. **Success = the note landed.** The note turn's reply is written
+   into the stub by the skill; if that turn fails, the findings are
+   salvaged into the note (without the skill's status lines) and the run
+   is still `done`. A failed memory pass costs the summary and the
+   facts, not the note.
 2. **Extraction is detached.** The page-saved hook fires
    `wikiknowledge.OnPageSaved` in a goroutine on `context.Background()`,
-   so it never blocks the write or runs inside the turn's 300 s budget.
+   so it never blocks the write or runs inside a turn's budget.
    The page-saved **SSE publish stays synchronous** so the live evidence
    view still updates instantly.
 3. **Large documents route to the big model.** A 5–12K-char write-up
@@ -363,11 +378,12 @@ post-pass*, never a gate on delivery. Three properties enforce this:
 ### Wiring
 
 The skill is registered early (to advertise its tools) but its autonomy
-deps are attached late via `SetOrchestrator(SynthesizeFunc)` — a closure
-built in `main.go` after `convStore` + `pushSender` + the run store
-exist (they're constructed after the skill today). The closure holds
-`pl.Handle`, `convStore`, `pushSender`, and the run store; the skill's
-supervisor calls it. No registration move, no push-ordering hazard.
+deps are attached late via `SetOrchestrator(runs, DeliverFunc)` — the
+delivery closure is built in `main.go` after `convStore` + `pushSender`
++ the run store exist (they're constructed after the skill today) and
+posts into the conversation + pushes. Synthesis itself lives in the
+skill and runs through its `Invoke` (the shard path). No registration
+move, no push-ordering hazard.
 
 ### Progress surface — poll + live evidence page
 
@@ -417,8 +433,8 @@ personal-book + `Research:` title convention (`researchNoteFrom`).
 - **Inline `compose_research_note`** (writer model set): the compose tool
   sets the same `Data` and `researchNoteFrom` accepts its tool name, so
   it rides the same `done`-event path.
-- **Deep synthesis** (server-side, no SSE client): `makeResearchSynthesizer`
-  appends the link to the delivered summary in Go before `deliverResearch`
+- **Deep synthesis** (server-side, no SSE client): the skill's synthesis
+  appends the card to the delivered summary in Go before delivery
   (the poll loop still swaps the right pane to the note on done).
 
 On the client the inline paths auto-open the note editable in the right
@@ -482,12 +498,19 @@ parallelism to buy context nobody holds.
   writes, no profile, no other books. A prompt-injected worker can at
   worst graffiti the evidence page; it cannot read personal notes, so
   the fetch-as-exfiltration channel is closed by `BookAccess`.
-- Facts enter the memory engine only through the trusted turn's curated
-  pass, after synthesis (stage public research before private data).
+- The graffiti is read by synthesis, so synthesis runs nothing it could
+  use: the note turn has no tools and no memory in context, and the
+  memory pass has only `save_fact` over the note. (It used to be one
+  owner turn with every tool and the user's memories in context, which
+  reopened the exfiltration channel the worker envelope closes.) What
+  remains: injected text can still shape the note and the facts saved
+  from it.
+- Facts enter the memory engine only through the curated memory pass,
+  after synthesis (stage public research before private data).
 - Evidence pages are **excluded from `wikiknowledge` extraction**
   (`OnPageSaved` skips `research:%` books), so worker-fetched web content
   — low-value and possibly prompt-injected — never seeds memory. Only
-  the curated `save_fact` pass on the trusted turn writes memory. (This
+  the curated `save_fact` memory pass writes memory. (This
   closes what an earlier draft listed as an accepted risk.)
 - `fetch_page`'s dial-time SSRF guard applies to workers unchanged.
 - `SearchBudget` is envelope-level and never settable by page content

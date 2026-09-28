@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestContext_ParsesGroundingAndDedupes(t *testing.T) {
@@ -106,5 +107,63 @@ func TestContext_ErrorCodes(t *testing.T) {
 			t.Errorf("status %d: error %q should mention %q", tc.code, err, tc.want)
 		}
 		srv.Close()
+	}
+}
+
+// Sources come out in a fixed order, ranked ("generic") pages first, and
+// a page listed in two categories is one source with merged snippets.
+// The categories were flattened in random map order before the count
+// cut, so which sources survived changed from call to call.
+func TestContext_OrderIsFixedAndPagesMerge(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"grounding":{
+			"map":[{"title":"Map pin","url":"https://m.example","snippets":["m"]}],
+			"news":[{"title":"Alpha again","url":"https://a.example","snippets":["one","three"]}],
+			"aaa":[{"title":"Delta","url":"https://d.example","snippets":["d"]}],
+			"generic":[{"title":"Alpha","url":"https://a.example","snippets":["one","two"]},
+			           {"title":"Gamma","url":"https://g.example","snippets":["g"]}]
+		}}`))
+	}))
+	defer srv.Close()
+	c := New("k", 5)
+	c.SetContextURL(srv.URL)
+	for i := 0; i < 20; i++ {
+		out, err := c.Context(context.Background(), "q", 4, "")
+		if err != nil {
+			t.Fatalf("Context: %v", err)
+		}
+		var urls []string
+		for _, o := range out {
+			urls = append(urls, o.URL)
+		}
+		if strings.Join(urls, " ") != "https://a.example https://g.example https://d.example https://m.example" {
+			t.Fatalf("sources = %v, want generic first, then the other categories by name", urls)
+		}
+		if strings.Join(out[0].Snippets, ",") != "one,two,three" {
+			t.Fatalf("merged snippets = %v", out[0].Snippets)
+		}
+	}
+}
+
+// Context has its own, longer client timeout than Search's: a slower
+// page-body response failed with "Client.Timeout exceeded" even though
+// the tool call had time left.
+func TestContext_OutlivesTheSearchTimeout(t *testing.T) {
+	oldS, oldC := searchTimeout, contextTimeout
+	searchTimeout, contextTimeout = 50*time.Millisecond, 2*time.Second
+	defer func() { searchTimeout, contextTimeout = oldS, oldC }()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"grounding":{"generic":[{"title":"A","url":"https://a.example","snippets":["x"]}]},"web":{"results":[]}}`))
+	}))
+	defer srv.Close()
+	c := New("k", 5)
+	c.SetContextURL(srv.URL)
+	c.SetBaseURL(srv.URL)
+	if _, err := c.Context(context.Background(), "q", 1, ""); err != nil {
+		t.Errorf("Context cut by the search timeout: %v", err)
+	}
+	if _, err := c.Search(context.Background(), "q"); err == nil {
+		t.Error("Search outlived its own (shortened) timeout; the test isn't measuring anything")
 	}
 }

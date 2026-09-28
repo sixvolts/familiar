@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/familiar/gateway/internal/db"
+	"github.com/google/uuid"
 )
 
 // ErrRunNotFound is returned when a run id (or active-run lookup) has
@@ -202,16 +203,26 @@ func (s *ResearchRunStore) IncrementWorkerDone(ctx context.Context, id string, i
 // by in-memory goroutines that don't survive a restart, so any run
 // still 'researching'/'synthesizing' at boot is orphaned — reconciling
 // them here unwedges conversations that would otherwise refuse a new
-// run forever (§6.7). Returns the number reconciled.
-func (s *ResearchRunStore) FailOrphanedRuns(ctx context.Context, reason string) (int, error) {
-	res, err := s.db.ExecContext(ctx, `
+// run forever (§6.7). Returns the runs reconciled, so their
+// conversations can be told.
+func (s *ResearchRunStore) FailOrphanedRuns(ctx context.Context, reason string) ([]*ResearchRun, error) {
+	rows, err := s.db.QueryContext(ctx, `
 		UPDATE research_runs SET status = 'failed', error = $1, updated_at = NOW()
-		 WHERE status IN ('researching','synthesizing')`, reason)
+		 WHERE status IN ('researching','synthesizing')
+		RETURNING `+researchRunCols, reason)
 	if err != nil {
-		return 0, fmt.Errorf("research_runs: reconcile: %w", err)
+		return nil, fmt.Errorf("research_runs: reconcile: %w", err)
 	}
-	n, _ := res.RowsAffected()
-	return int(n), nil
+	defer rows.Close()
+	var out []*ResearchRun
+	for rows.Next() {
+		r, err := scanResearchRun(rows)
+		if err != nil {
+			return out, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 // Get fetches a run by id (any owner — callers that need ownership
@@ -333,8 +344,8 @@ func (h *Handler) AttachResearchCanceller(f func(runID string) bool) { h.researc
 
 // cancelResearchRun backs POST /console/api/research/runs/{id}/cancel —
 // the card's stop button. Owner-scoped: marks the run failed("stopped by
-// user") and cuts its in-flight workers. Idempotent: cancelling an
-// already-terminal run is a no-op 200.
+// user") and cuts what is running (workers or the write-up). Idempotent:
+// cancelling an already-terminal run is a no-op 200 with its status.
 func (h *Handler) cancelResearchRun(w http.ResponseWriter, r *http.Request) {
 	if h.researchRuns == nil {
 		writeJSONError(w, http.StatusNotFound, "research runs not enabled")
@@ -347,6 +358,12 @@ func (h *Handler) cancelResearchRun(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.PathValue("id"))
 	if id == "" {
 		writeJSONError(w, http.StatusBadRequest, "run id is required")
+		return
+	}
+	// Run ids are UUIDs; anything else is no run (it was a 500 carrying
+	// the database's cast error).
+	if _, err := uuid.Parse(id); err != nil {
+		writeJSONError(w, http.StatusNotFound, "run not found")
 		return
 	}
 	run, err := h.researchRuns.Get(r.Context(), id)
@@ -369,12 +386,22 @@ func (h *Handler) cancelResearchRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Mark failed FIRST so the supervisor's advanceRun / the synthesizer
-	// (both re-read status) bail; then cut the in-flight workers.
+	// (both re-read status) bail; then cut what is running. Only while
+	// the run is still active: a run that finished between the read
+	// above and here stays done (it was rewritten "stopped by user"
+	// after its note had been delivered).
 	st := RunStatusFailed
 	reason := "stopped by user"
-	if err := h.researchRuns.Update(r.Context(), id, RunPatch{Status: &st, Error: &reason}); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+	applied, err := h.researchRuns.UpdateIfActive(r.Context(), id, RunPatch{Status: &st, Error: &reason})
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "couldn't stop the run")
 		return
+	}
+	if !applied {
+		if cur, gErr := h.researchRuns.Get(r.Context(), id); gErr == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"status": cur.Status})
+			return
+		}
 	}
 	if h.researchCanceller != nil {
 		h.researchCanceller(id)

@@ -3,9 +3,7 @@
 // skills.Skill interface.
 //
 // This is deliberately a wrapper, not a reimplementation — the Brave
-// client lives in internal/brave so that the pre-execution orchestrator
-// (internal/prefetch) and the LLM-driven skill registry can share the
-// same underlying HTTP plumbing.
+// client lives in internal/brave, shared with the news skill.
 package search
 
 import (
@@ -13,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/familiar/gateway/internal/brave"
 	"github.com/familiar/gateway/internal/skills"
@@ -227,8 +226,7 @@ const defaultPageReadChars = 6000
 // less, because the API has no length parameter — it returns what it has
 // and the trimming is ours to do. Truncation is reported inline so the
 // model knows it is looking at a partial source rather than the whole
-// thing, and the count of omitted sources is stated so it can decide
-// whether to ask again with a tighter query.
+// thing; every source that came back is listed (formatPageRead).
 func (s *Skill) executePageRead(ctx context.Context, params json.RawMessage) (skills.ToolResult, error) {
 	var args pageReadArgs
 	if len(params) > 0 {
@@ -363,7 +361,13 @@ func formatPageRead(sources []brave.ContextSource, budget int) string {
 			b.WriteString(full[i])
 			continue
 		}
-		b.WriteString(full[i][:len(head[i])+alloc[i]])
+		// Cut on a rune boundary: a byte cut could split a multi-byte
+		// character and hand the model invalid UTF-8.
+		cut := len(head[i]) + alloc[i]
+		for cut > len(head[i]) && !utf8.RuneStart(full[i][cut]) {
+			cut--
+		}
+		b.WriteString(full[i][:cut])
 		b.WriteString("\n   [trimmed — raise max_chars or ask about one source]")
 	}
 	return strings.TrimSpace(b.String())

@@ -28,11 +28,12 @@ func OverridesForShard(sh *shards.Shard) *ShardOverrides {
 	// provider's default (0.7-0.8) instead.
 	t := sh.Temperature
 	ov.Temperature = &t
-	// An allowlisted web_search is a grant: shard turns are stamped
-	// SearchNone (no classifier) or classified like trusted turns, and
-	// either way web_search was refused or left to the classifier.
+	// An allowlisted web search tool (web_search, brave_page_read,
+	// search_news) is a grant: shard turns are stamped SearchNone (no
+	// classifier) or classified like trusted turns, and either way the
+	// search was refused or left to the classifier.
 	for _, tool := range sh.ToolAllowlist {
-		if tool == "web_search" {
+		if braveTools[tool] {
 			ov.SearchBudget = shardWebSearchBudget
 		}
 	}
@@ -53,9 +54,16 @@ func OverridesForShard(sh *shards.Shard) *ShardOverrides {
 	return ov
 }
 
-// shardWebSearchBudget is how many web_search calls a turn of a shard
-// that allowlists web_search may make.
+// shardWebSearchBudget is how many web searches (braveTools calls) a
+// turn of a shard that allowlists one may make.
 const shardWebSearchBudget = 4
+
+// braveTools are the tools that make a (billed) Brave request. Each call
+// counts against the turn's web search budget and none runs on a turn
+// with search disabled; only web_search did, so brave_page_read (up to
+// 10 sources a call) and search_news ran uncounted, on shards and
+// SearchNone turns too.
+var braveTools = map[string]bool{"web_search": true, "brave_page_read": true, "search_news": true}
 
 // EphemeralOverrides is the scheduled-actions "ephemeral" envelope:
 // nothing but the prompt. No system prompt, no memory retrieval, no

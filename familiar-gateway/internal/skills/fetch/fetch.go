@@ -22,6 +22,7 @@ import (
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/familiar/gateway/internal/skills"
+	"golang.org/x/net/html/charset"
 )
 
 const (
@@ -275,7 +276,13 @@ func (s *Skill) fetchAndExtract(ctx context.Context, rawURL string) (title, body
 		return "", "", fmt.Errorf("unsupported content type: %s", ct)
 	}
 
-	limited := io.LimitReader(resp.Body, maxBodyBytes)
+	// Decode to UTF-8 from the page's charset (the Content-Type's, else
+	// a <meta charset> near the top): goquery assumes UTF-8, so a
+	// windows-1252 or Shift_JIS page came back as mojibake.
+	limited, err := charset.NewReader(io.LimitReader(resp.Body, maxBodyBytes), ct)
+	if err != nil {
+		return "", "", fmt.Errorf("reading page: %w", err)
+	}
 	doc, err := goquery.NewDocumentFromReader(limited)
 	if err != nil {
 		return "", "", fmt.Errorf("parsing HTML: %w", err)

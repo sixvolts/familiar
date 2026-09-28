@@ -278,3 +278,40 @@ func TestStopTurn_ConcurrentTurnsOnOneSession(t *testing.T) {
 		t.Errorf("Stop cut %v / %v, want both turns", context.Cause(a), context.Cause(b))
 	}
 }
+
+// A caller that marks its context BoundToCaller gets its end through to
+// the turn (the research runs' stop, worker timeout and run deadline);
+// an unmarked caller still doesn't (a closed stream must not cut the
+// answer).
+func TestTurnContext_BoundToCallerEndsWithCaller(t *testing.T) {
+	p := &Pipeline{}
+	dl, dlCancel := context.WithTimeout(BoundToCaller(context.Background()), 20*time.Millisecond)
+	defer dlCancel()
+	turnCtx, cancel := p.turnContext(dl, "sess-bound-deadline")
+	defer cancel()
+	select {
+	case <-turnCtx.Done():
+		if got := context.Cause(turnCtx); got != context.DeadlineExceeded {
+			t.Errorf("cause = %v, want the caller's deadline", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a bound caller's deadline didn't reach the turn")
+	}
+
+	stop, stopCancel := context.WithCancel(BoundToCaller(context.Background()))
+	turnCtx2, cancel2 := p.turnContext(stop, "sess-bound-stop")
+	defer cancel2()
+	if turnCtx2.Err() != nil {
+		t.Fatal("bound turn cancelled before its caller")
+	}
+	stopCancel()
+	select {
+	case <-turnCtx2.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("a bound caller's cancel didn't reach the turn")
+	}
+
+	if CallerBound(context.Background()) || !CallerBound(dl) {
+		t.Error("CallerBound doesn't reflect the mark")
+	}
+}

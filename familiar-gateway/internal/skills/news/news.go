@@ -16,10 +16,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mmcdole/gofeed"
 
@@ -36,11 +39,10 @@ const defaultCacheTTL = 15 * time.Minute
 // registers regardless so misconfiguration surfaces as a user-facing
 // tool error instead of a silent absence.
 type Skill struct {
-	parser *gofeed.Parser
-	brave  *brave.Client
-	feeds  map[string][]string
-	ttl    time.Duration
-	cache  *ttlCache
+	brave *brave.Client
+	feeds map[string][]string
+	ttl   time.Duration
+	cache *ttlCache
 }
 
 // New constructs a news skill.
@@ -50,11 +52,10 @@ func New(cfg config.NewsConfig, b *brave.Client) *Skill {
 		ttl = time.Duration(cfg.CacheMinutes) * time.Minute
 	}
 	return &Skill{
-		parser: gofeed.NewParser(),
-		brave:  b,
-		feeds:  cfg.Feeds,
-		ttl:    ttl,
-		cache:  newTTLCache(),
+		brave: b,
+		feeds: cfg.Feeds,
+		ttl:   ttl,
+		cache: newTTLCache(),
 	}
 }
 
@@ -268,7 +269,7 @@ func (s *Skill) fetchFeed(ctx context.Context, topic, url string) ([]Article, er
 		return out, nil
 	}
 
-	feed, err := s.parser.ParseURLWithContext(url, ctx)
+	feed, err := fetchAndParse(ctx, url)
 	if err != nil {
 		return nil, err
 	}
@@ -399,6 +400,34 @@ func formatSearchArticles(query string, arts []Article) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// feedClient fetches feeds: bounded in time (the tool call's context
+// bounds it too), with the body capped at maxFeedBytes as it's read.
+var feedClient = &http.Client{Timeout: 15 * time.Second}
+
+const maxFeedBytes = 5 << 20
+
+// fetchAndParse fetches one feed and parses it with a parser of its own.
+// get_news fetches feeds in parallel, and a shared gofeed.Parser fills
+// its client and translators in lazily on first use: concurrent fetches
+// raced on those writes. gofeed's own fetch also read the body without
+// a size limit.
+func fetchAndParse(ctx context.Context, url string) (*gofeed.Feed, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Gofeed/1.0")
+	resp, err := feedClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("http error: %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+	}
+	return gofeed.NewParser().Parse(io.LimitReader(resp.Body, maxFeedBytes))
+}
+
 // trimSummary strips HTML-ish whitespace noise and caps length so a
 // chatty RSS description doesn't blow the tool result token budget.
 func trimSummary(s string) string {
@@ -410,7 +439,12 @@ func trimSummary(s string) string {
 	fields := strings.Fields(s)
 	s = strings.Join(fields, " ")
 	if len(s) > 280 {
-		s = s[:277] + "..."
+		// Cut on a rune boundary (a byte cut could split a character).
+		cut := 277
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		s = s[:cut] + "..."
 	}
 	return s
 }

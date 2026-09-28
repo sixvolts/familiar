@@ -8,6 +8,7 @@ package search
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/familiar/gateway/internal/brave"
 )
@@ -75,5 +76,21 @@ func TestFormatPageRead_AllFitNoTrimNotice(t *testing.T) {
 	}
 	if !strings.Contains(out, "one") || !strings.Contains(out, "two") {
 		t.Errorf("both bodies should be present:\n%s", out)
+	}
+}
+
+// A trimmed source is cut on a rune boundary: a byte cut could split a
+// CJK character or an emoji and hand the model invalid UTF-8.
+func TestFormatPageRead_TrimKeepsUTF8Valid(t *testing.T) {
+	for budget := 1000; budget < 1040; budget++ {
+		out := formatPageRead([]brave.ContextSource{
+			{Title: "CJK", URL: "https://cjk.example", Snippets: []string{strings.Repeat("日本語の文章🙂", 400)}},
+		}, budget)
+		if !utf8.ValidString(out) {
+			t.Fatalf("budget %d: output is not valid UTF-8", budget)
+		}
+		if !strings.Contains(out, "[trimmed") {
+			t.Fatalf("budget %d: source not trimmed", budget)
+		}
 	}
 }

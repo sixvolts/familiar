@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -108,7 +109,37 @@ func (m *mockBackend) GetPage(_ context.Context, bookID, pageSlug string) (*admi
 	if !ok {
 		return nil, admin.ErrPageNotFound
 	}
-	return p, nil
+	cp := *p // a snapshot: workers append concurrently
+	return &cp, nil
+}
+
+// appendFinding is a worker's append_to_page, addressed by the slugs in
+// its task prompt. It bypasses appendCh (which carries the skill's own
+// status appends the tests wait on).
+func (m *mockBackend) appendFinding(bookSlug, pageSlug, text string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b, ok := m.books[bookSlug]
+	if !ok {
+		return
+	}
+	if p, ok := m.pages[b.ID+"/"+pageSlug]; ok {
+		p.Content += "\n\n" + text
+	}
+}
+
+// pageContent reads a page's content by book slug and page slug.
+func (m *mockBackend) pageContent(bookSlug, pageSlug string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b, ok := m.books[bookSlug]
+	if !ok {
+		return ""
+	}
+	if p, ok := m.pages[b.ID+"/"+pageSlug]; ok {
+		return p.Content
+	}
+	return ""
 }
 
 func (m *mockBackend) CreatePage(_ context.Context, bookID, userID, title, content, _ string) (*admin.WikiPage, error) {
@@ -222,7 +253,21 @@ type mockInvoke struct {
 
 	// failFor returns a non-nil error for prompts that should fail.
 	failFor func(prompt string) error
+
+	// be receives a worker's finding (newSkill wires it). emptyFor
+	// marks prompts whose worker ends normally without appending one.
+	be       *mockBackend
+	emptyFor func(prompt string) bool
+
+	// panicFor panics for matching prompts (a worker crash).
+	panicFor func(prompt string) bool
+
+	// byShard answers the envelopes it names (the synthesis turns)
+	// instead of the worker behavior above.
+	byShard map[string]func(ctx context.Context, prompt string) (string, error)
 }
+
+var taskSlugs = regexp.MustCompile(`book_slug="([^"]+)" page_slug="([^"]+)"`)
 
 func (m *mockInvoke) fn(ctx context.Context, _ *session.Session, prompt string, ov *pipeline.ShardOverrides) (string, *pipeline.RouteInfo, error) {
 	cur := m.inFlight.Add(1)
@@ -237,20 +282,40 @@ func (m *mockInvoke) fn(ctx context.Context, _ *session.Session, prompt string, 
 	m.mu.Lock()
 	m.calls = append(m.calls, capturedCall{prompt: prompt, overrides: ov})
 	m.mu.Unlock()
+	if ov != nil && m.byShard[ov.ShardID] != nil {
+		out, err := m.byShard[ov.ShardID](ctx, prompt)
+		return out, &pipeline.RouteInfo{InputTokens: 1000, OutputTokens: 500}, err
+	}
 
 	if m.started != nil {
 		m.started <- struct{}{}
 	}
 	if m.release != nil {
+		// The pipeline detaches a turn from its caller's context unless
+		// the caller is bound (pipeline.BoundToCaller); a cut turn then
+		// returns what it has, without an error.
+		var cut <-chan struct{}
+		if pipeline.CallerBound(ctx) {
+			cut = ctx.Done()
+		}
 		select {
 		case <-m.release:
-		case <-ctx.Done():
-			return "", nil, ctx.Err()
+		case <-cut:
+			return "", nil, nil
 		}
+	}
+	if m.panicFor != nil && m.panicFor(prompt) {
+		panic("synthetic worker panic")
 	}
 	if m.failFor != nil {
 		if err := m.failFor(prompt); err != nil {
 			return "", nil, err
+		}
+	}
+	if ov != nil && ov.ShardID == "research-worker" && m.be != nil && (m.emptyFor == nil || !m.emptyFor(prompt)) {
+		if sl := taskSlugs.FindStringSubmatch(prompt); sl != nil {
+			q := strings.TrimPrefix(strings.SplitN(prompt, "\n", 2)[0], "Sub-question: ")
+			m.be.appendFinding(sl[1], sl[2], "### "+q+"\n- a finding — [Source](https://example.com/"+slugifyTopic(q)+")")
 		}
 	}
 	return "DONE — findings appended", nil, nil
@@ -268,6 +333,7 @@ func (m *mockInvoke) callsSnapshot() []capturedCall {
 
 func newSkill(t *testing.T, inv *mockInvoke, be *mockBackend, opts Options) *Skill {
 	t.Helper()
+	inv.be = be
 	opts.Invoke = inv.fn
 	opts.Sessions = session.NewManager()
 	opts.Backend = be
@@ -756,10 +822,11 @@ func TestClose_CancelsInFlightWorkers(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	// The blocked worker's ctx dies → Invoke errors → failure line +
-	// 0/1 completion line (appends run on fresh contexts, so they land
-	// even after Close).
-	waitForAppend(t, be, "failed: context canceled")
+	// The blocked worker's ctx dies → its bound turn is cut → failure
+	// line + 0/1 completion line (appends run on fresh contexts, so they
+	// land even after Close). The mock only honors a bound context, as
+	// the pipeline does: an unbound worker would run on.
+	waitForAppend(t, be, "failed: cancelled (the gateway is shutting down)")
 	waitForAppend(t, be, "complete: 0/1 workers succeeded")
 }
 
@@ -1088,6 +1155,9 @@ type mockRuns struct {
 	byID   map[string]*admin.ResearchRun
 	active map[string]*admin.ResearchRun // convID → non-terminal run
 	seq    int
+
+	// failActive makes the next N UpdateIfActive calls fail (a DB blip).
+	failActive int
 }
 
 func newMockRuns() *mockRuns {
@@ -1162,6 +1232,11 @@ func (m *mockRuns) Get(_ context.Context, id string) (*admin.ResearchRun, error)
 
 func (m *mockRuns) UpdateIfActive(ctx context.Context, id string, p admin.RunPatch) (bool, error) {
 	m.mu.Lock()
+	if m.failActive > 0 {
+		m.failActive--
+		m.mu.Unlock()
+		return false, errors.New("connection reset")
+	}
 	r, ok := m.byID[id]
 	terminal := ok && (r.Status == admin.RunStatusDone || r.Status == admin.RunStatusFailed)
 	m.mu.Unlock()
@@ -1231,6 +1306,15 @@ func (m *mockRuns) Update(_ context.Context, id string, p admin.RunPatch) error 
 	if p.WorkersDone != nil {
 		r.WorkersDone = *p.WorkersDone
 	}
+	if p.Error != nil {
+		r.Error = *p.Error
+	}
+	if p.NoteBookSlug != nil {
+		r.NoteBookSlug = *p.NoteBookSlug
+	}
+	if p.NotePageSlug != nil {
+		r.NotePageSlug = *p.NotePageSlug
+	}
 	return nil
 }
 
@@ -1251,11 +1335,12 @@ func autonomousSkill(t *testing.T, inv *mockInvoke, be *mockBackend, opts Option
 	s := newSkill(t, inv, be, opts)
 	runs := newMockRuns()
 	synthCh := make(chan string, 8)
-	s.SetOrchestrator(runs, func(ctx context.Context, runID string) {
+	s.SetOrchestrator(runs, func(context.Context, *admin.ResearchRun, string, string) {})
+	s.opts.Synthesize = func(ctx context.Context, runID string) {
 		st := admin.RunStatusDone
 		_ = runs.Update(ctx, runID, admin.RunPatch{Status: &st})
 		synthCh <- runID
-	})
+	}
 	return s, runs, synthCh
 }
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="$HOME/repos/familiar"
+REPO="${FAMILIAR_REPO:-$HOME/repos/familiar}"
 GATEWAY="$REPO/familiar-gateway"
 WORKSPACE="$REPO/familiar-workspace"
 
@@ -14,15 +14,29 @@ step() { echo -e "${GREEN}▸ $1${NC}"; }
 warn() { echo -e "${YELLOW}⚠ $1${NC}"; }
 fail() { echo -e "${RED}✗ $1${NC}"; exit 1; }
 
-# Pull
-step "Pulling latest from origin..."
+# Fetch only. The live checkout is what the workspace serves static/ from,
+# so it must not move until the new commit has passed the gate and built.
+# (It used to be reset first: a refused deploy still shipped the new JS
+# against the old gateway, and a passing one ran them mismatched for the
+# whole CI wait.)
+step "Fetching origin..."
 cd "$REPO"
 PREV_HEAD=$(git rev-parse HEAD)
 git fetch origin || fail "git fetch failed"
-git reset --hard origin/main || fail "git reset to origin/main failed"
-NEW_HEAD=$(git rev-parse HEAD)
+NEW_HEAD=$(git rev-parse origin/main)
 
 export PATH="$PATH:/usr/local/go/bin"
+
+# Staging worktree at NEW_HEAD: the hermetic fallback tests and both builds
+# happen here, never in the live tree.
+STAGE=$(mktemp -d "${TMPDIR:-/tmp}/familiar-deploy.XXXXXX")
+cleanup_stage() {
+    git -C "$REPO" worktree remove --force "$STAGE/tree" >/dev/null 2>&1 || true
+    rm -rf "$STAGE"
+}
+trap cleanup_stage EXIT
+git worktree add --detach "$STAGE/tree" "$NEW_HEAD" >/dev/null 2>&1 \
+    || fail "could not stage ${NEW_HEAD:0:8} in a worktree"
 
 # ── Gate: verify this commit before it reaches the service ──────────────
 #
@@ -38,11 +52,12 @@ export PATH="$PATH:/usr/local/go/bin"
 #
 # Fallback: if CI can't be consulted (gh missing/unauthenticated, no run for
 # this SHA, or the run is still going), fall back to the hermetic suite. It
-# takes no DSN, so it cannot touch a database — it is safe here by construction,
-# just narrower than CI.
+# runs with FAMILIAR_TEST_DSN removed from its environment, so it cannot
+# touch a database — safe here by construction, just narrower than CI.
 #
-# Either way the gate runs BEFORE the build and restart, so the services keep
-# serving the previous binary if it fails.
+# Either way the gate runs BEFORE the live tree moves, the build, and the
+# restart, so on failure the services and static files stay on the previous
+# build.
 ci_conclusion_for() {
     # Echoes: success | failure | pending | unknown
     local sha="$1"
@@ -171,49 +186,70 @@ while :; do
 done
 
 if [[ "$GATE_PASSED" != true ]]; then
-    # Hermetic only: no DSN is passed, so this cannot reach any database.
+    # Hermetic only. `env -u` matters: the DB-backed tests switch on
+    # whenever FAMILIAR_TEST_DSN is set, and TRUNCATE tables in whatever
+    # database it names — on this box, possibly production.
     warn "Falling back to the hermetic suite — narrower than CI (~161 DB-backed tests skip)"
-    step "Running hermetic test suite..."
-    cd "$REPO"
-    make test || fail "tests failed — NOT deploying (services still on the previous build)"
+    step "Running hermetic test suite on ${NEW_HEAD:0:8}..."
+    (cd "$STAGE/tree" && env -u FAMILIAR_TEST_DSN make test) \
+        || fail "tests failed — NOT deploying (services still on the previous build)"
     step "Hermetic tests passed"
 fi
 
-# Build gateway (the engine is now in-process Go — no separate build)
+# Build both binaries in the staging tree (the engine is in-process Go —
+# no separate build). A build failure leaves everything live untouched.
 step "Building gateway..."
-cd "$GATEWAY"
-go build -o familiar-gateway ./cmd/gateway/ || fail "gateway build failed"
+(cd "$STAGE/tree/familiar-gateway" && go build -o "$STAGE/familiar-gateway" ./cmd/gateway/) \
+    || fail "gateway build failed — NOT deploying (services still on the previous build)"
 step "Gateway built"
 
-# Build the workspace only when its Go sources actually moved.
-#
+# Rebuild (and restart) the workspace only when its Go sources changed.
 # Most frontend work touches familiar-workspace/static/, which is served
-# off disk and needs neither a rebuild nor a restart — so restarting on
+# off disk and needs neither a rebuild nor a restart, and restarting on
 # every deploy would drop live chat streams (the workspace proxies
-# /api/chat) for no reason. Comparing the binary hash would not help
-# either: go stamps VCS info into it, so it changes on every commit.
-# Compare mtimes instead: rebuild when any Go source is newer than
-# the built binary. This catches pull-driven changes, locally committed
-# ones (where reset --hard is a no-op so a commit-range diff sees
-# nothing), and hand edits alike.
+# /api/chat) for no reason.
 WS_RESTART=false
 WS_REASON=""
-cd "$WORKSPACE"
-if [[ ! -x familiar-workspace ]]; then
+if [[ ! -x "$WORKSPACE/familiar-workspace" ]]; then
     WS_RESTART=true
     WS_REASON="binary missing"
-elif [[ -n "$(find cmd internal go.mod go.sum -newer familiar-workspace 2>/dev/null | head -1)" ]]; then
+elif ! git -C "$REPO" diff --quiet "$PREV_HEAD" "$NEW_HEAD" -- \
+        familiar-workspace/cmd familiar-workspace/internal \
+        familiar-workspace/go.mod familiar-workspace/go.sum; then
     WS_RESTART=true
-    WS_REASON="Go sources newer than binary"
+    WS_REASON="Go sources changed"
 fi
-
 if [[ "$WS_RESTART" == true ]]; then
     step "Building workspace ($WS_REASON)..."
-    go build -o familiar-workspace ./cmd/workspace/ || fail "workspace build failed"
+    (cd "$STAGE/tree/familiar-workspace" && go build -o "$STAGE/familiar-workspace" ./cmd/workspace/) \
+        || fail "workspace build failed — NOT deploying (services still on the previous build)"
     step "Workspace built"
 else
     step "Workspace Go sources unchanged — skipping build and restart"
 fi
+
+# Swap in: keep the running binaries for rollback, move the live tree to
+# NEW_HEAD, install the staged binaries, restart. Static files and
+# binaries change within seconds of each other rather than a CI wait
+# apart.
+[[ -f "$GATEWAY/familiar-gateway" ]] && cp -p "$GATEWAY/familiar-gateway" "$STAGE/prev-gateway"
+[[ "$WS_RESTART" == true && -f "$WORKSPACE/familiar-workspace" ]] \
+    && cp -p "$WORKSPACE/familiar-workspace" "$STAGE/prev-workspace"
+git -C "$REPO" reset --hard "$NEW_HEAD" >/dev/null || fail "git reset to ${NEW_HEAD:0:8} failed"
+install -m 755 "$STAGE/familiar-gateway" "$GATEWAY/familiar-gateway"
+[[ "$WS_RESTART" == true ]] && install -m 755 "$STAGE/familiar-workspace" "$WORKSPACE/familiar-workspace"
+
+# rollback restores the previous tree and binaries and restarts them, then
+# fails the deploy. Used when the new build doesn't come up healthy.
+rollback() {
+    warn "Rolling back to ${PREV_HEAD:0:8}..."
+    git -C "$REPO" reset --hard "$PREV_HEAD" >/dev/null || warn "tree rollback failed"
+    [[ -f "$STAGE/prev-gateway" ]] && install -m 755 "$STAGE/prev-gateway" "$GATEWAY/familiar-gateway"
+    [[ -f "$STAGE/prev-workspace" ]] && install -m 755 "$STAGE/prev-workspace" "$WORKSPACE/familiar-workspace"
+    sudo systemctl restart familiar-gateway || true
+    [[ "$WS_RESTART" == true ]] && { sudo systemctl restart familiar-workspace || true; }
+    fail "$1 — rolled back to ${PREV_HEAD:0:8}"
+}
 
 # Restart
 step "Restarting familiar-gateway..."
@@ -249,7 +285,7 @@ if [[ "$GW_STATUS" == "active" && "$WS_STATUS" == "active" ]]; then
         step "Gateway answering on $GW_HEALTH_URL"
     else
         journalctl -u familiar-gateway --no-pager -n 20
-        fail "Gateway process is active but not answering $GW_HEALTH_URL"
+        rollback "Gateway process is active but not answering $GW_HEALTH_URL"
     fi
 
     echo ""
@@ -257,5 +293,6 @@ if [[ "$GW_STATUS" == "active" && "$WS_STATUS" == "active" ]]; then
 else
     [[ "$GW_STATUS" == "active" ]] || warn "Gateway: $GW_STATUS"
     [[ "$WS_STATUS" == "active" ]] || warn "Workspace: $WS_STATUS"
-    fail "Service check failed — check logs with journalctl"
+    journalctl -u familiar-gateway --no-pager -n 20 || true
+    rollback "Service check failed"
 fi

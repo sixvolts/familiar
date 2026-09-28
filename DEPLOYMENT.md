@@ -95,11 +95,30 @@ mkdir -p "$FAMILIAR_HOME"/{skills,media}
 
 ```sh
 cd "$REPO"
-docker compose up -d        # starts pgvector/pgvector:pg17 on :5432
-# user=familiar  password=familiar_dev  db=familiar  (see docker-compose.yml)
+# The compose file refuses to start without a password. Generate one into a
+# git-ignored .env (setup.sh does this for you):
+umask 077; echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)" >> .env
+docker compose up -d        # starts pgvector/pgvector:pg17 on 127.0.0.1:5432
 ```
 
-DSN: `postgresql://familiar:familiar_dev@localhost:5432/familiar`
+DSN: `postgresql://familiar:<POSTGRES_PASSWORD>@localhost:5432/familiar`
+
+The container listens on loopback only. Don't widen the port mapping:
+Docker's published ports bypass ufw and other INPUT-chain firewalls.
+
+**Upgrading an install that used the old compose file:** it published
+Postgres on every interface with the password `familiar_dev`. The password
+lives in the data volume, so setting `POSTGRES_PASSWORD` doesn't change it.
+Rotate it, then record the new one:
+
+```sh
+NEW=$(openssl rand -hex 24)
+docker compose exec -T postgres psql -U familiar -d familiar \
+  -c "ALTER ROLE familiar PASSWORD '$NEW'"
+umask 077; echo "POSTGRES_PASSWORD=$NEW" > .env
+docker compose up -d        # re-creates the container with the loopback port
+# then put $NEW in local_dsn in gateway.toml and restart the gateway
+```
 
 **Option B — native Postgres:** create a database and ensure `pgvector` is
 installed, e.g.:
@@ -176,7 +195,7 @@ listen_addr = "127.0.0.1:8000"     # keep on loopback; the workspace proxies to 
 
 # ── Memory store (Postgres + pgvector) ──
 [memory]
-local_dsn = "postgresql://familiar:familiar_dev@localhost:5432/familiar"
+local_dsn = "postgresql://familiar:<POSTGRES_PASSWORD>@localhost:5432/familiar"
 relevance_threshold = 0.55
 max_injected_memories = 5
 dedup_threshold = 0.95

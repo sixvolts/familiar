@@ -149,8 +149,10 @@ func NewRunner(deps Deps) (*Runner, error) {
 		deps.Now = time.Now
 	}
 	return &Runner{
-		deps:          deps,
-		cron:          cron.New(cron.WithParser(CronParser)),
+		deps: deps,
+		// UTC driver: every entry carries its own zone (scheduleFor), so
+		// nothing here should depend on the host's time.Local.
+		cron:          cron.New(cron.WithParser(CronParser), cron.WithLocation(time.UTC)),
 		inFlight:      make(map[string]bool),
 		watchers:      make(map[string][]*Action),
 		lastEventFire: make(map[string]time.Time),
@@ -319,21 +321,12 @@ func (r *Runner) Reload(ctx context.Context) error {
 		a := a
 		switch a.TriggerKind {
 		case TriggerCron:
-			sched, err := CronParser.Parse(a.Cron)
+			sched, err := scheduleFor(a)
 			if err != nil {
 				// Validate gates writes, so this is a corrupt row —
 				// log loudly, skip, never kill the reload.
 				log.Printf("[actions] %s (%s): unparseable cron %q: %v", a.Name, a.ID, a.Cron, err)
 				continue
-			}
-			loc, locErr := time.LoadLocation(a.Timezone)
-			if locErr != nil {
-				// Should not happen — Validate gates writes and the binary
-				// embeds tzdata — but if a zone ever fails to load, fall
-				// back to UTC loudly rather than silently mis-scheduling.
-				log.Printf("[actions] %s (%s): timezone %q failed to load, running in UTC: %v", a.Name, a.ID, a.Timezone, locErr)
-			} else if a.Timezone != "UTC" {
-				sched = wrapTZ(sched, loc)
 			}
 			id := r.cron.Schedule(sched, cron.FuncJob(func() { r.fire(a.ID, "cron") }))
 			r.entries = append(r.entries, id)
@@ -689,6 +682,37 @@ func (r *Runner) disableOneShot(actionID, status string) {
 // wrapTZ evaluates a cron schedule in the action's timezone. robfig
 // schedules are wall-clock-relative to the time passed in; shifting
 // in and out keeps "0 7 * * *" meaning 7 a.m. local.
+// scheduleFor parses an action's cron spec and binds it to the action's
+// timezone. Every schedule is wrapped, UTC included: an unwrapped spec is
+// evaluated in whatever location the driver hands it, which was the
+// host's time.Local, so a "7am UTC" action fired at 7am host time and
+// moved with the host's DST.
+func scheduleFor(a *Action) (cron.Schedule, error) {
+	sched, err := CronParser.Parse(a.Cron)
+	if err != nil {
+		return nil, err
+	}
+	loc, locErr := time.LoadLocation(a.Timezone)
+	if locErr != nil {
+		// Should not happen — Validate gates writes and the binary
+		// embeds tzdata — but if a zone ever fails to load, fall back
+		// to UTC loudly rather than silently mis-scheduling.
+		log.Printf("[actions] %s (%s): timezone %q failed to load, running in UTC: %v", a.Name, a.ID, a.Timezone, locErr)
+		loc = time.UTC
+	}
+	return wrapTZ(sched, loc), nil
+}
+
+// tzSchedule evaluates a cron spec in wall-clock time in one zone, with
+// the usual cron handling of daylight-saving transitions. The inner
+// schedule steps through absolute hours, so on its own it fired a fixed-
+// time job twice when clocks fell back (01:30 EDT, then 01:30 EST) and
+// skipped the day entirely when the time fell in the hour that springs
+// forward. Here, as in Vixie cron:
+//   - a fixed-hour job runs once in a repeated hour; jobs that run every
+//     hour keep running on elapsed time through it;
+//   - a job whose time falls in a skipped hour runs at the moment the
+//     clocks jump.
 type tzSchedule struct {
 	inner cron.Schedule
 	loc   *time.Location
@@ -699,7 +723,97 @@ func wrapTZ(s cron.Schedule, loc *time.Location) cron.Schedule {
 }
 
 func (t tzSchedule) Next(from time.Time) time.Time {
-	return t.inner.Next(from.In(t.loc))
+	from = from.In(t.loc)
+	next := t.inner.Next(from)
+	if next.IsZero() {
+		return next
+	}
+	// Spring forward: a time the spec wanted fell in an hour that never
+	// happened between from and next. Run at the jump instead.
+	for _, jump := range transitionsBetween(from, next, t.loc) {
+		if t.matchesInGap(jump) {
+			return jump
+		}
+	}
+	// Fall back: next is the second occurrence of a wall-clock time the
+	// job already ran at. Skip it for fixed-hour jobs.
+	if !t.everyHour() && repeatedWallTime(next, t.loc) {
+		return t.Next(next)
+	}
+	return next
+}
+
+// everyHour reports whether the spec runs in every hour, in which case it
+// keeps running on elapsed time through a repeated hour.
+func (t tzSchedule) everyHour() bool {
+	spec, ok := t.inner.(*cron.SpecSchedule)
+	if !ok {
+		return false
+	}
+	const allHours = 1<<24 - 1
+	return spec.Hour&allHours == allHours
+}
+
+// matchesInGap reports whether the spec wanted a wall time inside the
+// hour skipped at a forward transition. It re-evaluates the spec in a
+// fixed zone at the pre-transition offset, where the skipped wall times
+// exist.
+func (t tzSchedule) matchesInGap(jump time.Time) bool {
+	spec, ok := t.inner.(*cron.SpecSchedule)
+	if !ok || spec.Location != time.Local {
+		return false
+	}
+	_, before := jump.Add(-time.Second).In(t.loc).Zone()
+	_, after := jump.In(t.loc).Zone()
+	if after <= before {
+		return false // a backward transition, not a gap
+	}
+	fixed := time.FixedZone("pre-transition", before)
+	gapStart := jump.In(fixed)
+	gapEnd := gapStart.Add(time.Duration(after-before) * time.Second)
+	m := t.inner.Next(gapStart.Add(-time.Second))
+	return !m.IsZero() && m.Before(gapEnd)
+}
+
+// repeatedWallTime reports whether ts is the second occurrence of its
+// wall-clock minute (the clocks fell back over it).
+func repeatedWallTime(ts time.Time, loc *time.Location) bool {
+	wall := ts.In(loc).Format("2006-01-02 15:04")
+	for _, d := range []time.Duration{30 * time.Minute, time.Hour} {
+		if ts.Add(-d).In(loc).Format("2006-01-02 15:04") == wall {
+			return true
+		}
+	}
+	return false
+}
+
+// transitionsBetween returns the instants in (from, to] at which loc's
+// UTC offset changes, found by stepping a day at a time and bisecting
+// each change to the second.
+func transitionsBetween(from, to time.Time, loc *time.Location) []time.Time {
+	var out []time.Time
+	for lo := from; lo.Before(to); {
+		hi := lo.Add(24 * time.Hour)
+		if hi.After(to) {
+			hi = to
+		}
+		_, offLo := lo.In(loc).Zone()
+		_, offHi := hi.In(loc).Zone()
+		if offLo != offHi {
+			a, b := lo, hi
+			for b.Sub(a) > time.Second {
+				mid := a.Add(b.Sub(a) / 2)
+				if _, off := mid.In(loc).Zone(); off == offLo {
+					a = mid
+				} else {
+					b = mid
+				}
+			}
+			out = append(out, b.Truncate(time.Second))
+		}
+		lo = hi
+	}
+	return out
 }
 
 // actionSessionKey is the session an action's runs accumulate history

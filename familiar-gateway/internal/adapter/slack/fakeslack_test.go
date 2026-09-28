@@ -12,9 +12,11 @@ package slack
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -191,5 +193,68 @@ func TestSlackAdapter_EmptyReplyNotPosted(t *testing.T) {
 		t.Fatalf("posted a blank/whitespace message: %q", text)
 	case <-time.After(1500 * time.Millisecond):
 		// Good — nothing posted.
+	}
+}
+
+// A failing auth.test at boot (DNS not up yet, a Slack blip) must not
+// end Run: main shuts the whole gateway down when any adapter returns,
+// so returning here took web chat and scheduled actions down with it.
+func TestSlackAdapter_RetriesAuthInsteadOfExiting(t *testing.T) {
+	var mu sync.Mutex
+	attempts := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/auth.test", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts++
+		n := attempts
+		mu.Unlock()
+		if n <= 2 {
+			http.Error(w, "bad gateway", http.StatusBadGateway)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "user": "familiar", "user_id": "UBOT"})
+	})
+	mux.HandleFunc("/api/apps.connections.open", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"ok": false, "error": "not_in_test"})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	adapter := New(&fakeResponder{gotText: make(chan string, 1)}, session.NewManager(), nil, config.SlackConfig{
+		BotToken: "xoxb", AppToken: "xapp", APIBaseURL: srv.URL + "/api/",
+	}, false)
+	adapter.authRetryBase = 10 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- adapter.Run(ctx) }()
+
+	deadline := time.After(5 * time.Second)
+	for {
+		mu.Lock()
+		n := attempts
+		mu.Unlock()
+		if n >= 3 {
+			break
+		}
+		select {
+		case err := <-done:
+			cancel()
+			t.Fatalf("Run returned after %d auth attempt(s): %v", n, err)
+		case <-deadline:
+			cancel()
+			t.Fatalf("only %d auth attempt(s) in 5s", n)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	select {
+	case err := <-done:
+		cancel()
+		t.Fatalf("Run returned after authenticating: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run after cancel = %v, want context.Canceled", err)
 	}
 }

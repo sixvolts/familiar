@@ -190,6 +190,54 @@ func TestMigrateFreshDatabase(t *testing.T) {
 	if slug != "faq" {
 		t.Errorf("custom slug reverted to %q on re-migrate — the slug fix is not gated", slug)
 	}
+
+	// The memories CHECK is added once, not dropped and re-added (a
+	// full-table scan under an exclusive lock) on every boot. It must
+	// still exist and still bite.
+	if _, err := pool.ExecContext(ctx, `
+		INSERT INTO memories (agent_id, scope, content, content_hash, source_type, user_id)
+		VALUES ('t', 'session', 'x', 'hash-empty-user', 'test', '')`); err == nil {
+		t.Error("memories accepted an empty user_id: memories_user_id_nonempty is missing")
+	}
+
+	// The two supersede repairs are GATED one-shots too. Each ran on the
+	// first Migrate above; a row that later matches a repair's pattern
+	// must survive the next boot.
+	for _, fix := range []string{"repair_inverted_supersedes", "isolated_supersede_repair"} {
+		var n int
+		if err := pool.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM applied_data_fixes WHERE name = $1`, fix).Scan(&n); err != nil || n != 1 {
+			t.Errorf("%s: applied_data_fixes marker count %d (err %v), want 1", fix, n, err)
+		}
+	}
+	var older, newer string
+	if err := pool.QueryRowContext(ctx, `
+		INSERT INTO memories (agent_id, scope, content, content_hash, source_type, user_id, created_at)
+		VALUES ('t', 'session', 'older', 'hash-older', 'test', 'tester', NOW() - INTERVAL '1 day')
+		RETURNING id::text`).Scan(&older); err != nil {
+		t.Fatalf("seed older: %v", err)
+	}
+	if err := pool.QueryRowContext(ctx, `
+		INSERT INTO memories (agent_id, scope, content, content_hash, source_type, user_id)
+		VALUES ('t', 'session', 'newer', 'hash-newer', 'test', 'tester')
+		RETURNING id::text`).Scan(&newer); err != nil {
+		t.Fatalf("seed newer: %v", err)
+	}
+	if _, err := pool.ExecContext(ctx,
+		`UPDATE memories SET supersedes = $1::uuid WHERE id = $2::uuid`, newer, older); err != nil {
+		t.Fatalf("seed inverted pointer: %v", err)
+	}
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatalf("re-migrate with an inverted pointer: %v", err)
+	}
+	var kept sql.NullString
+	if err := pool.QueryRowContext(ctx,
+		`SELECT supersedes::text FROM memories WHERE id = $1::uuid`, older).Scan(&kept); err != nil {
+		t.Fatalf("read pointer: %v", err)
+	}
+	if !kept.Valid {
+		t.Error("repair_inverted_supersedes re-ran on a later boot — it is not gated")
+	}
 }
 
 // TestMigrateNilPool pins the guard clause: a nil pool must error, not

@@ -249,7 +249,9 @@ func TestSleep_RepairInvertedSupersedes(t *testing.T) {
 	mustExec(`UPDATE memories SET supersedes = $2::uuid WHERE id = $1::uuid`, oldP, newX)
 	mustExec(`UPDATE memories SET supersedes = $2::uuid WHERE id = $1::uuid`, legitNew, legitOld)
 
-	// Re-run migrations: the repair guard fires on the re-run.
+	// Re-run migrations as a database upgrading into the repair: it is a
+	// gated one-shot, so clear the marker the setup's Migrate left.
+	mustExec(`DELETE FROM applied_data_fixes WHERE name = 'repair_inverted_supersedes'`)
 	if err := db.Migrate(ctx, pool); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}

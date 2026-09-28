@@ -48,6 +48,10 @@ type Conversations interface {
 
 // SlackAdapter connects Familiar to Slack via Socket Mode.
 type SlackAdapter struct {
+	// authRetryBase is the first wait between failed auth.test attempts
+	// (doubling to a minute). Zero means 2s; tests shorten it.
+	authRetryBase time.Duration
+
 	pipeline Responder
 	sessions *session.Manager
 	engine   engine.Service
@@ -130,12 +134,38 @@ func (a *SlackAdapter) Run(ctx context.Context) error {
 	}
 	a.api = slack.New(a.cfg.BotToken, apiOpts...)
 
-	authResp, err := a.api.AuthTest()
-	if err != nil {
-		return fmt.Errorf("slack auth test: %w", err)
+	// Authenticate with retry. Returning on the first failure took the
+	// whole gateway down with it (main exits when any adapter returns),
+	// so a gateway that booted before DNS was up, or during a Slack
+	// blip, lost web chat and scheduled actions until someone restarted
+	// it by hand. Keep trying instead; the rest of the gateway serves
+	// meanwhile. A bad token keeps failing here, loudly, rather than
+	// crash-looping the service.
+	authBackoff := a.authRetryBase
+	if authBackoff <= 0 {
+		authBackoff = 2 * time.Second
 	}
-	a.botID = authResp.UserID
-	log.Printf("[slack] authenticated as %s (user_id: %s)", authResp.User, a.botID)
+	for {
+		authResp, err := a.api.AuthTestContext(ctx)
+		if err == nil {
+			a.botID = authResp.UserID
+			log.Printf("[slack] authenticated as %s (user_id: %s)", authResp.User, a.botID)
+			break
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		log.Printf("[slack] auth test failed: %v; retrying in %v (the rest of the gateway keeps serving)", err, authBackoff)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(authBackoff):
+		}
+		authBackoff *= 2
+		if authBackoff > time.Minute {
+			authBackoff = time.Minute
+		}
+	}
 
 	// Reconnect loop. apps.connections.open gives us a fresh short-lived
 	// WSS URL on each try; network errors and server-requested disconnects

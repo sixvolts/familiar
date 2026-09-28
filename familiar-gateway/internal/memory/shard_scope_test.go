@@ -218,6 +218,11 @@ func TestMigrate_RestoresFactsAnIsolatedShardSuperseded(t *testing.T) {
 	if _, err := s.db.ExecContext(ctx, `UPDATE memories SET supersedes = $1::uuid WHERE id = $2::uuid`, rex, max); err != nil {
 		t.Fatalf("seed supersede: %v", err)
 	}
+	// The repair is a gated one-shot and setupMemoryStore's Migrate already
+	// ran it, so clear its marker to model a database upgrading into it.
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM applied_data_fixes WHERE name = 'isolated_supersede_repair'`); err != nil {
+		t.Fatalf("clear repair marker: %v", err)
+	}
 	if err := db.Migrate(ctx, s.db); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}

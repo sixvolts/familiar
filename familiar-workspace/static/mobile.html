@@ -158,7 +158,7 @@
                     </button>
                     <div class="mob-overflow-menu" role="menu">
                         <button type="button" class="mob-overflow-item" data-action="open-account">Account</button>
-                        <button type="button" class="mob-overflow-item" data-action="open-memory">Memory</button>
+                        <button type="button" class="mob-overflow-item" data-action="open-memory" data-shard-panel="memory">Memory</button>
                         <div class="mob-overflow-sep"></div>
                         <button type="button" class="mob-overflow-item is-danger" data-action="logout">Sign out</button>
                     </div>
@@ -508,8 +508,8 @@
                 <div class="mob-account-role" id="mob-account-role"></div>
             </div>
 
-            <div class="mob-section-head"><span>Shards</span><span class="count" id="mob-account-shards-count"></span></div>
-            <div class="mob-list" id="mob-account-shards">
+            <div class="mob-section-head" data-owner-only><span>Shards</span><span class="count" id="mob-account-shards-count"></span></div>
+            <div class="mob-list" id="mob-account-shards" data-owner-only>
                 <div class="mob-empty">Loading…</div>
             </div>
             <div class="mob-sa-note mob-shards-note">
@@ -518,8 +518,8 @@
             </div>
 
             <div class="mob-section-spacer"></div>
-            <div class="mob-section-head"><span>Notifications</span></div>
-            <div class="mob-list">
+            <div class="mob-section-head" data-owner-only><span>Notifications</span></div>
+            <div class="mob-list" data-owner-only>
                 <div class="mob-row mob-row-static">
                     <div class="body">
                         <div class="title">Push notifications</div>

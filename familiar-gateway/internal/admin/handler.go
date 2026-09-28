@@ -84,6 +84,7 @@ type Handler struct {
 	// endpoints; nil when the admin subsystem isn't fully wired.
 	enrollTokens       *EnrollmentTokenStore
 	sessionMaxAge      time.Duration
+	consolePatterns    []string                                                  // every authed console route, recorded by Mux (tests walk it)
 	memoryBrowser      MemoryBrowser                                             // optional; wired via AttachMemoryBrowser
 	memoryEmbed        func(ctx context.Context, text string) ([]float32, error) // optional; re-embeds PATCHed content
 	reembed            ReembedQueue                                              // optional; re-embed backlog depth for the health card
@@ -311,7 +312,7 @@ func (h *Handler) Mux(authed http.Handler) http.Handler {
 	// /console/api/memories/facets and discover the feature is disabled —
 	// the endpoint returns {"available": false} in that case instead
 	// of a 404 that the client would have to interpret.
-	authedMux := http.NewServeMux()
+	authedMux := &routeRecorder{ServeMux: http.NewServeMux()}
 
 	// ── Any-role (authRequired only) ───────────────────────────
 	// Memory endpoints, hot memory, status, skills catalog, and
@@ -574,8 +575,27 @@ func (h *Handler) Mux(authed http.Handler) http.Handler {
 	if authed != nil {
 		authedMux.Handle("/console/api/", authed)
 	}
-	mux.Handle("/console/api/", h.authRequired(authedMux))
+	h.consolePatterns = authedMux.patterns
+	mux.Handle("/console/api/", h.authRequired(h.shardRouteGate(authedMux.ServeMux)))
 	return mux
+}
+
+// routeRecorder is a ServeMux that remembers every pattern registered
+// on it, so the shard route gate's allow-list can be checked against
+// the real route table in tests instead of a hand-copied one.
+type routeRecorder struct {
+	*http.ServeMux
+	patterns []string
+}
+
+func (m *routeRecorder) Handle(pattern string, handler http.Handler) {
+	m.patterns = append(m.patterns, pattern)
+	m.ServeMux.Handle(pattern, handler)
+}
+
+func (m *routeRecorder) HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request)) {
+	m.patterns = append(m.patterns, pattern)
+	m.ServeMux.HandleFunc(pattern, handler)
 }
 
 // RequireAuth wraps next so every request must carry a valid admin
@@ -596,44 +616,64 @@ func (h *Handler) requireAuth(next http.Handler) http.Handler {
 }
 
 // authenticatedUser reads the session cookie and returns the canonical
-// user ID on success. Separate from requireAuth so status endpoints
-// can call it without writing 401s. For SHARD sessions this still
-// returns the canonical owner — handlers that need to know it's a
-// shard session call authenticatedSession instead.
+// user ID of a USER session. Shard sessions return false: their user
+// id is the owner's.
 func (h *Handler) authenticatedUser(r *http.Request) (string, bool) {
-	sess, ok := h.authenticatedSession(r)
+	sess, ok := h.userSession(r)
 	if !ok {
 		return "", false
 	}
 	return sess.UserID, true
 }
 
-// UserIDFromRequest reads the admin session cookie and returns the
-// canonical user ID. Exported so the native chat adapter can resolve
-// workspace UI users without requiring an X-User-Email header.
-// Implements native.SessionReader.
+// PrincipalFromRequest resolves the session cookie for callers outside
+// the console mux (the native chat adapter). It replaces the old
+// UserIDFromRequest, which returned a shard session's owner id as if it
+// were a plain user and so let a kiosk chat as its owner.
 //
-// The session cookie alone isn't sufficient — a user whose status
-// has been flipped to disabled/denied/pending still holds a valid
-// session token until its TTL expires (or until DeleteByUser
-// revokes it). Re-check status here so /api/chat refuses requests
-// from non-approved users the moment the status flips, matching
-// the gate authRequired runs for /console/api/*. When the user
-// store isn't wired (test harness etc.) we fall back to the bare
-// session check.
-func (h *Handler) UserIDFromRequest(r *http.Request) (string, bool) {
-	uid, ok := h.authenticatedUser(r)
+// The cookie alone isn't sufficient: a user whose status flipped to
+// disabled/denied/pending still holds a valid token until DeleteByUser
+// or the TTL ends it, so status is re-checked here as authRequired does
+// for /console/api/*. With no user store wired (test harnesses) only the
+// session is checked.
+//
+// userID is the canonical
+// user, which for a shard session is the shard's owner; shardID is set
+// only for shard sessions, and canChat is then the shard's
+// chat_enabled. A shard session runs the same revocation check as
+// authRequired (shard deleted, disabled, console access off, owner
+// changed), so the chat surface can't outlive the console one.
+// Implements native.SessionReader.
+func (h *Handler) PrincipalFromRequest(r *http.Request) (userID, shardID string, canChat, ok bool) {
+	sess, ok := h.authenticatedSession(r)
 	if !ok {
-		return "", false
+		return "", "", false, false
 	}
-	if h.users == nil {
-		return uid, true
+	if h.users != nil {
+		u, err := h.users.GetUser(r.Context(), sess.UserID)
+		if err != nil || u == nil || u.Status != identity.StatusApproved {
+			return "", "", false, false
+		}
 	}
-	u, err := h.users.GetUser(r.Context(), uid)
-	if err != nil || u == nil || u.Status != identity.StatusApproved {
-		return "", false
+	if sess.PrincipalType != PrincipalTypeShard {
+		return sess.UserID, "", true, true
 	}
-	return uid, true
+	perms, err := h.loadShardPermissions(r.Context(), sess.PrincipalID, sess.UserID)
+	if err != nil {
+		return "", "", false, false
+	}
+	return sess.UserID, sess.PrincipalID, perms.CanChat, true
+}
+
+// userSession returns the request's session only when it belongs to a
+// user principal. Credential ceremonies use it: a shard session must
+// never add or manage passkeys on its owner's account.
+func (h *Handler) userSession(r *http.Request) (*AdminSession, bool) {
+	sess, ok := h.authenticatedSession(r)
+	if !ok || sess.PrincipalType == PrincipalTypeShard {
+		return nil, false
+	}
+	return sess, true
 }
 
 // authenticatedSession reads the session cookie and returns the
@@ -749,12 +789,20 @@ func (h *Handler) registerBegin(w http.ResponseWriter, r *http.Request) {
 		// session cookie, NEVER from the request body. Anyone who
 		// isn't already logged in must use the enrollment-token
 		// flow (/console/api/auth/enroll/*).
-		callerID, ok := h.authenticatedUser(r)
+		sess, ok := h.authenticatedSession(r)
 		if !ok {
 			writeJSONError(w, http.StatusUnauthorized,
 				"authentication required to register a new key; ask an admin for an enrollment link if you don't have an existing passkey")
 			return
 		}
+		if sess.PrincipalType == PrincipalTypeShard {
+			// A shard session's user id is its owner. Letting it through
+			// here stored a new passkey on the owner's account: a kiosk
+			// became a permanent, full owner login.
+			writeJSONError(w, http.StatusForbidden, "shard sessions cannot register passkeys")
+			return
+		}
+		callerID := sess.UserID
 		u, err := h.users.GetUser(r.Context(), callerID)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError,
@@ -1127,7 +1175,7 @@ func (h *Handler) loginFinish(w http.ResponseWriter, r *http.Request) {
 	// Refuse to mint a session for a non-approved user. authRequired
 	// would block them from /console/api/* anyway, but the same
 	// session cookie is also accepted by /api/chat (via the native
-	// adapter's UserIDFromRequest), which doesn't run authRequired.
+	// adapter's PrincipalFromRequest), which doesn't run authRequired.
 	// Mint-time refusal closes that branch too.
 	if h.users != nil {
 		u, err := h.users.GetUser(r.Context(), foundUserID)
@@ -1158,7 +1206,8 @@ func (h *Handler) loginFinish(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	sessionToken, err := h.sessions.Create(r.Context(), foundUserID, h.sessionMaxAge)
+	sessionToken, err := h.sessions.CreateBound(r.Context(), PrincipalTypeUser, foundUserID, foundUserID,
+		encodeCredentialID(cred.ID), h.sessionMaxAge)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "create session: "+err.Error())
 		return
@@ -1248,7 +1297,8 @@ func (h *Handler) finishShardLogin(w http.ResponseWriter, r *http.Request, body 
 		ttl = time.Duration(*sh.SessionMaxAge) * time.Second
 	}
 
-	token, err := h.sessions.CreatePrincipal(r.Context(), PrincipalTypeShard, sh.ID, sh.OwnerID, ttl)
+	token, err := h.sessions.CreateBound(r.Context(), PrincipalTypeShard, sh.ID, sh.OwnerID,
+		encodeCredentialID(cred.ID), ttl)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "create session: "+err.Error())
 		return

@@ -2,7 +2,12 @@ package db
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
+	"time"
+
+	"github.com/lib/pq"
 )
 
 // migration is a single, idempotent DDL step. Order matters: later
@@ -1531,6 +1536,42 @@ CREATE TABLE IF NOT EXISTS pending_embeds (
 CREATE INDEX IF NOT EXISTS pending_embeds_enqueued_idx
     ON pending_embeds (enqueued_at);`,
 	},
+	{
+		// The passkey that minted each session, so deleting a user
+		// passkey or revoking a shard passkey can end the sessions it
+		// created. NULL for sessions minted before this column existed.
+		// The principal index serves DeleteByShard.
+		name: "admin_sessions_credential",
+		ddl: `
+ALTER TABLE admin_sessions
+    ADD COLUMN IF NOT EXISTS credential_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_admin_sessions_credential
+    ON admin_sessions (credential_id) WHERE credential_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_admin_sessions_principal
+    ON admin_sessions (principal_type, principal_id);`,
+	},
+	{
+		// Repair: an isolated shard's extraction could supersede facts
+		// outside its own scope (the owner's top-level facts included).
+		// Retrieval hides any superseded row whatever scope the
+		// superseder has, while the isolated replacement is itself hidden
+		// from top-level, so the owner lost the fact entirely. Writes can
+		// no longer do this (NearestLiveFacts); detach the pointers that
+		// already did so the original facts come back. Idempotent.
+		name: "isolated_supersede_repair",
+		ddl: `
+UPDATE memories s
+   SET supersedes = NULL
+ WHERE s.supersedes IS NOT NULL
+   AND s.scope_tag IS NOT NULL
+   AND EXISTS (SELECT 1 FROM shards sh
+                WHERE sh.scope_tag = s.scope_tag
+                  AND sh.owner_id = s.user_id
+                  AND sh.visibility = 'isolated')
+   AND EXISTS (SELECT 1 FROM memories t
+                WHERE t.id = s.supersedes
+                  AND t.scope_tag IS DISTINCT FROM s.scope_tag);`,
+	},
 }
 
 // migrateLockKey is the pg_advisory_lock key that serializes Migrate
@@ -1538,6 +1579,21 @@ CREATE INDEX IF NOT EXISTS pending_embeds_enqueued_idx
 // change: two gateway builds with different keys would happily migrate
 // concurrently again.
 const migrateLockKey = 0x46414D494C494152 // "FAMILIAR"
+
+// migrateLockTimeout bounds how long a migration waits for a table lock
+// before it rolls back, releasing the locks it already holds, and
+// starts over.
+//
+// Migrations re-run on every boot, so each one takes ACCESS EXCLUSIVE
+// locks in its own statement order while other sessions' writes take
+// theirs in another: a DELETE FROM shards locks shards, then its
+// ON DELETE CASCADE locks shard_passkeys, which shard_auth_phase1 locks
+// before it alters shards. When the orders cross, Postgres aborts one
+// side after deadlock_timeout (1s by default), and that side can be
+// the other session's write. Giving up well before then makes the
+// migration the side that yields. It also stops a queued ACCESS
+// EXCLUSIVE request from stalling every later reader of the table.
+const migrateLockTimeout = 250 * time.Millisecond
 
 // Migrate runs every registered migration in order against the pool.
 // Each statement is expected to be idempotent — the current set all use
@@ -1562,13 +1618,57 @@ func Migrate(ctx context.Context, p *Pool) error {
 		return fmt.Errorf("db: migrate advisory lock: %w", err)
 	}
 	defer func() {
-		_, _ = conn.ExecContext(context.WithoutCancel(ctx), `SELECT pg_advisory_unlock($1)`, int64(migrateLockKey))
+		// Close hands the session back to the pool, so the timeout
+		// must not outlive this run.
+		bg := context.WithoutCancel(ctx)
+		_, _ = conn.ExecContext(bg, `RESET lock_timeout`)
+		_, _ = conn.ExecContext(bg, `SELECT pg_advisory_unlock($1)`, int64(migrateLockKey))
 	}()
+	// Set only once the advisory lock is held: waiting on another
+	// Migrate is expected and must not time out.
+	if _, err := conn.ExecContext(ctx,
+		fmt.Sprintf(`SET lock_timeout = '%dms'`, migrateLockTimeout.Milliseconds())); err != nil {
+		return fmt.Errorf("db: migrate lock timeout: %w", err)
+	}
 
 	for _, m := range migrations {
-		if _, err := conn.ExecContext(ctx, m.ddl); err != nil {
+		if err := runMigration(ctx, conn.ExecContext, m); err != nil {
 			return fmt.Errorf("db: migration %q: %w", m.name, err)
 		}
 	}
 	return nil
+}
+
+// execFunc is the ExecContext of the connection Migrate runs on.
+type execFunc func(ctx context.Context, query string, args ...any) (sql.Result, error)
+
+// runMigration runs one migration, starting it over while it loses lock
+// races (see migrateLockTimeout). A migration's statements run as one
+// implicit transaction and are idempotent, so an aborted attempt left
+// nothing behind. It gives up when ctx ends, with the last lock error.
+func runMigration(ctx context.Context, exec execFunc, m migration) error {
+	for attempt := 1; ; attempt++ {
+		_, err := exec(ctx, m.ddl)
+		if err == nil || !lostLockRace(err) {
+			return err
+		}
+		pause := time.NewTimer(min(time.Duration(attempt)*50*time.Millisecond, time.Second))
+		select {
+		case <-ctx.Done():
+			pause.Stop()
+			return fmt.Errorf("%w (gave up after %d attempts: %v)", err, attempt, ctx.Err())
+		case <-pause.C:
+		}
+	}
+}
+
+// lostLockRace reports whether Postgres abandoned a statement over
+// locks: lock_timeout expired (55P03) or it was a deadlock's victim
+// (40P01).
+func lostLockRace(err error) bool {
+	var pqErr *pq.Error
+	if !errors.As(err, &pqErr) {
+		return false
+	}
+	return pqErr.Code == "55P03" || pqErr.Code == "40P01"
 }

@@ -47,6 +47,82 @@ type MemoryManager interface {
 	// deliberately not on this interface — see forget_fact.
 	DeleteMemoryOwned(ctx context.Context, id, userID string) (bool, error)
 	UpdateMemoryContent(ctx context.Context, id, newContent, changedBy string, embedding []float32) error
+	// SearchInScope is semantic search over one shard's own rows; the
+	// shard-turn counterpart of the engine search, which serves the
+	// owner's top-level memory.
+	SearchInScope(ctx context.Context, vector []float32, limit int, threshold float64, userID, scopeTag string) ([]mem.MemoryResult, error)
+	// InView reports whether a row is one the tools may change for this
+	// caller: the user's own, and inside the caller's view (the shard's
+	// scope, or top-level memory when scopeTag is "").
+	InView(ctx context.Context, id, userID, scopeTag string) (bool, error)
+}
+
+// toolScope returns the memory view a tool call is confined to: "" on
+// the trusted path (the user's top-level memory, with isolated shard
+// rows excluded), or the shard's own scope_tag inside a shard. A shard
+// turn runs with its OWNER's user id, so before this the read and edit
+// tools served and changed the owner's whole memory from any shard. A
+// shard turn with no scope tag can't be confined and is refused.
+func toolScope(sc skills.SessionContext) (scopeTag, refusal string) {
+	if sc.ShardID == "" {
+		return "", ""
+	}
+	if sc.ScopeTag == "" {
+		return "", "memory: this shard has no memory scope, so its memory tools are unavailable"
+	}
+	return sc.ScopeTag, ""
+}
+
+// errNoScopedMemory is the refusal when a shard-confined operation has
+// no store that can confine it. Failing closed beats falling back to
+// the owner-wide search.
+const errNoScopedMemory = "memory: shard-scoped memory is not configured"
+
+// locateInView finds the single best match for vec inside the caller's
+// view. Returns empty strings when nothing matches.
+func (s *Skill) locateInView(ctx context.Context, vec []float32, userID, scopeTag string) (id, content, refusal string, err error) {
+	if scopeTag != "" {
+		if s.manager == nil {
+			return "", "", errNoScopedMemory, nil
+		}
+		searchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		res, err := s.manager.SearchInScope(searchCtx, vec, 1, 0.5, userID, scopeTag)
+		cancel()
+		if err != nil {
+			return "", "", "", fmt.Errorf("search memory: %w", err)
+		}
+		if len(res) > 0 {
+			return res[0].ID, res[0].Content, "", nil
+		}
+		return "", "", "", nil
+	}
+	engineResults, engineErr := s.engineSemanticSearch(ctx, vec, 1, userID)
+	if engineErr == nil && len(engineResults) > 0 && engineResults[0].Fact != nil {
+		return engineResults[0].Fact.Id, engineResults[0].Fact.Content, "", nil
+	}
+	if s.store != nil {
+		searchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		res, err := s.store.Search(searchCtx, vec, 1, 0.5, userID)
+		cancel()
+		if err != nil {
+			return "", "", "", fmt.Errorf("search memory: %w", err)
+		}
+		if len(res) > 0 {
+			return res[0].ID, res[0].Content, "", nil
+		}
+	}
+	return "", "", "", nil
+}
+
+// checkInView reports whether the caller may change row id. With no
+// manager there is no way to check, so the change is refused.
+func (s *Skill) checkInView(ctx context.Context, id, userID, scopeTag string) (bool, error) {
+	if s.manager == nil {
+		return false, nil
+	}
+	vCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return s.manager.InView(vCtx, id, userID, scopeTag)
 }
 
 // Skill exposes save_fact, remember, search_memory, and the
@@ -541,6 +617,23 @@ func (s *Skill) execSearchMemory(ctx context.Context, params json.RawMessage) (s
 		// every unauthenticated caller could read Operator's facts.
 		return skills.ToolResult{Error: "memory: no user_id in skill context — caller is unauthenticated"}, nil
 	}
+	sc, _ := skills.ContextFrom(ctx)
+	scopeTag, refusal := toolScope(sc)
+	if refusal != "" {
+		return skills.ToolResult{Error: refusal}, nil
+	}
+	if scopeTag != "" {
+		if s.manager == nil {
+			return skills.ToolResult{Error: errNoScopedMemory}, nil
+		}
+		searchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		res, err := s.manager.SearchInScope(searchCtx, vec, limit, threshold, userID, scopeTag)
+		cancel()
+		if err != nil {
+			return skills.ToolResult{}, fmt.Errorf("search memory: %w", err)
+		}
+		return formatStoreResults(args.Query, threshold, res), nil
+	}
 
 	// Prefer the engine's tier-merged query (RAM + pgvector) so fresh
 	// writes from remember/save_fact are immediately visible. Fall back
@@ -582,19 +675,24 @@ func (s *Skill) execSearchMemory(ctx context.Context, params json.RawMessage) (s
 	if storeErr != nil {
 		return skills.ToolResult{}, fmt.Errorf("search memory: %w", storeErr)
 	}
-	if len(storeResults) == 0 {
-		msg := fmt.Sprintf("No memories above threshold %.2f for %q.", threshold, args.Query)
-		return skills.ToolResult{Content: msg, Tokens: len(msg) / 4}, nil
-	}
+	return formatStoreResults(args.Query, threshold, storeResults), nil
+}
 
+// formatStoreResults renders store search hits as the search_memory
+// tool result.
+func formatStoreResults(query string, threshold float64, results []mem.MemoryResult) skills.ToolResult {
+	if len(results) == 0 {
+		msg := fmt.Sprintf("No memories above threshold %.2f for %q.", threshold, query)
+		return skills.ToolResult{Content: msg, Tokens: len(msg) / 4}
+	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "Memory search results for %q:\n", args.Query)
-	for i, r := range storeResults {
+	fmt.Fprintf(&b, "Memory search results for %q:\n", query)
+	for i, r := range results {
 		fmt.Fprintf(&b, "%d. (sim: %.3f) %s\n", i+1, r.Similarity, r.Content)
 	}
 	content := strings.TrimRight(b.String(), "\n")
-	data, _ := json.Marshal(storeResults)
-	return skills.ToolResult{Content: content, Data: data, Tokens: len(content) / 4}, nil
+	data, _ := json.Marshal(results)
+	return skills.ToolResult{Content: content, Data: data, Tokens: len(content) / 4}
 }
 
 // --- list_my_memories -------------------------------------------------------
@@ -640,6 +738,10 @@ func (s *Skill) execListMyMemories(ctx context.Context, params json.RawMessage) 
 		// than silently scope everything to the bootstrap admin.
 		return skills.ToolResult{Error: "memory: no user_id in skill context — caller is unauthenticated"}, nil
 	}
+	scopeTag, refusal := toolScope(sc)
+	if refusal != "" {
+		return skills.ToolResult{Error: refusal}, nil
+	}
 
 	// When a query is present and we have an embedder + engine, run
 	// a semantic search through the engine first and merge its hits
@@ -664,7 +766,7 @@ func (s *Skill) execListMyMemories(ctx context.Context, params json.RawMessage) 
 	entries := make([]listEntry, 0, limit*2)
 	seenID := make(map[string]int, limit*2) // id → index in entries
 
-	if strings.TrimSpace(args.Query) != "" && s.embed != nil && s.engine != nil {
+	if strings.TrimSpace(args.Query) != "" && s.embed != nil && s.engine != nil && scopeTag == "" {
 		embedCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		vec, embedErr := s.embed(embedCtx, args.Query)
 		cancel()
@@ -691,10 +793,16 @@ func (s *Skill) execListMyMemories(ctx context.Context, params json.RawMessage) 
 		}
 	}
 
+	// Confine the listing to the caller's view: a shard lists only its
+	// own scope, and the trusted path leaves isolated shards' rows out
+	// (they were showing up in the owner's list, conversation chunks
+	// included).
 	f := mem.MemoryFilter{
 		Substring:        args.Query,
 		UserIDFilterMode: mem.UserIDFilterExact,
 		UserID:           userID,
+		ScopeTag:         scopeTag,
+		TopLevelOnly:     scopeTag == "",
 	}
 
 	listCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -792,6 +900,11 @@ func (s *Skill) execForgetFact(ctx context.Context, params json.RawMessage) (ski
 		return skills.ToolResult{Error: "memory: no user_id in skill context — caller is unauthenticated"}, nil
 	}
 
+	scopeTag, refusal := toolScope(sc)
+	if refusal != "" {
+		return skills.ToolResult{Error: refusal}, nil
+	}
+
 	targetID := strings.TrimSpace(args.ID)
 	targetContent := ""
 
@@ -813,25 +926,28 @@ func (s *Skill) execForgetFact(ctx context.Context, params json.RawMessage) (ski
 			return skills.ToolResult{}, fmt.Errorf("embed query: %w", err)
 		}
 
-		engineResults, engineErr := s.engineSemanticSearch(ctx, vec, 1, userID)
-		if engineErr == nil && len(engineResults) > 0 && engineResults[0].Fact != nil {
-			targetID = engineResults[0].Fact.Id
-			targetContent = engineResults[0].Fact.Content
-		} else if s.store != nil {
-			searchCtx, cancel2 := context.WithTimeout(ctx, 5*time.Second)
-			storeResults, storeErr := s.store.Search(searchCtx, vec, 1, 0.5, userID)
-			cancel2()
-			if storeErr != nil {
-				return skills.ToolResult{}, fmt.Errorf("search memory: %w", storeErr)
-			}
-			if len(storeResults) > 0 {
-				targetID = storeResults[0].ID
-				targetContent = storeResults[0].Content
-			}
+		id, content, refusal, err := s.locateInView(ctx, vec, userID, scopeTag)
+		if err != nil {
+			return skills.ToolResult{}, err
 		}
-		if targetID == "" {
+		if refusal != "" {
+			return skills.ToolResult{Error: refusal}, nil
+		}
+		if id == "" {
 			return skills.ToolResult{Content: fmt.Sprintf("No memory found matching %q.", query)}, nil
 		}
+		targetID, targetContent = id, content
+	}
+
+	// The id may come straight from the model, so check it's inside the
+	// caller's view before deleting: a shard may only forget its own
+	// rows, and the owner's assistant never touches an isolated shard's.
+	ok, err := s.checkInView(ctx, targetID, userID, scopeTag)
+	if err != nil {
+		return skills.ToolResult{}, fmt.Errorf("check memory: %w", err)
+	}
+	if !ok {
+		return skills.ToolResult{Content: fmt.Sprintf("Memory %s not found.", targetID)}, nil
 	}
 
 	// One tier now: engine.DeleteFact and manager.DeleteMemory both
@@ -924,28 +1040,29 @@ func (s *Skill) execCorrectFact(ctx context.Context, params json.RawMessage) (sk
 		return skills.ToolResult{}, fmt.Errorf("embed query: %w", err)
 	}
 
-	// Locate the target fact by semantic similarity. Engine path
-	// preferred (returns the same pgvector rows but with a relevance
-	// score); manager.Search is the fallback.
-	var targetID, targetContent string
-	engineResults, engineErr := s.engineSemanticSearch(ctx, vec, 1, userID)
-	if engineErr == nil && len(engineResults) > 0 && engineResults[0].Fact != nil {
-		targetID = engineResults[0].Fact.Id
-		targetContent = engineResults[0].Fact.Content
-	} else if s.store != nil {
-		searchCtx, cancel2 := context.WithTimeout(ctx, 5*time.Second)
-		storeResults, storeErr := s.store.Search(searchCtx, vec, 1, 0.5, userID)
-		cancel2()
-		if storeErr != nil {
-			return skills.ToolResult{}, fmt.Errorf("search memory: %w", storeErr)
-		}
-		if len(storeResults) > 0 {
-			targetID = storeResults[0].ID
-			targetContent = storeResults[0].Content
-		}
+	scopeTag, refusal := toolScope(sc)
+	if refusal != "" {
+		return skills.ToolResult{Error: refusal}, nil
+	}
+
+	// Locate the target fact by semantic similarity inside the caller's
+	// view, then confirm the row is one the caller may change: search
+	// also surfaces global (NULL-owner) rows, which a chat turn must
+	// never rewrite.
+	targetID, targetContent, refusal, err := s.locateInView(ctx, vec, userID, scopeTag)
+	if err != nil {
+		return skills.ToolResult{}, err
+	}
+	if refusal != "" {
+		return skills.ToolResult{Error: refusal}, nil
 	}
 	if targetID == "" {
 		return skills.ToolResult{Content: fmt.Sprintf("No memory found matching %q.", query)}, nil
+	}
+	if ok, err := s.checkInView(ctx, targetID, userID, scopeTag); err != nil {
+		return skills.ToolResult{}, fmt.Errorf("check memory: %w", err)
+	} else if !ok {
+		return skills.ToolResult{Content: fmt.Sprintf("Memory %s not found.", targetID)}, nil
 	}
 
 	// Re-embed the corrected content so future semantic searches

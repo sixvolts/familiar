@@ -546,3 +546,98 @@ func TestGenerateTokenPlaintext_ShapeAndUniqueness(t *testing.T) {
 		seen[p] = true
 	}
 }
+
+// Deleting an ISOLATED shard deletes its private memory. Isolation is
+// decided by a shards row matching the tag, so rows left behind became
+// the owner's top-level memory once the shard was gone.
+func TestShard_DeleteIsolatedPurgesItsMemory(t *testing.T) {
+	s := setupShardStore(t)
+	ctx := context.Background()
+	iso := validShard("inbox")
+	if err := s.CreateShard(ctx, iso); err != nil {
+		t.Fatalf("CreateShard: %v", err)
+	}
+	promo := validShard("public")
+	promo.Visibility = VisibilityPromoted
+	if err := s.CreateShard(ctx, promo); err != nil {
+		t.Fatalf("CreateShard: %v", err)
+	}
+	seed := func(content, tag string) {
+		t.Helper()
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT INTO memories (agent_id, scope, content, source_type, user_id, scope_tag)
+			 VALUES ('test', 'user', $1, 'explicit', 'owner', $2)`, content, tag); err != nil {
+			t.Fatalf("seed memory: %v", err)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT INTO relationships (subject, predicate, object, user_id, scope_tag)
+			 VALUES ($1, 'says', 'x', 'owner', $2)`, content, tag); err != nil {
+			t.Fatalf("seed triple: %v", err)
+		}
+	}
+	seed("injected instruction from an email", "shard:inbox")
+	seed("public fact", "shard:public")
+	t.Cleanup(func() {
+		_, _ = s.db.ExecContext(context.Background(), `DELETE FROM memories WHERE user_id = 'owner' AND scope_tag IN ('shard:inbox','shard:public')`)
+		_, _ = s.db.ExecContext(context.Background(), `DELETE FROM relationships WHERE user_id = 'owner' AND scope_tag IN ('shard:inbox','shard:public')`)
+	})
+
+	for _, id := range []string{"inbox", "public"} {
+		if err := s.DeleteShard(ctx, id); err != nil {
+			t.Fatalf("DeleteShard %s: %v", id, err)
+		}
+	}
+	count := func(table, tag string) int {
+		t.Helper()
+		var n int
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT count(*) FROM `+table+` WHERE user_id = 'owner' AND scope_tag = $1`, tag).Scan(&n); err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		return n
+	}
+	if n := count("memories", "shard:inbox") + count("relationships", "shard:inbox"); n != 0 {
+		t.Errorf("isolated shard's memory survived its deletion (%d rows)", n)
+	}
+	if n := count("memories", "shard:public") + count("relationships", "shard:public"); n != 2 {
+		t.Errorf("promoted shard's rows = %d, want 2 kept", n)
+	}
+}
+
+// Renaming a shard's scope tag carries its rows along; otherwise they
+// matched no shard and an isolated shard's rows surfaced top-level.
+func TestShard_ScopeTagRenameRetagsMemory(t *testing.T) {
+	s := setupShardStore(t)
+	ctx := context.Background()
+	sh := validShard("hr")
+	if err := s.CreateShard(ctx, sh); err != nil {
+		t.Fatalf("CreateShard: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO memories (agent_id, scope, content, source_type, user_id, scope_tag)
+		 VALUES ('test', 'user', 'salary review notes', 'explicit', 'owner', 'shard:hr')`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = s.db.ExecContext(context.Background(), `DELETE FROM memories WHERE user_id = 'owner' AND scope_tag IN ('shard:hr','hr-v2')`)
+	})
+	sh.ScopeTag = "hr-v2"
+	if err := s.UpdateShard(ctx, sh); err != nil {
+		t.Fatalf("UpdateShard: %v", err)
+	}
+	var old, renamed int
+	_ = s.db.QueryRowContext(ctx, `SELECT count(*) FROM memories WHERE user_id='owner' AND scope_tag='shard:hr'`).Scan(&old)
+	_ = s.db.QueryRowContext(ctx, `SELECT count(*) FROM memories WHERE user_id='owner' AND scope_tag='hr-v2'`).Scan(&renamed)
+	if old != 0 || renamed != 1 {
+		t.Errorf("after rename: %d rows under the old tag, %d under the new; want 0 and 1", old, renamed)
+	}
+}
+
+func TestValidateScopeTag_ReservesBookPrefix(t *testing.T) {
+	if err := ValidateScopeTag("book:3f2a"); err == nil {
+		t.Error("a shard may not take a wiki book's scope tag")
+	}
+	if err := ValidateScopeTag("shard:kitchen"); err != nil {
+		t.Errorf("ordinary tag rejected: %v", err)
+	}
+}

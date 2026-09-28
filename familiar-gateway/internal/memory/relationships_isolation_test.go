@@ -76,3 +76,62 @@ func TestRelationshipRetrieval_ExcludesIsolatedShardTriples(t *testing.T) {
 	tv, tvErr := s.TraverseFrom(ctx, "operator", "iso-owner", 1, 20)
 	assertVisible("TraverseFrom", tv, tvErr)
 }
+
+// A shard restating one of the owner's triples must not take it over:
+// before the guard the upsert rewrote the object and stamped the shard's
+// isolated tag on it, hiding the owner's triple from top-level
+// retrieval. A trusted-path write may still take over a shard triple.
+func TestUpsertRelationships_ShardCannotClobberTopLevelTriple(t *testing.T) {
+	pool := testutil.PgTestPool(t)
+	testutil.TruncateTables(t, pool, "relationships")
+	s, err := NewPgRelationshipStore(pool)
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	ctx := context.Background()
+	for _, q := range []string{
+		`INSERT INTO users (id, display_name, status) VALUES ('clob-owner', 'C', 'approved') ON CONFLICT (id) DO NOTHING`,
+		`INSERT INTO shards (id, owner_id, name, persistence, visibility, scope_tag, system_prompt)
+		 VALUES ('clob-shard', 'clob-owner', 'C', 'persistent', 'isolated', 'shard:clob', 'p') ON CONFLICT (id) DO NOTHING`,
+	} {
+		if _, err := pool.ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = pool.ExecContext(context.Background(), `DELETE FROM shards WHERE id = 'clob-shard'`)
+		_, _ = pool.ExecContext(context.Background(), `DELETE FROM users WHERE id = 'clob-owner'`)
+	})
+
+	upsert := func(object, scope string) {
+		t.Helper()
+		if err := s.UpsertRelationships(ctx, []Relationship{
+			{Subject: "appointment", Predicate: "scheduled_on", Object: object, UserID: "clob-owner", ScopeTag: scope},
+		}); err != nil {
+			t.Fatalf("upsert %s: %v", object, err)
+		}
+	}
+	visibleObject := func() string {
+		t.Helper()
+		got, err := s.RelatedForContents(ctx, []string{"the appointment"}, "clob-owner", 10)
+		if err != nil {
+			t.Fatalf("RelatedForContents: %v", err)
+		}
+		for _, r := range got {
+			if r.Predicate == "scheduled_on" {
+				return r.Object
+			}
+		}
+		return ""
+	}
+
+	upsert("tuesday", "")
+	upsert("thursday", "shard:clob")
+	if got := visibleObject(); got != "tuesday" {
+		t.Fatalf("after an isolated shard restated it, the owner sees %q, want tuesday", got)
+	}
+	upsert("friday", "")
+	if got := visibleObject(); got != "friday" {
+		t.Fatalf("a trusted-path update was dropped: owner sees %q, want friday", got)
+	}
+}

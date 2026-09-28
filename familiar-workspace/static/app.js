@@ -759,10 +759,16 @@
         }
         const allowed = document.body.dataset.allowedPanels;
         if (!allowed) return true; // no envelope → all allowed
-        // Map workspace surface panels to their envelope names.
-        const ALIAS = { workspace: "books", wiki: "books" };
+        const set = allowed.split(",");
+        // The workspace hosts the chat, notes and wiki surfaces, so any
+        // one of them opens it. Mapping it to "books" alone bounced a
+        // chat-only or notes-only kiosk back to Home on every click.
+        if (name === "workspace") {
+            return ["chat", "notes", "books"].some((p) => set.indexOf(p) !== -1);
+        }
+        const ALIAS = { wiki: "books" };
         const checkName = ALIAS[name] || name;
-        return allowed.split(",").indexOf(checkName) !== -1;
+        return set.indexOf(checkName) !== -1;
     }
 
     // Expose for workspace.js — it needs to flip the .panel host

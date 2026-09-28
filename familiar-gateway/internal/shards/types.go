@@ -168,10 +168,15 @@ func ValidateSlug(s string) error {
 // ValidateScopeTag rejects empty values and anything obviously unsafe
 // for a memory scope label. It is intentionally lenient on content —
 // operators choose the label convention (`shard:ticket-triage`,
-// `ticket-triage-v2`, etc.).
+// `ticket-triage-v2`, etc.) — except for the reserved `book:` prefix,
+// which the wiki knowledge pipeline writes. An isolated shard carrying a
+// book's tag would hide that book's knowledge rows.
 func ValidateScopeTag(tag string) error {
 	if tag == "" {
 		return fmt.Errorf("%w: empty", ErrInvalidScopeTag)
+	}
+	if strings.HasPrefix(tag, ReservedBookScopePrefix) {
+		return fmt.Errorf("%w: the %q prefix is reserved for wiki knowledge", ErrInvalidScopeTag, ReservedBookScopePrefix)
 	}
 	if len(tag) > 128 {
 		return fmt.Errorf("%w: too long (%d > 128)", ErrInvalidScopeTag, len(tag))
@@ -183,6 +188,10 @@ func ValidateScopeTag(tag string) error {
 	}
 	return nil
 }
+
+// ReservedBookScopePrefix is the scope_tag prefix of wiki-derived
+// knowledge rows ("book:<id>"). Shards may not use it.
+const ReservedBookScopePrefix = "book:"
 
 // writeCapableMemoryTools are the tool names that mutate memory. An
 // ephemeral shard's allowlist is rejected if it contains any of these.

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/familiar/gateway/internal/identity"
+	"github.com/familiar/gateway/internal/shards"
 )
 
 // adminUserScope resolves which user's data the caller may act on:
@@ -275,6 +276,12 @@ func (h *Handler) loadShardPermissions(ctx context.Context, shardID, sessionUser
 		return nil, errors.New("shard store not configured")
 	}
 	sh, err := h.shards.GetShard(ctx, shardID)
+	if errors.Is(err, shards.ErrShardNotFound) {
+		// A deleted shard revokes its sessions. Surfacing this as an
+		// internal error (the old behaviour) left the cookie alive, so
+		// recreating the same slug re-armed it.
+		return nil, errShardSessionRevoked
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -331,42 +338,147 @@ func (h *Handler) loadShardPermissions(ctx context.Context, shardID, sessionUser
 	return perms, nil
 }
 
-// requirePanel returns a middleware that 403s when the current
-// session's permission envelope hides the named panel. User sessions
-// (Permissions == nil) and shards with an inherit-everything envelope
-// (Permissions.Panels == nil) pass through unchanged. Wrap INSIDE
-// authRequired — it relies on AuthUserFrom.
-func (h *Handler) requirePanel(name string) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			au, ok := AuthUserFrom(r.Context())
-			if !ok {
-				writeJSONError(w, http.StatusForbidden, "missing authenticated user")
-				return
-			}
-			if !au.CanAccessPanel(name) {
-				writeJSONError(w, http.StatusForbidden, "panel not accessible to this session")
-				return
-			}
-			next.ServeHTTP(w, r)
-		})
-	}
+// Panel names a shard envelope can grant. They match the keys the
+// workspace stamps from /auth/status (app.js applyPermissionEnvelope).
+const (
+	panelChat      = "chat"
+	panelNotes     = "notes"
+	panelBooks     = "books"
+	panelMemory    = "memory"
+	panelDashboard = "dashboard"
+)
+
+// shardRoute is the rule for one console route when the caller is a
+// shard (kiosk) session. User sessions never consult it.
+type shardRoute struct {
+	panels []string // the envelope must grant at least one; empty = no panel needed
+	chat   bool     // additionally requires the shard's chat_enabled
 }
 
-// requireChat gates chat-write endpoints. Mirrors CanInvoke for
-// the API-invocation surfaces. User sessions short-circuit true.
-func (h *Handler) requireChat(next http.Handler) http.Handler {
+var (
+	shardChatRead  = shardRoute{panels: []string{panelChat}}
+	shardChatWrite = shardRoute{panels: []string{panelChat}, chat: true}
+	shardBooks     = shardRoute{panels: []string{panelBooks, panelNotes}}
+	shardMemory    = shardRoute{panels: []string{panelMemory}}
+	shardDashboard = shardRoute{panels: []string{panelDashboard}}
+)
+
+// shardRoutes allow-lists the console routes a shard session may reach,
+// keyed by the exact pattern registered on the authed mux. Anything not
+// listed is refused. A shard session carries its OWNER's user id, so
+// every owner-scoped handler would otherwise serve the owner's data to
+// the kiosk: that is how conversations, memories, the profile, push and
+// passkey management were all reachable while requirePanel sat unused.
+// Deny-by-default keeps a route added later closed to kiosks until
+// someone decides it belongs here.
+//
+// Deliberately absent: credentials and enrollment, profile, push, the
+// user picker, instance status, skills, shards, actions, research runs,
+// chat folders, conversation moves, page-event SSE, home aggregates,
+// book creation/settings/membership and public-share toggles. Book
+// routes still apply the book envelope per request (scopeForWiki,
+// media handlers), and chat routes only ever see conversations bound to
+// the session's own shard (conversationScope).
+var shardRoutes = map[string]shardRoute{
+	"GET /console/api/maintenance": {},
+
+	"GET /console/api/conversations":                shardChatRead,
+	"POST /console/api/conversations":               shardChatWrite,
+	"GET /console/api/conversations/{id}":           shardChatRead,
+	"PATCH /console/api/conversations/{id}":         shardChatRead,
+	"DELETE /console/api/conversations/{id}":        shardChatRead,
+	"GET /console/api/conversations/{id}/messages":  shardChatRead,
+	"POST /console/api/conversations/{id}/messages": shardChatWrite,
+
+	"GET /console/api/books":                                             shardBooks,
+	"GET /console/api/books/personal":                                    shardBooks,
+	"GET /console/api/books/{slug}":                                      shardBooks,
+	"GET /console/api/books/{slug}/search":                               shardBooks,
+	"GET /console/api/books/{slug}/pages":                                shardBooks,
+	"POST /console/api/books/{slug}/pages":                               shardBooks,
+	"GET /console/api/books/{slug}/pages/{page_slug}":                    shardBooks,
+	"PATCH /console/api/books/{slug}/pages/{page_slug}":                  shardBooks,
+	"DELETE /console/api/books/{slug}/pages/{page_slug}":                 shardBooks,
+	"GET /console/api/books/{slug}/pages/{page_slug}/revisions":          shardBooks,
+	"GET /console/api/books/{slug}/pages/{page_slug}/revisions/{rev_id}": shardBooks,
+	"GET /console/api/books/{slug}/pages/{page_slug}/links":              shardBooks,
+	"GET /console/api/books/{slug}/pages/{page_slug}/backlinks":          shardBooks,
+	"GET /console/api/books/{slug}/page-by-id/{page_id}":                 shardBooks,
+	"PATCH /console/api/books/{slug}/page-by-id/{page_id}":               shardBooks,
+	"DELETE /console/api/books/{slug}/page-by-id/{page_id}":              shardBooks,
+	"POST /console/api/books/{slug}/page-by-id/{page_id}/append":         shardBooks,
+	"POST /console/api/books/{slug}/page-by-id/{page_id}/pin":            shardBooks,
+	"POST /console/api/books/{slug}/page-by-id/{page_id}/move":           shardBooks,
+	"GET /console/api/books/{slug}/page-by-id/{page_id}/links":           shardBooks,
+	"GET /console/api/books/{slug}/page-by-id/{page_id}/backlinks":       shardBooks,
+	"POST /console/api/books/{slug}/page-by-id/{page_id}/media":          shardBooks,
+	"GET /console/api/books/{slug}/page-by-id/{page_id}/media":           shardBooks,
+	"GET /console/api/media/{id}":                                        shardBooks,
+	"DELETE /console/api/media/{id}":                                     shardBooks,
+
+	"GET /console/api/memories":                      shardMemory,
+	"GET /console/api/memories/facets":               shardMemory,
+	"GET /console/api/memories/{id}":                 shardMemory,
+	"PATCH /console/api/memories/{id}":               shardMemory,
+	"DELETE /console/api/memories/{id}":              shardMemory,
+	"GET /console/api/memories/{id}/versions":        shardMemory,
+	"GET /console/api/memories/{id}/relationships":   shardMemory,
+	"GET /console/api/memories/{id}/chain":           shardMemory,
+	"POST /console/api/memories/{id}/chain/collapse": shardMemory,
+	"GET /console/api/memory/graph":                  shardMemory,
+	"GET /console/api/memory/entities":               shardMemory,
+	"GET /console/api/memory/relationship/{id}":      shardMemory,
+	"PATCH /console/api/memory/relationship/{id}":    shardMemory,
+	"DELETE /console/api/memory/relationship/{id}":   shardMemory,
+	"GET /console/api/memory/entity/{name}/facts":    shardMemory,
+	"POST /console/api/memory/entity/{name}/merge":   shardMemory,
+	"DELETE /console/api/memory/entity/{name}":       shardMemory,
+	"GET /console/api/memory/health":                 shardMemory,
+
+	"GET /console/api/dashboard/overview":         shardDashboard,
+	"GET /console/api/dashboard/recent_sessions":  shardDashboard,
+	"GET /console/api/dashboard/recent_writes":    shardDashboard,
+	"GET /console/api/dashboard/entity_breakdown": shardDashboard,
+	"GET /console/api/dashboard/shard_summary":    shardDashboard,
+	"GET /console/api/dashboard/graph_preview":    shardDashboard,
+	"GET /console/api/dashboard/growth_sparkline": shardDashboard,
+}
+
+// shardMayUse reports whether a shard session may reach the route
+// registered under pattern.
+func shardMayUse(au AuthUser, pattern string) bool {
+	rule, ok := shardRoutes[pattern]
+	if !ok {
+		return false
+	}
+	if rule.chat && (au.Permissions == nil || !au.Permissions.CanChat) {
+		return false
+	}
+	if len(rule.panels) == 0 {
+		return true
+	}
+	for _, p := range rule.panels {
+		if au.CanAccessPanel(p) {
+			return true
+		}
+	}
+	return false
+}
+
+// shardRouteGate enforces shardRoutes in front of the authed mux. It
+// runs inside authRequired (which loads the envelope) and resolves the
+// route with mux.Handler, so the check keys on the same pattern the mux
+// will dispatch to. An unmatched request resolves to pattern "" and is
+// refused like any unlisted route.
+func (h *Handler) shardRouteGate(mux *http.ServeMux) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		au, ok := AuthUserFrom(r.Context())
-		if !ok {
-			writeJSONError(w, http.StatusForbidden, "missing authenticated user")
-			return
+		if au, ok := AuthUserFrom(r.Context()); ok && au.IsShardSession() {
+			if _, pattern := mux.Handler(r); !shardMayUse(au, pattern) {
+				writeJSONError(w, http.StatusForbidden, "not available to this shard session")
+				return
+			}
 		}
-		if au.IsShardSession() && au.Permissions != nil && !au.Permissions.CanChat {
-			writeJSONError(w, http.StatusForbidden, "chat disabled for this session")
-			return
-		}
-		next.ServeHTTP(w, r)
+		mux.ServeHTTP(w, r)
 	})
 }
 

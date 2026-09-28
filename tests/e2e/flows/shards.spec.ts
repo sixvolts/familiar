@@ -7,6 +7,7 @@
 
 import { test as base, expect } from "@playwright/test";
 import { Client } from "pg";
+import * as crypto from "node:crypto";
 import { start, GatewayStack } from "../fixtures/gateway";
 import { createTestUser, attachSession, TestUser } from "../fixtures/user";
 import { enableVirtualAuthenticator } from "../fixtures/authenticator";
@@ -330,3 +331,59 @@ async function shardPasskeyCount(shardID: string): Promise<number> {
         await client.end();
     }
 }
+
+// A kiosk (shard console) session carries its OWNER's user id. Through
+// the real proxy, it must reach nothing of the owner's beyond what its
+// envelope grants: before the route gate it could read the owner's
+// memories and conversations, chat on the owner's trusted path, and
+// register a passkey on the owner's account.
+test("a kiosk session can't reach its owner's surfaces", async ({ stack, request }) => {
+    const owner = await createTestUser({ role: "admin" });
+    const id = `e2e-kiosk-${Date.now().toString(36)}`;
+    const created = await request.post(`${stack.workspaceURL}/console/api/shards`, {
+        headers: authed(owner),
+        data: { ...shardBody(id), console_access: true, console_panels: ["books"], chat_enabled: false },
+    });
+    expect(created.ok(), await created.text()).toBeTruthy();
+
+    // Mint the kiosk session the way a shard passkey login does.
+    const token = crypto.randomBytes(32).toString("base64url");
+    const client = new Client({ connectionString: process.env.FAMILIAR_TEST_DSN });
+    await client.connect();
+    try {
+        await client.query(
+            `INSERT INTO admin_sessions (token, user_id, principal_type, principal_id, expires_at)
+             VALUES ($1, $2, 'shard', $3, NOW() + INTERVAL '1 hour')`,
+            [token, owner.id, id],
+        );
+    } finally {
+        await client.end();
+    }
+    const kiosk = { Cookie: `familiar_admin_session=${token}`, "Content-Type": "application/json" };
+
+    // The envelope's own surface still works.
+    const books = await request.get(`${stack.workspaceURL}/console/api/books`, { headers: kiosk });
+    expect(books.status(), await books.text()).toBe(200);
+
+    for (const [method, path] of [
+        ["GET", "/console/api/memories"],
+        ["GET", "/console/api/conversations"],
+        ["PATCH", "/console/api/profile"],
+        ["POST", "/console/api/push/subscribe"],
+        ["POST", "/console/api/auth/enrollment-token"],
+        ["GET", "/console/api/auth/passkeys"],
+    ]) {
+        const r = await request.fetch(`${stack.workspaceURL}${path}`, { method, headers: kiosk, data: "{}" });
+        expect(r.status(), `${method} ${path}: ${await r.text()}`).toBe(403);
+    }
+
+    const reg = await request.post(`${stack.workspaceURL}/console/api/auth/register/begin`, { headers: kiosk, data: {} });
+    expect(reg.status(), await reg.text()).toBe(403);
+
+    // Chat is off for this shard, and there is no trusted fallback.
+    const chat = await request.post(`${stack.workspaceURL}/api/chat`, {
+        headers: kiosk,
+        data: { message: "what do you remember about me" },
+    });
+    expect(chat.status(), await chat.text()).toBe(403);
+});

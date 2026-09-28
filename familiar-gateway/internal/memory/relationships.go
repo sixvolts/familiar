@@ -63,6 +63,13 @@ func NewPgRelationshipStore(pool *db.Pool) (*PgRelationshipStore, error) {
 // user_id) row. Confidence is always taken from the incoming row —
 // the sidecar's latest extraction is assumed authoritative.
 //
+// A write from a different scope may only take over an existing triple
+// when it comes from the trusted path (NULL scope). Otherwise a shard
+// restating one of the owner's triples rewrote its object and stamped
+// the shard's tag on it, and an isolated tag hid it from the owner's
+// retrieval. Such a write is dropped; the fact row it came from still
+// lands.
+//
 // Rows with empty subject, predicate, or object are silently dropped
 // because the extraction prompt sometimes emits partial triples for
 // short turns and forcing the upsert to fail would lose the whole
@@ -104,7 +111,9 @@ func (s *PgRelationshipStore) UpsertRelationships(ctx context.Context, rels []Re
 			    source_fact = EXCLUDED.source_fact,
 			    confidence  = EXCLUDED.confidence,
 			    scope_tag   = EXCLUDED.scope_tag,
-			    updated_at  = EXCLUDED.updated_at`,
+			    updated_at  = EXCLUDED.updated_at
+			WHERE relationships.scope_tag IS NOT DISTINCT FROM EXCLUDED.scope_tag
+			   OR EXCLUDED.scope_tag IS NULL`,
 			strings.ToLower(r.Subject), strings.ToLower(r.Predicate), r.Object,
 			userArg, sourceArg, conf, scopeArg, now)
 		if err != nil {
@@ -144,6 +153,7 @@ func (s *PgRelationshipStore) RelatedForContents(ctx context.Context, contents [
 		  AND (scope_tag IS NULL
 		       OR NOT EXISTS (SELECT 1 FROM shards sh
 		                       WHERE sh.scope_tag = relationships.scope_tag
+		                         AND sh.owner_id = relationships.user_id
 		                         AND sh.visibility = 'isolated'))
 		ORDER BY updated_at DESC
 		LIMIT $3`,
@@ -209,6 +219,7 @@ func (s *PgRelationshipStore) TraverseFrom(ctx context.Context, entity string, u
 			  AND (r.scope_tag IS NULL
 			       OR NOT EXISTS (SELECT 1 FROM shards sh
 			                       WHERE sh.scope_tag = r.scope_tag
+			                         AND sh.owner_id = r.user_id
 			                         AND sh.visibility = 'isolated'))
 		)
 		SELECT DISTINCT r.subject, r.predicate, r.object
@@ -218,6 +229,7 @@ func (s *PgRelationshipStore) TraverseFrom(ctx context.Context, entity string, u
 		  AND (r.scope_tag IS NULL
 		       OR NOT EXISTS (SELECT 1 FROM shards sh
 		                       WHERE sh.scope_tag = r.scope_tag
+		                         AND sh.owner_id = r.user_id
 		                         AND sh.visibility = 'isolated'))
 		ORDER BY r.subject, r.predicate
 		LIMIT $4`,

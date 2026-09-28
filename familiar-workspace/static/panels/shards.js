@@ -651,7 +651,12 @@
     async function deleteCurrentShard() {
         if (!shardsState.currentShard) return;
         const id = shardsState.currentShard.id;
-        if (!confirm("Delete shard \"" + id + "\"? Tokens will be revoked. This cannot be undone.")) return;
+        // An isolated shard's memory is deleted with it (the gateway
+        // purges it rather than let it surface in your own memory).
+        const memoryNote = shardsState.currentShard.visibility === "isolated"
+            ? " Its private memory will be deleted too."
+            : "";
+        if (!confirm("Delete shard \"" + id + "\"? Tokens will be revoked." + memoryNote + " This cannot be undone.")) return;
         try {
             await apiJSON("/console/api/shards/" + encodeURIComponent(id), { method: "DELETE" });
             toast("Shard " + id + " deleted", "success");

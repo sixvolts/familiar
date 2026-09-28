@@ -114,6 +114,13 @@ func NewConversationStore(pool *db.Pool) *ConversationStore {
 // workspace chat list. Their context is still persisted and reachable by
 // id; only this list view omits them.
 func (s *ConversationStore) List(ctx context.Context, userID string, includeArchived bool, limit, offset int) ([]*Conversation, error) {
+	return s.ListForModel(ctx, userID, "", includeArchived, limit, offset)
+}
+
+// ListForModel is List narrowed to one model value when model is
+// non-empty. A shard session lists only its own shard-bound threads
+// this way, so the filter runs before LIMIT/OFFSET and pages stay full.
+func (s *ConversationStore) ListForModel(ctx context.Context, userID, model string, includeArchived bool, limit, offset int) ([]*Conversation, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -128,12 +135,13 @@ func (s *ConversationStore) List(ctx context.Context, userID string, includeArch
 		       archived_at, pinned, folder_id::text
 		  FROM conversations
 		 WHERE user_id = $1
-		   AND external_key IS NULL`
+		   AND external_key IS NULL
+		   AND ($4 = '' OR model = $4)`
 	if !includeArchived {
 		q += ` AND archived_at IS NULL`
 	}
 	q += ` ORDER BY pinned DESC, updated_at DESC LIMIT $2 OFFSET $3`
-	rows, err := s.db.QueryContext(ctx, q, userID, limit, offset)
+	rows, err := s.db.QueryContext(ctx, q, userID, limit, offset, model)
 	if err != nil {
 		return nil, fmt.Errorf("conversations: list: %w", err)
 	}
@@ -654,6 +662,34 @@ func scopeForConversations(r *http.Request) (string, bool) {
 	return adminUserScope(r, au), true
 }
 
+// shardConversationBinding returns the binding a shard session is
+// confined to ("shard:<its shard id>"), or "" for a user session. A
+// shard session's user id is its owner's, so without this confinement
+// every conversation endpoint served the owner's private threads to
+// the kiosk.
+func shardConversationBinding(r *http.Request) string {
+	au, ok := AuthUserFrom(r.Context())
+	if !ok || !au.IsShardSession() {
+		return ""
+	}
+	return shardModelPrefix + au.ShardID
+}
+
+// conversationInScope loads a conversation the caller may act on. On
+// top of the owner scoping in Get, a shard session only sees threads
+// bound to its own shard; anything else reports not-found, the same
+// answer a stranger's conversation gets.
+func (h *Handler) conversationInScope(r *http.Request, id, userID string) (*Conversation, error) {
+	c, err := h.conversations.Get(r.Context(), id, userID)
+	if err != nil {
+		return nil, err
+	}
+	if b := shardConversationBinding(r); b != "" && c.Model != b {
+		return nil, ErrConversationNotFound
+	}
+	return c, nil
+}
+
 func (h *Handler) ensureConversations(w http.ResponseWriter) bool {
 	if h.conversations == nil {
 		writeJSONError(w, http.StatusServiceUnavailable, "conversations not configured on this deploy")
@@ -677,7 +713,7 @@ func (h *Handler) listConversations(w http.ResponseWriter, r *http.Request) {
 	includeArchived := q.Get("archived") == "true"
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	offset, _ := strconv.Atoi(q.Get("offset"))
-	rows, err := h.conversations.List(r.Context(), userID, includeArchived, limit, offset)
+	rows, err := h.conversations.ListForModel(r.Context(), userID, shardConversationBinding(r), includeArchived, limit, offset)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -711,6 +747,12 @@ func (h *Handler) createConversation(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// A shard session can only open threads bound to its own shard,
+	// whatever the body asks for. Otherwise a kiosk's "New chat"
+	// created a trusted-path thread that ran as the owner.
+	if b := shardConversationBinding(r); b != "" {
+		body.Model = b
+	}
 	// Shard-bound conversation (SKILL-PACKAGES-SPEC Phase 1): the
 	// binding is validated at creation and immutable afterward —
 	// /api/chat re-resolves it per message, but a row must never be
@@ -741,7 +783,7 @@ func (h *Handler) getConversation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	c, err := h.conversations.Get(r.Context(), id, userID)
+	c, err := h.conversationInScope(r, id, userID)
 	if errors.Is(err, ErrConversationNotFound) {
 		writeJSONError(w, http.StatusNotFound, "conversation not found")
 		return
@@ -785,6 +827,12 @@ func (h *Handler) patchConversation(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid body: "+err.Error())
 		return
 	}
+	if shardConversationBinding(r) != "" {
+		if _, err := h.conversationInScope(r, id, userID); err != nil {
+			writeConversationLookupError(w, err)
+			return
+		}
+	}
 	// A shard binding is immutable: refuse any model patch that
 	// would create, change, or drop one. Re-pointing a thread at a
 	// different brain mid-history is a footgun, and dropping the
@@ -824,6 +872,12 @@ func (h *Handler) deleteConversation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
+	if shardConversationBinding(r) != "" {
+		if _, err := h.conversationInScope(r, id, userID); err != nil {
+			writeConversationLookupError(w, err)
+			return
+		}
+	}
 	err := h.conversations.Delete(r.Context(), id, userID)
 	if errors.Is(err, ErrConversationNotFound) {
 		writeJSONError(w, http.StatusNotFound, "conversation not found")
@@ -867,12 +921,8 @@ func (h *Handler) appendConversationMessage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	id := r.PathValue("id")
-	if _, err := h.conversations.Get(r.Context(), id, userID); err != nil {
-		if errors.Is(err, ErrConversationNotFound) {
-			writeJSONError(w, http.StatusNotFound, "conversation not found")
-			return
-		}
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+	if _, err := h.conversationInScope(r, id, userID); err != nil {
+		writeConversationLookupError(w, err)
 		return
 	}
 	var body struct {
@@ -911,6 +961,16 @@ func (h *Handler) appendConversationMessage(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusCreated, m)
 }
 
+// writeConversationLookupError maps a conversationInScope failure to
+// the response: 404 for missing, not-owned or out-of-scope, else 500.
+func writeConversationLookupError(w http.ResponseWriter, err error) {
+	if errors.Is(err, ErrConversationNotFound) {
+		writeJSONError(w, http.StatusNotFound, "conversation not found")
+		return
+	}
+	writeJSONError(w, http.StatusInternalServerError, err.Error())
+}
+
 // listConversationMessages serves GET /console/api/conversations/{id}/messages.
 // Paginated with ?limit=&offset= so the workspace can lazy-load
 // older history without re-fetching the conversation metadata.
@@ -927,12 +987,8 @@ func (h *Handler) listConversationMessages(w http.ResponseWriter, r *http.Reques
 	// Ownership check before exposing messages — Get returns
 	// ErrConversationNotFound for missing OR non-owned, which we
 	// surface as 404 to the caller.
-	if _, err := h.conversations.Get(r.Context(), id, userID); err != nil {
-		if errors.Is(err, ErrConversationNotFound) {
-			writeJSONError(w, http.StatusNotFound, "conversation not found")
-			return
-		}
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+	if _, err := h.conversationInScope(r, id, userID); err != nil {
+		writeConversationLookupError(w, err)
 		return
 	}
 	q := r.URL.Query()

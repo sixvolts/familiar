@@ -2,10 +2,15 @@ package db
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"net/url"
 	"os"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/lib/pq"
 )
 
 // freshSchema is the scratch schema TestMigrateFreshDatabase builds in.
@@ -195,5 +200,281 @@ func TestMigrateNilPool(t *testing.T) {
 	}
 	if err := Migrate(context.Background(), &Pool{}); err == nil {
 		t.Fatal("Migrate(&Pool{}) returned nil error")
+	}
+}
+
+// scratchPools returns a pool on dsn and one on a freshly migrated
+// scratch schema of the same database, which no other package's tests
+// touch. The schema is dropped when the test ends.
+func scratchPools(t *testing.T, schema string) (admin, pool *Pool) {
+	t.Helper()
+	dsn := os.Getenv("FAMILIAR_TEST_DSN")
+	if dsn == "" {
+		t.Skip("skipping: FAMILIAR_TEST_DSN not set")
+	}
+	ctx := context.Background()
+	admin, err := Open(dsn)
+	if err != nil {
+		t.Fatalf("db.Open (admin): %v", err)
+	}
+	t.Cleanup(func() { _ = admin.Close() })
+	if _, err := admin.ExecContext(ctx, "DROP SCHEMA IF EXISTS "+schema+" CASCADE"); err != nil {
+		t.Fatalf("drop stale schema: %v", err)
+	}
+	if _, err := admin.ExecContext(ctx, "CREATE SCHEMA "+schema); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = admin.ExecContext(context.Background(), "DROP SCHEMA IF EXISTS "+schema+" CASCADE")
+	})
+	sep := "?"
+	if strings.Contains(dsn, "?") {
+		sep = "&"
+	}
+	pool, err = Open(dsn + sep + "options=" + url.QueryEscape("-csearch_path="+schema+",public"))
+	if err != nil {
+		t.Fatalf("db.Open (scoped): %v", err)
+	}
+	t.Cleanup(func() { _ = pool.Close() })
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatalf("Migrate on fresh schema: %v", err)
+	}
+	return admin, pool
+}
+
+// awaitLockWait returns once some session is waiting for a lock on
+// relation (schema-qualified). Migrate queues behind every other
+// package's run for the advisory lock first, so under go test ./...
+// this can take a while.
+func awaitLockWait(t *testing.T, admin *Pool, relation string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		var waiting bool
+		if err := admin.QueryRowContext(context.Background(), `
+			SELECT EXISTS (SELECT 1 FROM pg_locks
+			                WHERE relation = to_regclass($1) AND NOT granted)`,
+			relation).Scan(&waiting); err != nil {
+			t.Fatalf("poll pg_locks: %v", err)
+		}
+		if waiting {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("nothing ever waited for a lock on %s", relation)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// The deadlock go test ./... hit. A shard delete locks shards, then
+// its ON DELETE CASCADE locks shard_passkeys; shard_auth_phase1 locks
+// shard_passkeys (CREATE INDEX IF NOT EXISTS), then alters shards.
+// Holding admin_sessions, which the migration alters in between, lets
+// the delete start waiting first, so Postgres picked the delete as the
+// victim. The migration must yield instead.
+func TestMigrateYieldsToAShardDelete(t *testing.T) {
+	const schema = "migrate_deadlock_test"
+	admin, pool := scratchPools(t, schema)
+	ctx := context.Background()
+	if _, err := pool.ExecContext(ctx, `
+		INSERT INTO users (id, display_name, status, role) VALUES ('owner', 'Owner', 'approved', 'user')`); err != nil {
+		t.Fatalf("seed owner: %v", err)
+	}
+	if _, err := pool.ExecContext(ctx, `
+		INSERT INTO shards (id, owner_id, name, persistence, visibility, scope_tag, system_prompt)
+		VALUES ('doomed', 'owner', 'doomed', 'persistent', 'isolated', 'shard:doomed', 'p')`); err != nil {
+		t.Fatalf("seed shard: %v", err)
+	}
+
+	sessions, err := pool.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = sessions.Rollback() }()
+	if _, err := sessions.ExecContext(ctx, `LOCK TABLE admin_sessions IN ACCESS SHARE MODE`); err != nil {
+		t.Fatalf("hold admin_sessions: %v", err)
+	}
+	del, err := pool.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = del.Rollback() }()
+	if _, err := del.ExecContext(ctx, `SELECT 1 FROM shards WHERE id = 'doomed' FOR UPDATE`); err != nil {
+		t.Fatalf("lock the shard row: %v", err)
+	}
+
+	migCtx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	migErr := make(chan error, 1)
+	go func() { migErr <- Migrate(migCtx, pool) }()
+	awaitLockWait(t, admin, schema+".admin_sessions")
+
+	delErr := make(chan error, 1)
+	go func() {
+		_, err := del.ExecContext(ctx, `DELETE FROM shards WHERE id = 'doomed'`)
+		delErr <- err
+	}()
+	time.Sleep(200 * time.Millisecond)
+	if err := sessions.Commit(); err != nil {
+		t.Fatalf("release admin_sessions: %v", err)
+	}
+	if err := <-delErr; err != nil {
+		t.Fatalf("shard delete during Migrate: %v", err)
+	}
+	if err := del.Commit(); err != nil {
+		t.Fatalf("commit the delete: %v", err)
+	}
+	if err := <-migErr; err != nil {
+		t.Fatalf("Migrate during a shard delete: %v", err)
+	}
+}
+
+// A migration that can't get a table lock must give it up rather than
+// wait in the lock queue, where an ACCESS EXCLUSIVE request blocks
+// every later reader of the table until whoever holds it is done.
+func TestMigrateYieldsTableLocks(t *testing.T) {
+	const schema = "migrate_lock_test"
+	admin, pool := scratchPools(t, schema)
+	ctx := context.Background()
+
+	// Another session reads shards in a transaction it keeps open.
+	holder, err := pool.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin holder: %v", err)
+	}
+	defer func() { _ = holder.Rollback() }()
+	if _, err := holder.ExecContext(ctx, `LOCK TABLE shards IN ACCESS SHARE MODE`); err != nil {
+		t.Fatalf("hold shards: %v", err)
+	}
+
+	migCtx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	migErr := make(chan error, 1)
+	go func() { migErr <- Migrate(migCtx, pool) }()
+	awaitLockWait(t, admin, schema+".shards")
+
+	// A reader arriving now waits at most one lock timeout behind it.
+	readCtx, readCancel := context.WithTimeout(ctx, 3*time.Second)
+	defer readCancel()
+	start := time.Now()
+	if _, err := pool.ExecContext(readCtx, `SELECT 1 FROM shards LIMIT 1`); err != nil {
+		t.Fatalf("reader stuck behind Migrate's lock request: %v (after %s)", err, time.Since(start))
+	}
+	if waited := time.Since(start); waited > time.Second {
+		t.Errorf("reader waited %s behind Migrate's lock request", waited)
+	}
+
+	// Once the holder is done, Migrate finishes.
+	if err := holder.Commit(); err != nil {
+		t.Fatalf("commit holder: %v", err)
+	}
+	if err := <-migErr; err != nil {
+		t.Fatalf("Migrate after the lock was released: %v", err)
+	}
+
+	// Migrate's session goes back to the pool; its timeout must not.
+	pool.SetMaxOpenConns(1)
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatalf("Migrate on one connection: %v", err)
+	}
+	var lockTimeout string
+	if err := pool.QueryRowContext(ctx, `SHOW lock_timeout`).Scan(&lockTimeout); err != nil {
+		t.Fatalf("show lock_timeout: %v", err)
+	}
+	if lockTimeout != "0" {
+		t.Errorf("pooled session kept lock_timeout = %s after Migrate", lockTimeout)
+	}
+}
+
+// Waiting for another boot's Migrate is the advisory lock doing its
+// job; the lock timeout must not cut it short.
+func TestMigrateWaitsOutAnotherMigrate(t *testing.T) {
+	dsn := os.Getenv("FAMILIAR_TEST_DSN")
+	if dsn == "" {
+		t.Skip("skipping: FAMILIAR_TEST_DSN not set")
+	}
+	ctx := context.Background()
+	pool, err := Open(dsn)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = pool.Close() })
+
+	other, err := pool.Conn(ctx)
+	if err != nil {
+		t.Fatalf("conn: %v", err)
+	}
+	defer other.Close()
+	if _, err := other.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, int64(migrateLockKey)); err != nil {
+		t.Fatalf("take the migrate lock: %v", err)
+	}
+	migErr := make(chan error, 1)
+	go func() { migErr <- Migrate(ctx, pool) }()
+	time.Sleep(2 * migrateLockTimeout)
+	if _, err := other.ExecContext(ctx, `SELECT pg_advisory_unlock($1)`, int64(migrateLockKey)); err != nil {
+		t.Fatalf("release the migrate lock: %v", err)
+	}
+	if err := <-migErr; err != nil {
+		t.Fatalf("Migrate behind another Migrate: %v", err)
+	}
+}
+
+func TestRunMigrationRetriesLostLockRaces(t *testing.T) {
+	for _, code := range []pq.ErrorCode{"55P03", "40P01"} {
+		calls := 0
+		exec := func(context.Context, string, ...any) (sql.Result, error) {
+			calls++
+			if calls < 3 {
+				return nil, &pq.Error{Code: code}
+			}
+			return nil, nil
+		}
+		if err := runMigration(context.Background(), exec, migration{name: "m", ddl: "SELECT 1"}); err != nil {
+			t.Errorf("%s: runMigration = %v, want nil after retries", code, err)
+		}
+		if calls != 3 {
+			t.Errorf("%s: %d attempts, want 3", code, calls)
+		}
+	}
+}
+
+func TestRunMigrationReturnsOtherErrorsAtOnce(t *testing.T) {
+	for _, want := range []error{&pq.Error{Code: "42P01"}, errors.New("driver: bad connection")} {
+		calls := 0
+		exec := func(context.Context, string, ...any) (sql.Result, error) {
+			calls++
+			return nil, want
+		}
+		if err := runMigration(context.Background(), exec, migration{name: "m", ddl: "SELECT 1"}); !errors.Is(err, want) {
+			t.Errorf("runMigration = %v, want %v", err, want)
+		}
+		if calls != 1 {
+			t.Errorf("%v: %d attempts, want 1", want, calls)
+		}
+	}
+}
+
+func TestRunMigrationGivesUpWhenContextEnds(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	calls := 0
+	exec := func(context.Context, string, ...any) (sql.Result, error) {
+		calls++
+		return nil, &pq.Error{Code: "55P03"}
+	}
+	done := make(chan error, 1)
+	go func() { done <- runMigration(ctx, exec, migration{name: "m", ddl: "SELECT 1"}) }()
+	select {
+	case err := <-done:
+		var pqErr *pq.Error
+		if !errors.As(err, &pqErr) || pqErr.Code != "55P03" {
+			t.Errorf("runMigration = %v, want the last lock timeout", err)
+		}
+		if calls < 2 {
+			t.Errorf("%d attempts before giving up, want retries", calls)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runMigration kept retrying after its context ended")
 	}
 }

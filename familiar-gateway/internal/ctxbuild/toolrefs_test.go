@@ -248,8 +248,6 @@ func shippedToolNames() map[string]bool {
 		"web_search", "fetch_page", "get_news", "search_news",
 		"get_current_weather", "get_forecast", "get_current_datetime",
 		"get_instance_info",
-		// profile
-		"update_my_email",
 		// skill packages (shard-only, still nameable in prompts)
 		"use_skill", "read_skill_file",
 		// scheduled actions + research (registered late, in httpadapter)

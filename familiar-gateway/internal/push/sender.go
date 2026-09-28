@@ -7,8 +7,10 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
+	"github.com/familiar/gateway/internal/skills/fetch"
 )
 
 // Payload is the JSON the service worker receives in its `push` event.
@@ -41,12 +43,37 @@ type Sender struct {
 	publicKey  string
 	privateKey string
 	subject    string
+	// policy screens endpoints again at send time, so a subscription
+	// stored before endpoints were checked is pruned, not posted to.
+	policy EndpointPolicy
+	// client posts to push services: no redirects (a push service
+	// never redirects, and following one turned an allowed endpoint
+	// into a request anywhere), a timeout, and no dialing of
+	// non-public addresses. Tests replace it.
+	client *http.Client
+	// allowEndpoint overrides policy.Check (tests post to httptest).
+	allowEndpoint func(string) error
+}
+
+// WithEndpointPolicy sets the extra allowed push hosts.
+func (s *Sender) WithEndpointPolicy(p EndpointPolicy) *Sender {
+	s.policy = p
+	return s
 }
 
 // NewSender builds a Sender over a subscription store and the VAPID
 // keypair + contact subject.
 func NewSender(store SubscriptionStore, publicKey, privateKey, subject string) *Sender {
-	return &Sender{store: store, publicKey: publicKey, privateKey: privateKey, subject: subject}
+	return &Sender{
+		store: store, publicKey: publicKey, privateKey: privateKey, subject: subject,
+		client: &http.Client{
+			Timeout:   15 * time.Second,
+			Transport: fetch.SafeTransport(),
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+	}
 }
 
 // Send delivers a notification to every device the user subscribed.
@@ -74,7 +101,16 @@ func (s *Sender) Send(ctx context.Context, userID string, p Payload) (int, error
 	}
 
 	delivered := 0
+	check := s.policy.Check
+	if s.allowEndpoint != nil {
+		check = s.allowEndpoint
+	}
 	for _, sub := range subs {
+		if err := check(sub.Endpoint); err != nil {
+			log.Printf("[push] pruning subscription with a disallowed endpoint %s: %v", shorten(sub.Endpoint), err)
+			_ = s.store.DeleteByEndpoint(ctx, "", sub.Endpoint)
+			continue
+		}
 		resp, err := webpush.SendNotificationWithContext(ctx, msg, &webpush.Subscription{
 			Endpoint: sub.Endpoint,
 			Keys:     webpush.Keys{P256dh: sub.P256dh, Auth: sub.Auth},
@@ -85,6 +121,7 @@ func (s *Sender) Send(ctx context.Context, userID string, p Payload) (int, error
 			VAPIDPublicKey:  s.publicKey,
 			VAPIDPrivateKey: s.privateKey,
 			TTL:             86400, // hold for a day if the device is offline
+			HTTPClient:      s.client,
 		})
 		if err != nil {
 			log.Printf("[push] send to %s failed: %v", shorten(sub.Endpoint), err)

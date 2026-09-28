@@ -22,22 +22,13 @@
 import { test as base, expect } from "@playwright/test";
 import { start, GatewayStack } from "../fixtures/gateway";
 import { createTestUser, attachSession, TestUser } from "../fixtures/user";
+import { MODEL_URL, gateOnModel } from "../helpers/model";
 
-const MODEL_URL = process.env.FAMILIAR_TEST_CHAT_MODEL_URL || "http://127.0.0.1:8090";
 // A 5-iteration tool loop with several model round-trips: give it
 // room. Real runs on mainframe finish in well under a minute.
 const TURN_TIMEOUT = 240_000;
 
 const INGREDIENTS = ["flour", "milk", "eggs", "butter", "baking powder"];
-
-async function modelIsUp(): Promise<boolean> {
-    try {
-        const resp = await fetch(`${MODEL_URL}/health`, { signal: AbortSignal.timeout(2_000) });
-        return resp.ok;
-    } catch {
-        return false;
-    }
-}
 
 const test = base.extend<{}, { stack: GatewayStack }>({
     stack: [
@@ -52,9 +43,7 @@ const test = base.extend<{}, { stack: GatewayStack }>({
 
 test.describe.configure({ mode: "serial" });
 
-test.beforeEach(async () => {
-    test.skip(!(await modelIsUp()), `no inference server at ${MODEL_URL} — tool-use specs need a live model`);
-});
+gateOnModel(test, "tool-use specs", TURN_TIMEOUT);
 
 function authed(user: TestUser) {
     return { Cookie: user.cookieHeader, "Content-Type": "application/json" };

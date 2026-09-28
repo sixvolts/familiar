@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/familiar/gateway/internal/config"
@@ -170,4 +171,53 @@ func TestPostTurnExtract_EventsNameStoredRow(t *testing.T) {
 			t.Errorf("announced %d extracted fact(s) that were never stored", len(evs))
 		}
 	})
+}
+
+// classifyRoutes resolves the classify task to one model on endpoint.
+type classifyRoutes struct{ endpoint string }
+
+func (c classifyRoutes) Resolve(role string) (string, int, bool) {
+	if role == sidecar.TaskClassify {
+		return "sidecar/fast-model", 0, true
+	}
+	return "", 0, false
+}
+func (c classifyRoutes) Status(string) string           { return "online" }
+func (c classifyRoutes) Chain(string) []string          { return []string{"sidecar/fast-model"} }
+func (c classifyRoutes) EndpointForRole(string) string  { return "" }
+func (c classifyRoutes) EndpointForModel(string) string { return c.endpoint }
+
+// The preamble follows the classify role (so its failover) and names
+// the model it reaches. It used to post to the endpoint captured at boot
+// with the model "sidecar", whatever was serving.
+func TestPreamble_UsesClassifyRoleTarget(t *testing.T) {
+	var gotModel string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Model string `json:"model"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		gotModel = body.Model
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"On it.\"}}]}\n\ndata: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	pl := New(Deps{
+		Engine:          &mockEngine{},
+		Router:          router.NewRouter(config.RouterConfig{Enabled: true}, router.NewRegistry(nil)),
+		Sessions:        session.NewManager(),
+		AgentID:         "test-agent",
+		SidecarEndpoint: "http://127.0.0.1:1", // captured at boot; gone since
+	})
+	routes := classifyRoutes{endpoint: srv.URL}
+	pl.sidecarClient = sidecar.NewClient(config.SidecarConfig{Enabled: true}, config.RouterConfig{}, routes, routes)
+
+	got := pl.generatePreamble(context.Background(), "summarize my notes", "standard", func(string) {})
+	if !strings.Contains(got, "On it.") {
+		t.Fatalf("preamble = %q; it didn't reach the classify model", got)
+	}
+	if gotModel != "fast-model" {
+		t.Errorf("preamble model = %q, want the classify model's request name", gotModel)
+	}
 }

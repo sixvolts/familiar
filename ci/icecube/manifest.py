@@ -21,7 +21,7 @@ ART = os.environ["ARTIFACTS"]
 
 
 def _migration_failures():
-    """Count of distinct 'migrations failed' lines the runner scraped."""
+    """'migrations failed' lines in this run's gateway logs."""
     f = os.path.join(ART, "migration-failures.count")
     if not os.path.exists(f):
         return None          # not scanned — distinct from "scanned, found none"
@@ -93,6 +93,11 @@ def pw_summary(path):
     `did not run` is the interesting one: Playwright reports those tests
     with no results array, and a run that abandons half its specs can
     still look mostly-green in a line reporter.
+
+    `flaky` is the other: a test that failed and then passed on a retry
+    (retries: 2 under CI). It counts as passed, as Playwright does, and
+    is also counted and named on its own; a race that fails two tries
+    in three otherwise leaves no trace in a green run.
     """
     if not os.path.exists(path):
         return None
@@ -103,7 +108,7 @@ def pw_summary(path):
 
     counts = {"passed": 0, "failed": 0, "skipped": 0, "timedOut": 0,
               "interrupted": 0, "did_not_run": 0}
-    failed, by_project = [], {}
+    failed, flaky, by_project = [], [], {}
 
     def walk(suite, project=None):
         project = suite.get("title") if suite.get("suites") is None else project
@@ -126,6 +131,8 @@ def pw_summary(path):
                 by_project[proj][key] += 1
                 if key in ("failed", "timedOut"):
                     failed.append(f"{spec.get('file','?')}::{spec.get('title','?')}")
+                if status == "flaky":
+                    flaky.append(f"{proj}: {spec.get('file','?')}::{spec.get('title','?')}")
         for child in suite.get("suites", []) or []:
             walk(child, project)
 
@@ -135,6 +142,8 @@ def pw_summary(path):
     total = sum(counts.values())
     return {
         **counts,
+        "flaky": len(flaky),
+        "flaky_tests": flaky[:50],
         "failed_tests": failed[:50],
         "by_project": by_project,
         "ran_any": total > 0 and (total - counts["did_not_run"]) > 0,
@@ -172,6 +181,14 @@ activated = None
 if "1" in tiers and "2" in tiers:
     activated = tiers["2"]["passed"] - tiers["1"]["passed"]
 
+# The same delta for the model: tests tier 3 skipped (no model) that
+# tier 4 ran. run-tiers also sets FAMILIAR_E2E_REQUIRE_MODEL in tier 4,
+# so a model test that loses its server fails there instead of skipping;
+# this is the visible count of what the model tier added.
+model_activated = None
+if "3" in tiers and "4" in tiers and "skipped" in tiers["3"] and "skipped" in tiers["4"]:
+    model_activated = tiers["3"]["skipped"] - tiers["4"]["skipped"]
+
 manifest = {
     "git": {
         "sha": os.environ.get("GIT_SHA"),
@@ -189,6 +206,7 @@ manifest = {
     "tiers": tiers,
     "derived": {
         "db_tests_activated_by_dsn": activated,
+        "model_tests_activated": model_activated,
         # db.Migrate failing at boot is logged, not fatal (main.go:355), so
         # a gateway on a table-less database still answers /api/health ok.
         # Non-zero here means some booted gateway was running blind.
@@ -216,11 +234,14 @@ for t in sorted(tiers):
     s = tiers[t]
     if "did_not_run" in s:
         print(f"    tier {t}: {s['passed']}p/{s['failed']}f/"
-              f"{s['skipped']}s dnr={s['did_not_run']} exit={s['exit_code']}")
+              f"{s['skipped']}s dnr={s['did_not_run']} flaky={s['flaky']} "
+              f"exit={s['exit_code']}")
     else:
         print(f"    tier {t}: {s['passed']}p/{s['failed']}f/"
               f"{s['skipped']}s (dsn-gated skips={s['dsn_gated_skips']}) "
               f"exit={s['exit_code']}")
 if activated is not None:
     print(f"    db tests activated by DSN: {activated}")
+if model_activated is not None:
+    print(f"    model tests activated by MLX: {model_activated}")
 sys.exit(0)

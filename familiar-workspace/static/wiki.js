@@ -119,7 +119,7 @@
     function renderMarkdownReal(md) {
         if (!window.marked || !window.DOMPurify) return renderMarkdownFallback(md);
         const html = window.marked.parse(md || "");
-        return window.DOMPurify.sanitize(html, { ADD_ATTR: ["class"] });
+        return window.familiarSanitize.markdown(html);
     }
     function renderMarkdownFallback(md) {
         return '<pre class="chat-md-fallback">' + escapeHTML(md || "") + '</pre>';
@@ -725,6 +725,9 @@
                 })
                 : { height: "100%", initialEditType: mode, theme: "dark", usageStatistics: false, hideModeSwitch: true, toolbarItems: [] };
             opts.el = editorContainer;
+            // The editor's own sanitizer is the DOMPurify 2.3.3 copy
+            // bundled into TOAST UI; use the shared, current one.
+            if (window.familiarSanitize) opts.customHTMLSanitizer = window.familiarSanitize.editor;
             tuiEditor = new toastui.Editor(opts);
 
             // Click handler for Markdown preview <a> tags.

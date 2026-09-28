@@ -288,6 +288,11 @@ func Validate(a *Action) error {
 			if t.ChannelID == "" {
 				return fmt.Errorf("actions: target %d: slack requires channel_id", i)
 			}
+			// A user (U…/W…) or DM (D…) id posts to that person from the
+			// bot; DMs to the owner are the slack_dm target.
+			if c := t.ChannelID; strings.HasPrefix(c, "U") || strings.HasPrefix(c, "W") || strings.HasPrefix(c, "D") {
+				return fmt.Errorf("actions: target %d: slack channel_id %s is a person or a DM, not a channel (use slack_dm)", i, c)
+			}
 		case "slack_dm":
 			// DMs the action OWNER's linked Slack identity; resolved
 			// at delivery time, so no fields here.

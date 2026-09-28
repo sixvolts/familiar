@@ -6,6 +6,7 @@
 // scoped, and a `push` action target still creates its thread.
 
 import { test as base, expect } from "@playwright/test";
+import { Client } from "pg";
 import { start, GatewayStack, TEST_VAPID_PUBLIC } from "../fixtures/gateway";
 import { createTestUser, TestUser } from "../fixtures/user";
 
@@ -22,6 +23,23 @@ const test = base.extend<{}, { stack: GatewayStack }>({
 
 function authed(user: TestUser) {
     return { Cookie: user.cookieHeader, "Content-Type": "application/json" };
+}
+
+// subscriptionOwner reads who holds an endpoint, straight from the table:
+// unsubscribe answers 200 whether or not it deleted anything, so the
+// response alone can't show whose device went.
+async function subscriptionOwner(endpoint: string): Promise<string | null> {
+    const client = new Client({ connectionString: process.env.FAMILIAR_TEST_DSN });
+    await client.connect();
+    try {
+        const { rows } = await client.query<{ user_id: string }>(
+            "SELECT user_id FROM push_subscriptions WHERE endpoint = $1",
+            [endpoint],
+        );
+        return rows[0]?.user_id ?? null;
+    } finally {
+        await client.end();
+    }
 }
 
 test("the VAPID public key is served when push is configured", async ({ stack, request }) => {
@@ -44,6 +62,7 @@ test("subscribe persists and unsubscribe removes a device, caller-scoped", async
         data: sub,
     });
     expect(s.ok(), `subscribe: HTTP ${s.status()}`).toBeTruthy();
+    expect(await subscriptionOwner(endpoint)).toBe(user.id);
 
     // A bad body is rejected.
     const bad = await request.post(`${stack.workspaceURL}/console/api/push/subscribe`, {
@@ -59,12 +78,14 @@ test("subscribe persists and unsubscribe removes a device, caller-scoped", async
         data: { endpoint },
     });
     expect(intruderDel.ok()).toBeTruthy(); // no-op, not an error
+    expect(await subscriptionOwner(endpoint), "another user's delete must leave the device").toBe(user.id);
 
     const ownerDel = await request.delete(`${stack.workspaceURL}/console/api/push/subscribe`, {
         headers: authed(user),
         data: { endpoint },
     });
     expect(ownerDel.ok(), `unsubscribe: HTTP ${ownerDel.status()}`).toBeTruthy();
+    expect(await subscriptionOwner(endpoint), "the owner's delete removes it").toBeNull();
 });
 
 test("a push-target action creates its notification thread", async ({ stack, request }) => {

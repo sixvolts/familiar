@@ -36,6 +36,7 @@ type pendingEntry struct {
 // doesn't match the flow it expects.
 const (
 	PendingKindRegister      = "register"       // /register/begin
+	PendingKindFirstRun      = "first_run"      // /register/begin, bootstrap mode
 	PendingKindLogin         = "login"          // /login/begin (discoverable credential)
 	PendingKindEnroll        = "enroll"         // cross-domain /enroll/begin (token-driven)
 	PendingKindShardRegister = "shard-register" // /shards/{id}/passkeys/begin

@@ -293,6 +293,14 @@ func (h *Handler) deleteShardPasskey(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "passkey revoked, but ending its sessions failed: "+err.Error())
 		return
 	}
+	// And the shard's sessions from before passkeys were recorded on
+	// them, which may be this key's.
+	if h.sessions != nil {
+		if err := h.sessions.DeleteUnboundByShard(r.Context(), sh.ID); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "passkey revoked, but ending its older sessions failed: "+err.Error())
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "revoked", "id": pid})
 }
 

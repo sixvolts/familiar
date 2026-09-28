@@ -101,10 +101,14 @@ npm run report                      # open the last HTML report
   (llama-server). Raw SSE through the proxy (token / done frames,
   model attribution) and the full chat surface round trip: send →
   streamed assistant bubble → both turns persisted → replay after
-  reload. **Skips cleanly when no model server is reachable** —
-  CI stays green; mainframe (and any box with a llama-server on
-  `FAMILIAR_TEST_CHAT_MODEL_URL`, default `http://127.0.0.1:8090`)
-  runs the real thing.
+  reload. **Skips when no model server is reachable**; any box with
+  a server on `FAMILIAR_TEST_CHAT_MODEL_URL` (default
+  `http://127.0.0.1:8090`) runs the real thing. Every model-backed
+  spec gates through `helpers/model.ts`, which also gives each test
+  enough time for its model waits (Playwright's 60s default otherwise
+  cuts them short) and, under `FAMILIAR_E2E_REQUIRE_MODEL=1`, fails
+  instead of skipping. Tests in these files that never call the model
+  are tagged `@no-model` and run either way.
 - `flows/scheduled.spec.ts` — SCHEDULED-ACTIONS-SPEC Phases 1+2:
   create an action targeting a note, run-now through the real
   pipeline, the report appends with a timestamped section, an OPEN
@@ -177,11 +181,12 @@ Still-finicky bits worth knowing:
 
 Per [TESTING-PLAN.md](../../TESTING-PLAN.md):
 
-- Phase 4 visual snapshots (deliberately deferred — flaky, OS-bound).
 - Deeper agentic scenarios (multi-turn tool conversations, memory
   extraction round-trips) — tooluse.spec.ts is the template.
 
-CI lives at `.github/workflows/e2e.yml`: a `go-test` job (gateway +
-workspace `go test ./...` against pgvector Postgres) and an `e2e` job
-(this suite; the chat specs self-skip there — no model in CI).
-Advisory-only until it proves it isn't flaky.
+CI lives at `.github/workflows/e2e.yml`: one job on the icecube
+self-hosted runner. It runs the Go suites, then `ci/icecube/run-tiers.sh`:
+this suite once with no model (tier 3) and once against the box's MLX
+server (tier 4, where the model-backed specs must run), then the tier-5
+adjudicator. It is not advisory: familiar-deploy.sh won't deploy a SHA
+whose run failed. See [ci/icecube/README.md](../../ci/icecube/README.md).

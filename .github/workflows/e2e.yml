@@ -64,9 +64,13 @@ on:
     branches: [main, 'ci/**']
   workflow_dispatch:
 
+# A newer push to a branch cancels that branch's older run, except on main.
+# familiar-deploy.sh gates a deploy on the run for the SHA it pulled and reads
+# a cancelled run as a failure, so cancelling main's runs during a burst of
+# merges aborted deploys of SHAs that never failed. Runs on main queue instead.
 concurrency:
   group: e2e-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   # icecube owns this value: the runner uses a persistent local Postgres, not a
@@ -75,7 +79,8 @@ env:
   # a fallback so the workflow stays runnable without it.
   # Model-backed specs (tier 4) run against icecube's local MLX model, which is
   # much slower than production furnace. A run measured ~230s there against the
-  # spec default of 120s. See tests/e2e/flows/scheduled*.spec.ts.
+  # spec default of 120s. See tests/e2e/helpers/model.ts, which also raises each
+  # model-backed test's Playwright timeout to cover it.
   FAMILIAR_E2E_RUN_TIMEOUT: '360000'
   FAMILIAR_TEST_DSN: ${{ vars.FAMILIAR_TEST_DSN || 'postgres://postgres:test@localhost:5432/postgres?sslmode=disable' }}
   # The MLX server, loopback-only on the box. Tier 4 points the E2E specs at
@@ -100,7 +105,13 @@ jobs:
     # not work on a self-hosted macOS runner. Postgres is a persistent
     # launchd-managed instance on the box; FAMILIAR_TEST_DSN points at it.
     steps:
+      # persist-credentials: false keeps the job's GITHUB_TOKEN (which can
+      # write pull requests) out of .git/config. Every later step would
+      # otherwise be able to read it: npm install scripts, both test tiers, the
+      # adjudicator. The one step that needs the token gets it as GH_TOKEN.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       # setup-go and setup-node stay, and are NOT redundant on a self-hosted
       # box. They pin the toolchain rather than inheriting whatever Homebrew
       # last upgraded to: icecube currently has node v26.7.0 system-wide while

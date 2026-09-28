@@ -44,16 +44,44 @@ mkdir -p "$ARTIFACTS"
 
 # ── Mutual exclusion ────────────────────────────────────────────────
 # macOS has no flock(1). `mkdir` is atomic on every filesystem we care
-# about, so it is the portable lock. The trap releases it even on a
+# about, so it is the portable lock. The EXIT trap releases it even on a
 # failed tier; a stale lock after a hard kill is a manual rm.
+#
+# INT and TERM exit, and only EXIT releases the lock. A handler that
+# released the lock and returned would let bash carry on into the next
+# tier, running unlocked against the shared Postgres and MLX server.
 
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
     echo "==> another tier run holds $LOCK_DIR — refusing to run concurrently" >&2
     echo "    (Postgres and the MLX server are shared; parallel runs corrupt both)" >&2
     exit 75   # EX_TEMPFAIL
 fi
-cleanup() { rmdir "$LOCK_DIR" 2>/dev/null || true; }
-trap cleanup EXIT INT TERM
+
+# This run's Playwright temp dir: each booted stack's instance dir
+# (gateway.log, which scan_migration_failures reads) lands here and
+# nowhere else. Deliberately NOT under $ARTIFACTS: an instance dir holds
+# gateway.toml, which carries the DSN, and artifacts/ is uploaded. Kept
+# when the run fails, for the gateway logs; removed when it passes.
+#
+# Canonical (pwd -P), because the gateway inherits it as TMPDIR: macOS's
+# $TMPDIR ends in "/", so the mktemp path reads ".../T//icecube-e2e...",
+# and skillpkg's zip-slip check compares cleaned paths against the
+# staging dir as given, so every skill import failed under it.
+RUN_TMP="$(mktemp -d "${TMPDIR:-/tmp}/icecube-e2e.XXXXXX")" || exit 1
+RUN_TMP="$(cd "$RUN_TMP" && pwd -P)" || exit 1
+
+cleanup() {
+    local rc=$?
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+    if (( rc != 0 )); then
+        echo "    gateway instance logs kept in $RUN_TMP" >&2
+    else
+        rm -rf "$RUN_TMP"
+    fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ── Provenance ──────────────────────────────────────────────────────
 
@@ -151,17 +179,24 @@ fi
 # real server. Same specs, different backend.
 
 run_pw_tier() {
-    local tier="$1" model_url="$2" workers="$3"
+    local tier="$1" model_url="$2" workers="$3" require_model="$4"
     echo "==> tier $tier: playwright (model=$model_url workers=$workers)"
     # Record the URL THIS tier used, not the runner's configured one.
     # Without this the manifest says mlx_healthy=true while tier 3's
     # skips say "no inference server at 127.0.0.1:1", which reads as a
     # hollow skip to anything checking the two against each other.
     echo "$model_url" > "$ARTIFACTS/tier${tier}.modelurl"
+    mkdir -p "$RUN_TMP/tier${tier}"
+    # FAMILIAR_E2E_REQUIRE_MODEL: in the tier that has a model, a
+    # model-gated test whose /health probe fails is a failure, not a
+    # skip. Otherwise a server that dies mid-tier turns every later
+    # model test into a skip, and the tier still exits 0.
     (
         cd "$REPO_ROOT/tests/e2e" || exit 1
+        TMPDIR="$RUN_TMP/tier${tier}" \
         PLAYWRIGHT_JSON_OUTPUT_NAME="$ARTIFACTS/tier${tier}.json" \
         FAMILIAR_TEST_CHAT_MODEL_URL="$model_url" \
+        FAMILIAR_E2E_REQUIRE_MODEL="$require_model" \
         npx playwright test \
             --workers="$workers" \
             --reporter=json,line \
@@ -174,7 +209,7 @@ run_pw_tier() {
 
 # 127.0.0.1:1 is closed by definition — the specs' /health probe fails
 # fast and they skip, which is exactly the modelless condition.
-wants 3 && run_pw_tier 3 "http://127.0.0.1:1" 1
+wants 3 && run_pw_tier 3 "http://127.0.0.1:1" 1 0
 
 if wants 4; then
     if [[ "$MLX_HEALTHY" != "true" ]]; then
@@ -196,7 +231,7 @@ if wants 4; then
         # Raising this needs per-worker database isolation first — a
         # schema or database per worker index. Until then, model
         # concurrency buys nothing here.
-        run_pw_tier 4 "$MLX_URL" 1
+        run_pw_tier 4 "$MLX_URL" 1 1
     fi
 fi
 
@@ -212,14 +247,17 @@ fi
 # loaded box can trip this without anything else being wrong.
 #
 # The E2E fixture writes one gateway.log per booted instance into a
-# mkdtemp under $TMPDIR. Scan them.
+# mkdtemp under os.tmpdir(), which run_pw_tier points at this run's
+# RUN_TMP. Scan only those: every run's instance dirs used to be
+# scanned, so one old failure was counted again on every later run.
 scan_migration_failures() {
     local out="$ARTIFACTS/migration-failures.txt"
-    local dirs=("${TMPDIR:-/tmp}"familiar-e2e-*)
     : > "$out"
-    [[ -e "${dirs[0]}" ]] || { echo "0" > "$ARTIFACTS/migration-failures.count"; return; }
-    grep -h "migrations failed" "${TMPDIR:-/tmp}"familiar-e2e-*/gateway.log 2>/dev/null \
-        | sort | uniq -c | sort -rn > "$out" || true
+    local f
+    for f in "$RUN_TMP"/tier*/familiar-e2e-*/gateway.log; do
+        [[ -e "$f" ]] || continue
+        grep -h "migrations failed" "$f" >> "$out"
+    done
     # NOT `grep -c . || echo 0`: on an empty file grep prints 0 AND exits 1,
     # so the fallback appends a SECOND zero and n becomes "0\n0" — which is
     # not "0", so the warning fires on a clean scan and the count fails to
@@ -228,7 +266,7 @@ scan_migration_failures() {
     n=$(wc -l < "$out" | tr -d ' []')
     echo "$n" > "$ARTIFACTS/migration-failures.count"
     if [[ "$n" != "0" ]]; then
-        echo "==> WARNING: $n distinct 'migrations failed' line(s) in gateway logs" >&2
+        echo "==> WARNING: $n 'migrations failed' line(s) in this run's gateway logs" >&2
         head -3 "$out" >&2
         echo "    A gateway with failed migrations still reports healthy." >&2
     fi

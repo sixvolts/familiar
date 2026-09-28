@@ -4,14 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"net/url"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/familiar/gateway/internal/config"
 	"github.com/familiar/gateway/internal/db"
+	"github.com/familiar/gateway/internal/testdsn"
 )
 
 // SQL-touching paths (the maintenance queries) are integration
@@ -92,11 +91,7 @@ func sleepPoolForTest(t *testing.T) *db.Pool {
 	if _, err := admin.ExecContext(ctx, `CREATE SCHEMA IF NOT EXISTS sleep_test`); err != nil {
 		t.Fatalf("create schema: %v", err)
 	}
-	sep := "?"
-	if strings.Contains(dsn, "?") {
-		sep = "&"
-	}
-	pool, err := db.Open(dsn + sep + "options=" + url.QueryEscape("-csearch_path=sleep_test,public"))
+	pool, err := db.Open(testdsn.Scoped(t, dsn, "sleep_test"))
 	if err != nil {
 		t.Fatalf("db.Open (scoped): %v", err)
 	}

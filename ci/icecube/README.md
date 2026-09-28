@@ -38,8 +38,15 @@ manifest first and short-circuits before the model is consulted.
 
 Tier 3 points the specs at `127.0.0.1:1` — a closed port — so the
 model-backed specs skip by their own `/health` gate. Tier 4 points at the
-real server. Same specs, different backend; the difference in skip counts
-is the evidence.
+real server and sets `FAMILIAR_E2E_REQUIRE_MODEL=1`, under which a
+model-backed spec that can't reach the server fails instead of skipping
+(`tests/e2e/helpers/model.ts`). Same specs, different backend; the
+difference in skip counts, `derived.model_tests_activated`, is the
+evidence.
+
+CI retries a failing Playwright test up to twice. A test that passes on
+a retry is counted as passed, and also counted and named as `flaky` per
+tier in the manifest; the adjudicator objects to a flake in tier 3.
 
 ## The false green this exists to catch
 
@@ -66,7 +73,27 @@ ci/icecube/adjudicate.sh --artifacts ./artifacts        # advisory
 
 `--tiers 1,2` runs a subset. The script takes an exclusive lock
 (`mkdir`, since macOS has no `flock`) because Postgres and the MLX
-server are shared — parallel runs corrupt both.
+server are shared — parallel runs corrupt both. Ctrl-C stops the run
+(it used to release the lock and carry on with the next tier).
+
+The Playwright tiers boot their stacks in a temp dir made for the run,
+outside `artifacts/` because each stack's `gateway.toml` holds the DSN.
+It is removed when the run passes and kept, with the gateway logs, when
+it fails.
+
+## What the adjudicator can reach
+
+Read, Glob and Grep inside the repo and the artifacts directory; Bash
+for `git log` and `git show` only, run in Claude Code's sandbox with
+unsandboxed retries off; nothing that edits. The deny rule on
+`--output` is backed by the sandbox, which refuses the write however
+the flag is spelled. See the comment at the `claude` call in
+`adjudicate.sh`.
+
+In CI the checkout is shallow (`actions/checkout`'s default depth of 1),
+so `git log` sees one commit and `git show` shows the whole tree as
+added: checklist item 3 (weakened assertions) has no history to read
+there.
 
 ## Machine specifics
 
@@ -94,5 +121,6 @@ server are shared — parallel runs corrupt both.
   `--chat-template` pointed at the canonical template closes the gap.
 - **Tier 4 runs `workers=1`.** The model batches fine; the suite does
   not, because workers share one database.
-- **Pixel baselines are macOS-specific** and use a fallback DOM where the
-  app does not expose its markdown renderer on `window`.
+- **Pixel baselines are macOS-specific.** The task-list baseline renders a
+  real note in the notes editor, the surface `mobile.css`'s checkbox fix
+  targets.

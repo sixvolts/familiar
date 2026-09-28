@@ -321,3 +321,102 @@ func TestDerivedBackupPromotedWhenPrimaryPruned(t *testing.T) {
 		t.Fatalf("expected the backup promoted to primary, got %+v", c.Roles.Summarize)
 	}
 }
+
+// RequestModel is what a chat-completions request sends as `model`: the
+// configured name, else the id without its host namespace. ServedName
+// (the embedder's identity) keeps falling back to the whole id.
+func TestModelConfig_RequestModel(t *testing.T) {
+	for _, tc := range []struct {
+		id, model, want string
+	}{
+		{"gpu-host/qwen3.5-122b", "", "qwen3.5-122b"},
+		{"local-model", "", "local-model"},
+		{"a/b/c", "", "b/c"},
+		{"sidecar/gemma", "gemma-4-26b-a4b", "gemma-4-26b-a4b"},
+	} {
+		m := ModelConfig{ID: tc.id, Model: tc.model}
+		if got := m.RequestModel(); got != tc.want {
+			t.Errorf("RequestModel(%q, model=%q) = %q, want %q", tc.id, tc.model, got, tc.want)
+		}
+	}
+	if got := (ModelConfig{ID: "embed/nomic-a"}).ServedName(); got != "embed/nomic-a" {
+		t.Errorf("ServedName changed: %q", got)
+	}
+}
+
+// Chat is never derived onto a model that can't generate text: an
+// embeddings model, or one the embedder or rerank role names.
+func TestNormalizeRolesChatSkipsNonGenerationModels(t *testing.T) {
+	c := DefaultConfig()
+	c.Embedder = EmbedderConfig{}
+	c.Models = []ModelConfig{
+		{ID: "embed/a", Endpoint: "e", Provider: "embeddings", Model: "nomic", Dimension: 768},
+		{ID: "embed/b", Endpoint: "e", Provider: "embeddings", Model: "nomic", Dimension: 768},
+		{ID: "rank/bge", Endpoint: "e", Provider: "llama-server"},
+		{ID: "zeta/big", Endpoint: "e", Provider: "llama-server"},
+		// Declared, named by no role: skipped for being an embeddings model.
+		{ID: "a-spare/embed", Endpoint: "e", Provider: "embeddings", Model: "nomic", Dimension: 768},
+	}
+	c.Roles.Embedder = RoleChain{Primary: "embed/a", Backup: "embed/b"}
+	c.Roles.Rerank = RoleChain{Primary: "rank/bge"}
+	c.normalizeRoles()
+	if err := c.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if c.Roles.Chat.Primary != "zeta/big" {
+		t.Fatalf("chat = %q, want the only generation model", c.Roles.Chat.Primary)
+	}
+}
+
+// A text-generation role written by hand can't name an embeddings
+// model, and chat = true can't mark one.
+func TestValidateRejectsEmbeddingsInGenerationRole(t *testing.T) {
+	base := func() *Config {
+		c := DefaultConfig()
+		c.Embedder = EmbedderConfig{}
+		c.Models = []ModelConfig{
+			{ID: "embed/a", Endpoint: "e", Provider: "embeddings", Model: "nomic", Dimension: 768},
+			{ID: "big", Endpoint: "e", Provider: "llama-server", Chat: true},
+		}
+		return c
+	}
+	c := base()
+	c.Roles.Classify = RoleChain{Primary: "big", Backup: "embed/a"}
+	c.normalizeRoles()
+	if err := c.Validate(); err == nil {
+		t.Error("an explicit classify chain naming an embeddings model validated")
+	}
+	c = base()
+	c.Models[0].Chat = true
+	c.normalizeRoles()
+	if err := c.Validate(); err == nil {
+		t.Error("chat = true on an embeddings model validated")
+	}
+	// A derived chain (legacy [sidecar] key) is pruned with a warning, as
+	// other derived-chain mistakes are, instead of failing the boot.
+	c = base()
+	c.Sidecar.ExtractModel = "embed/a"
+	c.normalizeRoles()
+	if err := c.Validate(); err != nil {
+		t.Errorf("a legacy key pointing a task at an embeddings model should warn, not fail: %v", err)
+	}
+	if c.Roles.Extract.Primary == "embed/a" {
+		t.Error("the derived extract role kept the embeddings model")
+	}
+}
+
+// A malformed allow_cidrs entry fails the boot instead of silently
+// allowing nothing (or, worse, being misread).
+func TestValidateRejectsBadFetchCIDR(t *testing.T) {
+	c := DefaultConfig()
+	c.Models = []ModelConfig{{ID: "m", Endpoint: "e", Provider: "llama-server", Chat: true}}
+	c.Tools.Fetch.AllowCIDRs = []string{"100.101.102.103"}
+	c.normalizeRoles()
+	if err := c.Validate(); err == nil {
+		t.Error("a bare IP (not a CIDR) in allow_cidrs validated")
+	}
+	c.Tools.Fetch.AllowCIDRs = []string{"100.101.102.103/32"}
+	if err := c.Validate(); err != nil {
+		t.Errorf("a valid CIDR failed: %v", err)
+	}
+}

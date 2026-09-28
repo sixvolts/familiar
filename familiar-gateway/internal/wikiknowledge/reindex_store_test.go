@@ -2,7 +2,6 @@ package wikiknowledge
 
 import (
 	"context"
-	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -10,6 +9,7 @@ import (
 
 	"github.com/familiar/gateway/internal/admin"
 	"github.com/familiar/gateway/internal/db"
+	"github.com/familiar/gateway/internal/testdsn"
 	"github.com/familiar/gateway/internal/testutil"
 )
 
@@ -34,11 +34,7 @@ func reindexStoreForTest(t *testing.T) *PgReindexStore {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _, _ = adminPool.ExecContext(context.Background(), "DROP SCHEMA IF EXISTS "+schema+" CASCADE") })
-	sep := "?"
-	if strings.Contains(dsn, "?") {
-		sep = "&"
-	}
-	pool, err := db.Open(dsn + sep + "options=" + url.QueryEscape("-csearch_path="+schema+",public"))
+	pool, err := db.Open(testdsn.Scoped(t, dsn, schema))
 	if err != nil {
 		t.Fatalf("db.Open (scoped): %v", err)
 	}
@@ -160,7 +156,7 @@ func TestPgReindexStore_LoadPage(t *testing.T) {
 	id := w.page(book, "biopsy", time.Hour, false)
 	w.exec(`UPDATE wiki_pages SET updated_by = 'editor', content = 'The biopsy is on Monday.' WHERE id = $1::uuid`, id)
 	target := "t-1"
-	s.Links = func(_ context.Context, pageID string) ([]admin.PageLink, error) {
+	s.Links = func(_ context.Context, pageID, _ string) ([]admin.PageLink, error) {
 		return []admin.PageLink{{SourcePageID: pageID, TargetPageSlug: "clinic", TargetPageID: &target}}, nil
 	}
 	evt, ok, err := s.LoadPage(context.Background(), id)

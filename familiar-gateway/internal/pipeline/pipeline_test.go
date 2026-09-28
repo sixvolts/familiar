@@ -361,23 +361,6 @@ func TestPipelineHandleAssembleError(t *testing.T) {
 	}
 }
 
-func TestModelIDToProviderModel(t *testing.T) {
-	cases := []struct {
-		input, want string
-	}{
-		{"llama-server/qwen3-30b", "qwen3-30b"},
-		{"openai/gpt-4", "gpt-4"},
-		{"local-model", "local-model"},
-		{"a/b/c", "b/c"},
-	}
-	for _, tc := range cases {
-		got := modelIDToProviderModel(tc.input)
-		if got != tc.want {
-			t.Errorf("modelIDToProviderModel(%q) = %q, want %q", tc.input, got, tc.want)
-		}
-	}
-}
-
 // TestPipelineEmptyResponseNotCommitted is a regression test for Bug 1:
 // the gateway used to persist empty assistant turns into the session
 // buffer AND the memories table. The next request in the same session

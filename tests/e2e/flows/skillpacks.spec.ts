@@ -15,18 +15,9 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { start, GatewayStack } from "../fixtures/gateway";
 import { createTestUser, TestUser } from "../fixtures/user";
+import { MODEL_URL, NO_MODEL, gateOnModel } from "../helpers/model";
 
-const MODEL_URL = process.env.FAMILIAR_TEST_CHAT_MODEL_URL || "http://127.0.0.1:8090";
 const REPLY_TIMEOUT = 120_000;
-
-async function modelIsUp(): Promise<boolean> {
-    try {
-        const resp = await fetch(`${MODEL_URL}/health`, { signal: AbortSignal.timeout(2_000) });
-        return resp.ok;
-    } catch {
-        return false;
-    }
-}
 
 const test = base.extend<{}, { stack: GatewayStack }>({
     stack: [
@@ -41,9 +32,7 @@ const test = base.extend<{}, { stack: GatewayStack }>({
 
 test.describe.configure({ mode: "serial" });
 
-test.beforeEach(async () => {
-    test.skip(!(await modelIsUp()), `no inference server at ${MODEL_URL} — skillpacks specs need a live model`);
-});
+gateOnModel(test, "skillpacks specs", 2 * REPLY_TIMEOUT);
 
 function authed(user: TestUser) {
     return { Cookie: user.cookieHeader, "Content-Type": "application/json" };
@@ -202,7 +191,7 @@ test("an unmodified Agent Skill works inside a shard via progressive disclosure"
     expect(gone.disabled_at, "vanished package must be disabled").toBeTruthy();
 });
 
-test("library management is admin-only and bindings are owner-scoped", async ({ stack, request }) => {
+test("library management is admin-only and bindings are owner-scoped", { tag: NO_MODEL }, async ({ stack, request }) => {
     const admin = await createTestUser({ role: "admin" });
     const plain = await createTestUser();
 

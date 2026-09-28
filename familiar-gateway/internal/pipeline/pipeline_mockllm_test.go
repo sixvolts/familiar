@@ -178,7 +178,7 @@ func TestRunToolLoop_StopDoesNotDispatchSalvagedToolCall(t *testing.T) {
 		Tools: []llm.ToolSpec{{Name: "stub_lookup"}},
 	}
 
-	resp, _, err := pl.runToolLoop(ctx, baseReq, "standard", classifier.SearchNone, 0, complete, nil, nil, false, nil, nil)
+	resp, _, err := pl.runToolLoop(ctx, baseReq, baseReq.Model, "standard", classifier.SearchNone, 0, complete, nil, nil, false, nil, nil)
 	if err != nil {
 		t.Fatalf("runToolLoop errored on a stopped turn instead of salvaging: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestRunToolLoop_KeepsProseEmittedAlongsideToolCall(t *testing.T) {
 		Tools: []llm.ToolSpec{{Name: "stub_lookup"}},
 	}
 
-	resp, _, err := pl.runToolLoop(context.Background(), baseReq, "standard", classifier.SearchNone, 0, complete, nil, nil, false, nil, nil)
+	resp, _, err := pl.runToolLoop(context.Background(), baseReq, baseReq.Model, "standard", classifier.SearchNone, 0, complete, nil, nil, false, nil, nil)
 	if err != nil {
 		t.Fatalf("runToolLoop: %v", err)
 	}
@@ -281,7 +281,7 @@ func TestRunToolLoop_KeepsProseWhenCappedMidToolChain(t *testing.T) {
 	}
 	baseReq := llm.CompletionRequest{Model: "mock-model", Tools: []llm.ToolSpec{{Name: "stub_lookup"}}}
 
-	resp, _, err := pl.runToolLoop(context.Background(), baseReq, "standard", classifier.SearchNone, 0, complete, nil, nil, false, nil, nil)
+	resp, _, err := pl.runToolLoop(context.Background(), baseReq, baseReq.Model, "standard", classifier.SearchNone, 0, complete, nil, nil, false, nil, nil)
 	if err != nil {
 		t.Fatalf("runToolLoop: %v", err)
 	}
@@ -606,4 +606,87 @@ func TestIntegration_MultiUserIsolation(t *testing.T) {
 	}
 
 	mock.AssertAllConsumed()
+}
+
+// Tool results are capped relative to the model's context window, and
+// the window is found by the model's registry id. Real ids are slashed
+// ("gpu-host/bigmodel") while the request carries the name sent to the
+// server ("bigmodel"), so looking the window up by the request's model
+// missed for every real id: a big-window model got the global cap, and
+// a long wiki page came back with its middle elided.
+func TestIntegration_ToolResultCapScalesForSlashedModelID(t *testing.T) {
+	mock := testutil.NewMockLLM(t)
+	mock.Enqueue(
+		testutil.ScriptedResponse{ToolCalls: []testutil.ScriptedToolCall{{
+			ID: "call_read", Name: "stub_lookup", Arguments: map[string]any{"q": "page"},
+		}}},
+		testutil.ScriptedResponse{Content: "done"},
+	)
+	stub := &stubSkill{toolName: "stub_lookup", reply: strings.Repeat("transcript line. ", 2400)} // ~40k chars
+	reg := skills.NewRegistry()
+	if err := reg.Register(stub); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	const id = "gpu-host/bigmodel"
+	rr := router.NewRegistry([]config.ModelConfig{{
+		ID: id, Provider: "llama-server", Endpoint: mock.URL(),
+		Capabilities: []string{"tools"}, ContextWindow: 262144,
+	}})
+	rr.SetStatusForTest(id, "online")
+	pl := New(Deps{
+		Engine:        &mockEngine{},
+		Router:        router.NewRouter(config.RouterConfig{Enabled: true}, rr),
+		Sessions:      session.NewManager(),
+		AgentID:       "test-agent",
+		SkillRegistry: reg,
+	})
+	sess := pl.sessions.GetOrCreate("cli", "user1")
+	if _, _, err := pl.Handle(context.Background(), sess, "revise the transcript page", nil); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	calls := mock.Calls()
+	if len(calls) < 2 {
+		t.Fatalf("model called %d time(s), want the tool round trip", len(calls))
+	}
+	if calls[0].Model != "bigmodel" {
+		t.Errorf("request model = %q, want the id without its namespace", calls[0].Model)
+	}
+	var result string
+	for _, m := range calls[1].Messages {
+		if m.Role == "tool" {
+			result = m.Content
+		}
+	}
+	// 2000 tokens is the configured cap at a 64k window; at 262k it
+	// scales to 8000 tokens, roughly 32k characters.
+	if len(result) < 20000 {
+		t.Errorf("tool result reached the model at %d chars; the cap didn't scale with %s's 262k window", len(result), id)
+	}
+}
+
+// A model's configured `model` is the name its requests send. Chat
+// ignored it and always sent the id without its namespace, so a backend
+// that looks models up by name (ollama, vLLM, mlx_lm.server) could only
+// be reached by naming the [[models]] entry after it.
+func TestIntegration_ChatSendsConfiguredModelName(t *testing.T) {
+	mock := testutil.NewMockLLM(t)
+	mock.Enqueue(testutil.ScriptedResponse{Content: "hi"})
+	const id = "gpu-host/big"
+	rr := router.NewRegistry([]config.ModelConfig{{
+		ID: id, Provider: "llama-server", Endpoint: mock.URL(), Model: "qwen3.5:122b",
+	}})
+	rr.SetStatusForTest(id, "online")
+	pl := New(Deps{
+		Engine:   &mockEngine{},
+		Router:   router.NewRouter(config.RouterConfig{Enabled: true}, rr),
+		Sessions: session.NewManager(),
+		AgentID:  "test-agent",
+	})
+	sess := pl.sessions.GetOrCreate("cli", "user1")
+	if _, _, err := pl.Handle(context.Background(), sess, "hello", nil); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if got := mock.Calls()[0].Model; got != "qwen3.5:122b" {
+		t.Errorf("request model = %q, want the configured model name", got)
+	}
 }

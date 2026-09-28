@@ -553,3 +553,75 @@ func TestOpenAIComplete_ReasoningEffort(t *testing.T) {
 		}
 	})
 }
+
+// Ordinary answers keep all their text. A reasoning heuristic written
+// for Command A used to run on every OpenAI-compatible answer: one that
+// opened with "According to"/"Let's"/"Okay," and later said "This is…"
+// or "Here's…" lost everything before that sentence to the collapsed
+// thinking panel, and only the tail was saved as the reply.
+func TestOpenAIProvider_OrdinaryAnswerKeepsItsText(t *testing.T) {
+	answers := []string{
+		"According to the docs, the flag defaults to false, so you have to set it in the unit file. This is the step people usually miss. Finally restart the service and check the logs.",
+		"Let's walk through the setup. First install the package, then edit the config. Here's the snippet you need: enable = true.",
+		"Okay, here is a plan for the week: Monday groceries, Tuesday the dentist. I can also turn this into a calendar if you like.",
+	}
+	for _, answer := range answers {
+		batch := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": answer}, "finish_reason": "stop"}},
+			})
+		}))
+		p := NewOpenAIProvider("llama-server/m", batch.URL, "")
+		resp, err := p.Complete(context.Background(), CompletionRequest{Model: "m"})
+		batch.Close()
+		if err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		if resp.Content != answer || resp.ReasoningContent != "" {
+			t.Errorf("Complete split an ordinary answer:\n content=%q\n reasoning=%q", resp.Content, resp.ReasoningContent)
+		}
+
+		stream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("content-type", "text/event-stream")
+			chunk, _ := json.Marshal(map[string]any{"choices": []map[string]any{{"delta": map[string]string{"content": answer}}}})
+			_, _ = io.WriteString(w, "data: "+string(chunk)+"\n\n")
+			_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
+			_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		}))
+		p = NewOpenAIProvider("llama-server/m", stream.URL, "")
+		resp, err = p.CompleteStream(context.Background(), CompletionRequest{Model: "m"}, func(string) {})
+		stream.Close()
+		if err != nil {
+			t.Fatalf("CompleteStream: %v", err)
+		}
+		if resp.Content != answer || resp.ReasoningContent != "" {
+			t.Errorf("CompleteStream split an ordinary answer:\n content=%q\n reasoning=%q", resp.Content, resp.ReasoningContent)
+		}
+	}
+}
+
+// A server that answers but can't serve is unhealthy, so the heartbeat
+// marks it offline and the role fails over.
+func TestOpenAIProvider_HealthCheckStatusCodes(t *testing.T) {
+	for _, tc := range []struct {
+		status  int
+		healthy bool
+	}{
+		{200, true},
+		{404, true}, // no /v1/models on this server: reachable, can't tell more
+		{401, false},
+		{403, false},
+		{500, false},
+		{502, false},
+		{503, false}, // llama-server loading its model
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(tc.status)
+		}))
+		err := NewOpenAIProvider("llama-server/m", srv.URL, "").HealthCheck(context.Background())
+		srv.Close()
+		if (err == nil) != tc.healthy {
+			t.Errorf("HTTP %d: healthy=%v, want %v (err %v)", tc.status, err == nil, tc.healthy, err)
+		}
+	}
+}

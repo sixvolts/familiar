@@ -1,6 +1,11 @@
 package textmerge
 
-import "testing"
+import (
+	"fmt"
+	"runtime"
+	"strings"
+	"testing"
+)
 
 func TestMerge(t *testing.T) {
 	cases := []struct {
@@ -122,5 +127,80 @@ func TestMerge_SymmetryOnDisjointEdits(t *testing.T) {
 	}
 	if m1 != m2 {
 		t.Errorf("asymmetric merge:\n%q\nvs\n%q", m1, m2)
+	}
+}
+
+func numberedLines(n int, edit func(i int, line string) string) string {
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		line := fmt.Sprintf("line %d", i)
+		if edit != nil {
+			line = edit(i, line)
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// Edits at opposite ends of a large page still merge, cheaply: only the
+// changed region between the common prefix and suffix is diffed.
+func TestMerge_LargePageFarApartEdits(t *testing.T) {
+	const n = 40000
+	base := numberedLines(n, nil)
+	mine := numberedLines(n, func(i int, l string) string {
+		if i == 10 {
+			return "mine changed the top"
+		}
+		return l
+	})
+	theirs := numberedLines(n, func(i int, l string) string {
+		if i == n-10 {
+			return "theirs changed the bottom"
+		}
+		return l
+	})
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	got, conflict := Merge(base, mine, theirs)
+	runtime.ReadMemStats(&after)
+	if conflict {
+		t.Fatal("far-apart edits on a large page conflicted")
+	}
+	if !strings.Contains(got, "mine changed the top") || !strings.Contains(got, "theirs changed the bottom") {
+		t.Error("merge lost one of the edits")
+	}
+	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 64<<20 {
+		t.Errorf("merge allocated %d MB", alloc>>20)
+	}
+}
+
+// A stale save that changes lines throughout a large page is refused as
+// a conflict instead of building an n*m table (gigabytes at this size,
+// which got the gateway killed).
+func TestMerge_ScatteredRewriteOfLargePageIsAConflict(t *testing.T) {
+	const n = 40000
+	base := numberedLines(n, nil)
+	mine := numberedLines(n, func(i int, l string) string {
+		if i%2 == 0 {
+			return l + " (mine)"
+		}
+		return l
+	})
+	theirs := numberedLines(n, func(i int, l string) string {
+		if i%3 == 0 {
+			return l + " (theirs)"
+		}
+		return l
+	})
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	_, conflict := Merge(base, mine, theirs)
+	runtime.ReadMemStats(&after)
+	if !conflict {
+		t.Error("a merge too large to diff was not refused")
+	}
+	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 64<<20 {
+		t.Errorf("refusing the merge allocated %d MB", alloc>>20)
 	}
 }

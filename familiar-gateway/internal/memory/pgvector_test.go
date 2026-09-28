@@ -3,12 +3,12 @@ package memory
 import (
 	"context"
 	"math"
-	"net/url"
 	"os"
 	"strings"
 	"testing"
 
 	"github.com/familiar/gateway/internal/db"
+	"github.com/familiar/gateway/internal/testdsn"
 	"github.com/familiar/gateway/internal/testutil"
 )
 
@@ -74,11 +74,7 @@ func setupMemoryStore(t *testing.T) *PgVectorStore {
 		t.Fatalf("create memory_test schema: %v", err)
 	}
 
-	sep := "?"
-	if strings.Contains(dsn, "?") {
-		sep = "&"
-	}
-	pool, err := db.Open(dsn + sep + "options=" + url.QueryEscape("-csearch_path=memory_test,public"))
+	pool, err := db.Open(testdsn.Scoped(t, dsn, "memory_test"))
 	if err != nil {
 		t.Fatalf("db.Open (memory_test schema): %v", err)
 	}

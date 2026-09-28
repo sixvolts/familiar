@@ -13,7 +13,13 @@ import (
 // Client for classification, summarization, fact extraction, etc.
 type HTTPRouter struct {
 	endpoint string // e.g., "http://127.0.0.1:8200"
-	client   *http.Client
+	// model is the name requests send as `model`: the resolved model's
+	// configured name (config.ModelConfig.RequestModel). It used to be a
+	// hardcoded "gemma-4-26b-a4b", which llama-server ignores but which
+	// sent a failover to an ollama or vLLM backup after a model that
+	// isn't there.
+	model  string
+	client *http.Client
 }
 
 // NewHTTPRouter creates a router that talks to a local llama-server

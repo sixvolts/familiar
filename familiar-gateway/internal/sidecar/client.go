@@ -171,14 +171,17 @@ func (c *Client) resolveTask(task string) (modelID, endpoint string, err error) 
 	return modelID, endpoint, nil
 }
 
-// routerForEndpoint returns the cached HTTPRouter for an endpoint,
-// building it on first use. extract_large gets its own long-timeout
-// router (cached under a distinct key) so co-locating it on a shared
-// endpoint doesn't hand a critical-path task the 5-minute ceiling.
-func (c *Client) routerForEndpoint(endpoint string, large bool) *HTTPRouter {
-	key := endpoint
+// routerForEndpoint returns the cached HTTPRouter for an endpoint and
+// request model name, building it on first use. Routers are keyed by
+// both, so a failover to another model on the same server sends that
+// model's name; the slot gate stays per endpoint (gateForTask), since
+// two models on one server still share its slot. extract_large gets its
+// own long-timeout router so co-locating it on a shared endpoint doesn't
+// hand a critical-path task the 5-minute ceiling.
+func (c *Client) routerForEndpoint(endpoint, model string, large bool) *HTTPRouter {
+	key := endpoint + "|" + model
 	if large {
-		key = "large:" + endpoint
+		key = "large:" + key
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -189,10 +192,42 @@ func (c *Client) routerForEndpoint(endpoint string, large bool) *HTTPRouter {
 	if large {
 		r = NewHTTPRouterWithTimeout(endpoint, LargeExtractTimeout)
 	} else {
-		r = NewHTTPRouter(endpoint)
+		r = NewHTTPRouterWithTimeout(endpoint, c.taskTimeout())
 	}
+	r.model = model
 	c.routers[key] = r
 	return r
+}
+
+// defaultTaskTimeout is the request ceiling for the small sidecar tasks
+// when [sidecar].request_timeout_ms is unset.
+const defaultTaskTimeout = 10 * time.Second
+
+// taskTimeout is the HTTP ceiling for every task but extract_large:
+// [sidecar].request_timeout_ms, as documented, or 10s. It used to be a
+// fixed 10s that only the classifier's own (tighter) deadline read the
+// setting for, so raising it for a slower extract model did nothing.
+func (c *Client) taskTimeout() time.Duration {
+	if c != nil && c.cfg.RequestTimeoutMs > 0 {
+		return time.Duration(c.cfg.RequestTimeoutMs) * time.Millisecond
+	}
+	return defaultTaskTimeout
+}
+
+// RequestModelNamer is implemented by an EndpointResolver that knows
+// each model's configured request name (*router.Registry does).
+type RequestModelNamer interface {
+	RequestModelFor(modelID string) string
+}
+
+// requestModelFor is the name requests for modelID send as `model`: the
+// configured name when the endpoint resolver is a RequestModelNamer,
+// else the id without its namespace (the rule chat uses too).
+func (c *Client) requestModelFor(modelID string) string {
+	if r, ok := c.endpoints.(RequestModelNamer); ok {
+		return r.RequestModelFor(modelID)
+	}
+	return config.StripModelNamespace(modelID)
 }
 
 // LogRouting prints, per task, the configured role chain and the model
@@ -231,7 +266,7 @@ func (c *Client) routerFor(task string) *HTTPRouter {
 	if ep == "" {
 		return nil
 	}
-	return c.routerForEndpoint(ep, task == TaskExtractLarge)
+	return c.routerForEndpoint(ep, c.requestModelFor(modelID), task == TaskExtractLarge)
 }
 
 // TaskEndpoint returns the currently-resolved HTTP endpoint for a task,
@@ -252,15 +287,29 @@ func (c *Client) TaskEndpoint(task string) string {
 	return ""
 }
 
+// TaskTarget is TaskEndpoint plus the model name to send, for callers
+// that post to a task's endpoint themselves (the preamble generator).
+// Resolved on every call, so it follows the task's failover.
+func (c *Client) TaskTarget(task string) (endpoint, model string) {
+	if c == nil || c.roles == nil {
+		return "", ""
+	}
+	modelID, _, ok := c.roles.Resolve(task)
+	if !ok || modelID == "" {
+		return "", ""
+	}
+	return c.endpointFor(modelID), c.requestModelFor(modelID)
+}
+
 // taskReady resolves a task to its router and confirms the resolved
 // model is not offline. Returns (nil, ErrNoModelConfigured) when the
 // task names no model, or (nil, error) when its whole chain is down.
 func (c *Client) taskReady(task string) (*HTTPRouter, error) {
-	_, ep, err := c.resolveTask(task)
+	modelID, ep, err := c.resolveTask(task)
 	if err != nil {
 		return nil, err
 	}
-	return c.routerForEndpoint(ep, task == TaskExtractLarge), nil
+	return c.routerForEndpoint(ep, c.requestModelFor(modelID), task == TaskExtractLarge), nil
 }
 
 // Start is a no-op retained for caller symmetry. Health is driven by

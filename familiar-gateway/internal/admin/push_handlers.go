@@ -14,7 +14,8 @@ import (
 
 // AttachPush wires the push subscription store + the VAPID public key
 // onto the handler. Idempotent; mirrors AttachConversationStore.
-func (h *Handler) AttachPush(store *push.Store, vapidPublicKey string) {
+func (h *Handler) AttachPush(store *push.Store, vapidPublicKey string, policy push.EndpointPolicy) {
+	h.pushPolicy = policy
 	h.push = store
 	h.pushVAPIDPublicKey = vapidPublicKey
 }
@@ -60,6 +61,13 @@ func (h *Handler) pushSubscribe(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Endpoint == "" || body.Keys.P256dh == "" || body.Keys.Auth == "" {
 		writeJSONError(w, http.StatusBadRequest, "endpoint and keys (p256dh, auth) are required")
+		return
+	}
+	// The gateway POSTs to this URL on every notification, so it must be
+	// a real push service, not an address chosen to reach something
+	// internal.
+	if err := h.pushPolicy.Check(body.Endpoint); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := h.push.Upsert(r.Context(), au.UserID, push.Subscription{

@@ -179,6 +179,34 @@ func (s *SessionStore) DeleteByCredential(ctx context.Context, credentialID stri
 	return err
 }
 
+// DeleteUnboundByUser ends a user's own sessions that record no
+// passkey (minted before credential ids were recorded), except the one
+// with keepToken. Deleting a passkey can't tell whether one of those
+// came from it, so they all end: otherwise a key revoked because it was
+// compromised left its pre-upgrade sessions alive for good (renewal
+// slides their expiry).
+func (s *SessionStore) DeleteUnboundByUser(ctx context.Context, userID, keepToken string) error {
+	if userID == "" {
+		return nil
+	}
+	_, err := s.pool.ExecContext(ctx, `
+		DELETE FROM admin_sessions
+		 WHERE user_id = $1 AND principal_type = 'user' AND credential_id IS NULL
+		   AND token <> $2`, userID, keepToken)
+	return err
+}
+
+// DeleteUnboundByShard is DeleteUnboundByUser for a shard principal.
+func (s *SessionStore) DeleteUnboundByShard(ctx context.Context, shardID string) error {
+	if shardID == "" {
+		return nil
+	}
+	_, err := s.pool.ExecContext(ctx, `
+		DELETE FROM admin_sessions
+		 WHERE principal_type = 'shard' AND principal_id = $1 AND credential_id IS NULL`, shardID)
+	return err
+}
+
 // DeleteByShard ends every session of one shard principal. Called when
 // the shard is deleted or disabled, so a recreated shard with the same
 // id can't inherit its predecessor's sessions.

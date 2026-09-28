@@ -14,9 +14,8 @@
 //      request, not just future logins.
 
 import { test as base, expect } from "@playwright/test";
-import { Client } from "pg";
 import { start, GatewayStack } from "../fixtures/gateway";
-import { createTestUser, setUserStatus } from "../fixtures/user";
+import { createTestUser, seedCredential, setUserStatus } from "../fixtures/user";
 
 const test = base.extend<{}, { stack: GatewayStack }>({
     stack: [
@@ -145,21 +144,3 @@ test("disabling a user kills their live session on the next request", async ({ s
     await setUserStatus(user.id, "approved");
     expect((await request.get(url, { headers })).ok()).toBeTruthy();
 });
-
-// seedCredential plants a minimal webauthn_credentials row. The blob
-// is opaque to the registration GATE (it only counts rows); only a
-// real login ceremony would unmarshal it, and no test here does.
-async function seedCredential(userID: string): Promise<void> {
-    const client = new Client({ connectionString: process.env.FAMILIAR_TEST_DSN });
-    await client.connect();
-    try {
-        await client.query(
-            `INSERT INTO webauthn_credentials (id, credential_blob, user_id, display_name, webauthn_user_handle)
-             VALUES ($1, $2, $3, 'seeded', $3)
-             ON CONFLICT (id) DO NOTHING`,
-            [`e2e-cred-${userID}`, Buffer.from("{}"), userID],
-        );
-    } finally {
-        await client.end();
-    }
-}

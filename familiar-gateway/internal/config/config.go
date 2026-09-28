@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
@@ -70,6 +71,10 @@ type PushConfig struct {
 	// Subject is the VAPID "sub" — a mailto: or https: URL. Defaults to
 	// a placeholder mailto when blank.
 	Subject string `toml:"subject"`
+	// AllowedEndpointHosts are exact hosts a push subscription may point
+	// at besides the browsers' push services (FCM, Mozilla, Apple, WNS),
+	// e.g. a self-hosted push service.
+	AllowedEndpointHosts []string `toml:"allowed_endpoint_hosts"`
 }
 
 // Enabled reports whether Web Push is configured (both VAPID keys set).
@@ -403,6 +408,30 @@ type NewsConfig struct {
 type ToolsConfig struct {
 	Brave         BraveConfig         `toml:"brave"`
 	PirateWeather PirateWeatherConfig `toml:"pirate_weather"`
+	Fetch         FetchConfig         `toml:"fetch"`
+}
+
+// FetchConfig controls fetches of caller-supplied URLs (the fetch_page
+// tool and skill imports by URL).
+type FetchConfig struct {
+	// AllowCIDRs are non-public ranges those fetches may still reach,
+	// e.g. "100.101.102.103/32" for one tailnet host. Everything
+	// loopback, private, CGNAT (Tailscale) or reserved is refused
+	// otherwise. Validated at load.
+	AllowCIDRs []string `toml:"allow_cidrs"`
+}
+
+// AllowedFetchPrefixes parses [tools.fetch] allow_cidrs.
+func (c *Config) AllowedFetchPrefixes() ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for _, raw := range c.Tools.Fetch.AllowCIDRs {
+		p, err := netip.ParsePrefix(strings.TrimSpace(raw))
+		if err != nil {
+			return nil, fmt.Errorf("tools.fetch.allow_cidrs: %q is not a CIDR (e.g. 100.101.102.103/32): %w", raw, err)
+		}
+		out = append(out, p.Masked())
+	}
+	return out, nil
 }
 
 // PirateWeatherConfig controls the Pirate Weather API integration.
@@ -680,9 +709,11 @@ type ModelConfig struct {
 	DisplayName string `toml:"display_name"`
 
 	// Model is the model name sent to the server in the request's
-	// `model` field (OpenAI chat + embeddings shape). Defaults to ID
-	// when blank — the historical convention, and llama-server with a
-	// single loaded model ignores it anyway. For an embedder role it
+	// `model` field. When blank, chat and sidecar requests send the ID
+	// without its "host/" namespace (RequestModel), and embeddings
+	// requests send the whole ID (ServedName). llama-server with a
+	// single loaded model ignores the field; ollama, vLLM and
+	// mlx_lm.server look the model up by it. For an embedder role it
 	// also names the embedding *family*: a role's primary and backup
 	// must declare the same Model + Dimension so the vectors they
 	// produce are comparable in pgvector (see config validation).
@@ -792,6 +823,28 @@ func (m ModelConfig) ServedName() string {
 		return m.Model
 	}
 	return m.ID
+}
+
+// RequestModel is the name a chat-completions request (chat, and every
+// sidecar task) sends as `model`: Model when set, otherwise the ID
+// without its "host/" namespace ("gpu-host/qwen3.5-122b" sends
+// "qwen3.5-122b"), which is what chat has always sent. llama-server with
+// one loaded model ignores the field; ollama, vLLM and mlx_lm.server look
+// the model up by it. (ServedName, which falls back to the whole ID, is
+// the embedder's name and identity; it stays as it is.)
+func (m ModelConfig) RequestModel() string {
+	if m.Model != "" {
+		return m.Model
+	}
+	return StripModelNamespace(m.ID)
+}
+
+// StripModelNamespace drops a model ID's "host/" prefix.
+func StripModelNamespace(id string) string {
+	if i := strings.Index(id, "/"); i >= 0 {
+		return id[i+1:]
+	}
+	return id
 }
 
 // Role name constants for the [roles] failover chains. The sidecar-task
@@ -1288,8 +1341,12 @@ func (c *Config) normalizeRoles() {
 // in a hand-written [roles] block is still fatal (Validate).
 func (c *Config) pruneDerivedRoles() {
 	known := make(map[string]bool, len(c.Models))
+	embeddings := map[string]bool{}
 	for _, m := range c.Models {
 		known[m.ID] = true
+		if m.Provider == "embeddings" {
+			embeddings[m.ID] = true
+		}
 	}
 	for _, name := range RoleNames {
 		if c.explicitRoles[name] {
@@ -1298,6 +1355,16 @@ func (c *Config) pruneDerivedRoles() {
 		chain := c.Roles.chainPtr(name)
 		if chain == nil {
 			continue
+		}
+		// A derived text-generation role can't use an embeddings model
+		// (Validate refuses one in a chain written by hand).
+		if takesGlobalFallback(name) {
+			for _, slot := range []*string{&chain.Primary, &chain.Backup} {
+				if *slot != "" && embeddings[*slot] {
+					log.Printf("[config] warning: role %q resolved to embeddings model %q, which can't generate text — dropped", name, *slot)
+					*slot = ""
+				}
+			}
 		}
 		if chain.Primary != "" && !known[chain.Primary] {
 			log.Printf("[config] warning: role %q resolved to model %q from legacy config, but no [[models]] entry declares it — role unassigned",
@@ -1317,9 +1384,22 @@ func (c *Config) pruneDerivedRoles() {
 // deriveChatModelID replicates router.GetChatModelID's selection at the
 // config layer (which can't import router). chat=true wins; otherwise
 // the first role-less model in lex order.
+//
+// Embeddings models, and models the embedder or rerank role names, can't
+// generate text, so they are never picked. They are role-less (only one
+// model may claim role="embedder", so a primary/backup pair can't), and
+// "embed/…" sorts before most ids: following the example's advice to add
+// a backup embedder routed every chat turn to the embedder.
 func (c *Config) deriveChatModelID() string {
+	notChat := map[string]bool{}
+	for _, id := range append(c.Roles.Embedder.Candidates(), c.Roles.Rerank.Candidates()...) {
+		notChat[id] = true
+	}
 	var flagged, roleless []string
 	for _, m := range c.Models {
+		if m.Provider == "embeddings" || notChat[m.ID] {
+			continue
+		}
 		if m.Chat {
 			flagged = append(flagged, m.ID)
 		}

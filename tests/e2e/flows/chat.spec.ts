@@ -20,18 +20,9 @@
 import { test as base, expect } from "@playwright/test";
 import { start, GatewayStack } from "../fixtures/gateway";
 import { createTestUser, attachSession, TestUser } from "../fixtures/user";
+import { MODEL_URL, NO_MODEL, gateOnModel } from "../helpers/model";
 
-const MODEL_URL = process.env.FAMILIAR_TEST_CHAT_MODEL_URL || "http://127.0.0.1:8090";
 const REPLY_TIMEOUT = 120_000;
-
-async function modelIsUp(): Promise<boolean> {
-    try {
-        const resp = await fetch(`${MODEL_URL}/health`, { signal: AbortSignal.timeout(2_000) });
-        return resp.ok;
-    } catch {
-        return false;
-    }
-}
 
 const test = base.extend<{}, { stack: GatewayStack }>({
     stack: [
@@ -46,9 +37,7 @@ const test = base.extend<{}, { stack: GatewayStack }>({
 
 test.describe.configure({ mode: "serial" });
 
-test.beforeEach(async () => {
-    test.skip(!(await modelIsUp()), `no inference server at ${MODEL_URL} — chat specs need a live model`);
-});
+gateOnModel(test, "chat specs", REPLY_TIMEOUT);
 
 function authed(user: TestUser) {
     return { Cookie: user.cookieHeader, "Content-Type": "application/json" };
@@ -186,7 +175,6 @@ test("streaming doesn't yank the view down while the user reads back", async ({
     // streamed token, so scrolling up to re-read mid-generation was
     // impossible — it snapped you back down. Now an upward scroll detaches
     // sticky autoscroll until you return to the bottom.
-    test.setTimeout(180_000);
     const user = await createTestUser();
 
     // Seed a tall conversation up front so the panel already overflows —
@@ -417,7 +405,7 @@ test("a shard pins a wiki page for the user it acts for", async ({ stack, reques
     expect(hit, `home pins should contain the page; got ${JSON.stringify(pins)}`).toBeTruthy();
 });
 
-test("shard-conversation bindings are validated at creation", async ({ stack, request }) => {
+test("shard-conversation bindings are validated at creation", { tag: NO_MODEL }, async ({ stack, request }) => {
     const owner = await createTestUser();
     const intruder = await createTestUser();
     const ownerHeaders = { Cookie: owner.cookieHeader, "Content-Type": "application/json" };

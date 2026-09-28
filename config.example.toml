@@ -394,11 +394,20 @@ max_results = 5
 # Sign up at pirate-weather.apiable.io.
 api_key = ""
 
+[tools.fetch]
+# fetch_page (and importing a skill by URL) never connects to loopback,
+# private, link-local, CGNAT (which includes Tailscale's 100.64.0.0/10)
+# or other reserved addresses: a page the model reads can ask it to
+# fetch anything. List here the non-public hosts it may still reach,
+# as CIDRs, e.g. one tailnet host:
+# allow_cidrs = ["100.101.102.103/32"]
+allow_cidrs = []
+
 # ─── Skills ─────────────────────────────────────────────────────────
 # Most skills auto-register and need no config. News needs RSS feeds
 # (nothing else reads them; empty = no news output). Weather reads
-# tools.pirate_weather above. Profile (update_my_email), memory, and
-# instance skills read their own sections elsewhere in this file.
+# tools.pirate_weather above. Memory and instance skills read their own
+# sections elsewhere in this file.
 
 [media]
 # Page-attached images (MEDIA-DIAGRAMS Phase 1). Bytes live as flat
@@ -417,6 +426,10 @@ max_upload_mb = 10
 vapid_public_key  = ""
 vapid_private_key = ""
 subject           = "mailto:admin@example.com"
+# Push subscriptions must point at a browser push service (FCM, Mozilla,
+# Apple, WNS); the gateway POSTs to them. Add exact hosts here only for a
+# self-hosted push service.
+# allowed_endpoint_hosts = ["push.example.com"]
 
 [skills]
 # Imported-skills library (SKILL-PACKAGES-SPEC Phase 2): one
@@ -566,6 +579,7 @@ rp_origins = [
 id              = "gpu-host/qwen3.5-122b"
 provider        = "llama-server"
 endpoint        = "http://10.0.0.10:8080"
+chat            = true                # the chat model (see [roles.chat] for failover)
 context_window  = 32768
 capabilities    = [
     "deep_reasoning",

@@ -93,3 +93,15 @@ func TestSchedule_DSTTransitions(t *testing.T) {
 		})
 	}
 }
+
+// A slack target must name a channel. A person's id (U…/W…) or a DM
+// (D…) makes the bot DM that person; the owner's own DMs are slack_dm.
+func TestValidate_SlackTargetMustBeAChannel(t *testing.T) {
+	for id, ok := range map[string]bool{"C0123": true, "G0123": true, "U0CFO": false, "W0ENT": false, "D0DM1": false} {
+		a := webhookAction("operator")
+		a.ReportTargets = []Target{{Kind: "slack", ChannelID: id}}
+		if err := Validate(a); (err == nil) != ok {
+			t.Errorf("channel %s: valid=%v, want %v (%v)", id, err == nil, ok, err)
+		}
+	}
+}

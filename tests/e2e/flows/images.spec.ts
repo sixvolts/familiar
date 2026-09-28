@@ -84,7 +84,10 @@ test("upload, serve, thumbnail, and authz", async ({ stack, browser, request }) 
     expect((await thumb.body()).length).toBeLessThan(png.length);
 
     // Authz: a non-member reads 404 (no id probing), and can't
-    // upload into someone else's page either.
+    // upload into someone else's page either. (For the intruder,
+    // "personal" is their OWN book, so this 404 is the page lookup
+    // missing, not the write gate; the shared-book case below is the
+    // write gate.)
     expect(
         (await request.get(`${stack.workspaceURL}${meta.url}`, { headers: authed(intruder) })).status(),
     ).toBe(404);
@@ -96,6 +99,38 @@ test("upload, serve, thumbnail, and authz", async ({ stack, browser, request }) 
             })
         ).status(),
     ).toBe(404);
+
+    // A reader member of a shared book can see its pages but not attach
+    // images to them.
+    const book = await (
+        await request.post(`${stack.workspaceURL}/console/api/books`, {
+            headers,
+            data: { name: `Media Book ${Date.now().toString(36)}` },
+        })
+    ).json();
+    const shared = await (
+        await request.post(`${stack.workspaceURL}/console/api/books/${book.slug}/pages`, {
+            headers,
+            data: { title: "Shared Page", content: "# shared\n" },
+        })
+    ).json();
+    const addReader = await request.post(`${stack.workspaceURL}/console/api/books/${book.slug}/members`, {
+        headers,
+        data: { user_id: intruder.id, role: "reader" },
+    });
+    expect(addReader.ok(), `add reader: HTTP ${addReader.status()}`).toBeTruthy();
+    const sharedUploadURL = `${stack.workspaceURL}/console/api/books/${book.slug}/page-by-id/${shared.id}/media`;
+    const readerUpload = await request.post(sharedUploadURL, {
+        headers: authed(intruder),
+        multipart: { file: { name: "x.png", mimeType: "image/png", buffer: png } },
+    });
+    expect(readerUpload.status(), "a reader must not upload").toBe(403);
+    // The owner can, so the 403 above is the gate and not a broken route.
+    const ownerUpload = await request.post(sharedUploadURL, {
+        headers: authed(owner),
+        multipart: { file: { name: "x.png", mimeType: "image/png", buffer: png } },
+    });
+    expect(ownerUpload.status(), await ownerUpload.text()).toBe(201);
 
     // Content sniffing: a text file dressed as a PNG is refused.
     const fake = await request.post(uploadURL, {

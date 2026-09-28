@@ -121,6 +121,7 @@
             skipped_overlap: "overlap skip",
             skipped_owner: "owner skip",
             skipped_budget: "over budget",
+            skipped_disabled: "disabled skip",
         };
         return map[status] || status || "—";
     }
@@ -147,7 +148,17 @@
                 if (cls) td.className = cls;
                 tr.appendChild(td);
             };
-            addTd(a.name, "col-name");
+            // The name is a button so the row opens from the keyboard
+            // (rows took mouse clicks only); its click bubbles to the row.
+            const nameTd = document.createElement("td");
+            nameTd.className = "col-name";
+            const open = document.createElement("button");
+            open.type = "button";
+            open.className = "row-open";
+            open.textContent = a.name || "—";
+            open.setAttribute("aria-label", "Open action: " + (a.name || a.id));
+            nameTd.appendChild(open);
+            tr.appendChild(nameTd);
             addTd(describeSchedule(a), "col-status");
             addTd(
                 a.envelope === "shard" || a.shard_id ? "shard"
@@ -200,8 +211,28 @@
                 sel.appendChild(group);
             }
         } catch (e) { /* shards optional — built-ins remain */ }
-        sel.value = selected || "user";
-        if (!sel.value) sel.value = "user"; // selected shard no longer listed
+        // The stored envelope stays selected even when it isn't listed
+        // (the shard list failed to load, or the shard was deleted): it
+        // fell back to "user", and a save of an unrelated edit made the
+        // action run as you, with your full toolbox. And the envelope is
+        // only sent once the select is changed (formBody).
+        const want = selected || "user";
+        if (!Array.from(sel.options).some((o) => o.value === want)) {
+            const opt = document.createElement("option");
+            opt.value = want;
+            const id = want.indexOf("shard:") === 0 ? want.slice(6) : "";
+            opt.textContent = id && id !== "undefined"
+                ? "(unavailable) shard " + id
+                : "(shard deleted) — pick how this action runs";
+            sel.appendChild(opt);
+        }
+        sel.value = want;
+        sel.dataset.stored = want;
+        sel.dataset.dirty = "0";
+        if (!sel.dataset.wired) {
+            sel.dataset.wired = "1";
+            sel.addEventListener("change", () => { sel.dataset.dirty = "1"; });
+        }
     }
 
     async function loadPageChoices(selectedID) {
@@ -249,21 +280,15 @@
     function openCreate() {
         state.current = null;
         $("action-detail-title").textContent = "New Action";
-        $("action-form").reset();
+        resetDetailForm();
         $("action-timezone").value = "UTC";
         $("action-timeout").value = "600";
         $("action-budget").value = "0";
         $("action-policy").value = "always";
         $("action-target-book").value = "personal";
-        $("action-conversation-hint").textContent =
-            'A dedicated "Scheduled: …" conversation is created with the action; reports land there as assistant messages you can reply to.';
         $("action-trigger").value = "cron";
         $("action-interval").value = "60";
         $("action-watch-book").value = "personal";
-        $("action-webhook-hint").textContent =
-            "A secret webhook URL is generated when you save; POST to it to fire this action. " +
-            "The request body is passed to the model as untrusted data — anyone who has the URL " +
-            "controls that text, so leave \u201cRun as\u201d on Ephemeral unless this action needs tools.";
         updateTriggerInputs();
         for (const id of ["action-run-now", "action-enable", "action-disable", "action-delete"]) {
             $(id).hidden = true;
@@ -276,10 +301,26 @@
         showDetail();
     }
 
+    // resetDetailForm clears everything a previously opened action left
+    // behind: openDetail set the webhook URL, Slack channel and
+    // conversation hints only for actions that had them, so the next
+    // action showed the last one's (a webhook action's secret URL under
+    // another action).
+    function resetDetailForm() {
+        $("action-form").reset();
+        $("action-conversation-hint").textContent =
+            'A dedicated "Scheduled: …" conversation is created with the action; reports land there as assistant messages you can reply to.';
+        $("action-webhook-hint").textContent =
+            "A secret webhook URL is generated when you save; POST to it to fire this action. " +
+            "The request body is passed to the model as untrusted data — anyone who has the URL " +
+            "controls that text, so leave \u201cRun as\u201d on Ephemeral unless this action needs tools.";
+    }
+
     async function openDetail(id) {
         setError("actions-error", null);
         try {
             const a = await apiJSON("/console/api/actions/" + encodeURIComponent(id));
+            resetDetailForm();
             state.current = a;
             $("action-detail-title").textContent = a.name;
             $("action-name").value = a.name;
@@ -290,7 +331,7 @@
             $("action-policy").value = a.delivery_policy || "always";
             $("action-budget").value = String(a.max_runs_per_day || 0);
             $("action-trigger").value = a.trigger_kind || "cron";
-            $("action-interval").value = String(a.min_interval_seconds || 60);
+            $("action-interval").value = String(a.min_interval_seconds != null ? a.min_interval_seconds : 60);
             $("action-watch-book").value = a.watch_book_slug || "personal";
             if (a.trigger_kind === "webhook" && a.webhook_token) {
                 $("action-webhook-hint").textContent =
@@ -373,24 +414,36 @@
         const targets = [target];
         if ($("action-notify-push").checked) targets.push({ kind: "notify" });
         const trigger = $("action-trigger").value;
-        // "Run as" select: user | ephemeral | shard:<id>.
-        const env = $("action-shard").value || "user";
+        // "Run as" select: user | ephemeral | shard:<id>. Sent on create,
+        // and on edit only once it was changed; a change to "user" from
+        // another envelope is an explicit widening (confirm_envelope).
+        const envSel = $("action-shard");
+        const env = envSel.value || "user";
         const isShard = env.indexOf("shard:") === 0;
-        return {
+        const sendEnvelope = !state.current || envSel.dataset.dirty === "1";
+        const iv = parseInt($("action-interval").value, 10);
+        const body = {
             name: $("action-name").value.trim(),
             prompt: $("action-prompt").value,
             trigger_kind: trigger,
             cron: trigger === "cron" ? $("action-cron").value.trim() : "",
             watch_book_slug: trigger === "page_saved" ? ($("action-watch-book").value || "personal").trim() : "",
-            min_interval_seconds: parseInt($("action-interval").value, 10) || 60,
+            // 0 is "no throttle", not "unset".
+            min_interval_seconds: isNaN(iv) ? 60 : iv,
             timezone: $("action-timezone").value.trim() || "UTC",
-            envelope: isShard ? "shard" : env,
-            shard_id: isShard ? env.slice(6) : "",
             report_targets: targets,
             delivery_policy: $("action-policy").value,
             timeout_seconds: parseInt($("action-timeout").value, 10) || 600,
             max_runs_per_day: parseInt($("action-budget").value, 10) || 0,
         };
+        if (sendEnvelope) {
+            body.envelope = isShard ? "shard" : env;
+            body.shard_id = isShard ? env.slice(6) : "";
+            if (state.current && env === "user" && envSel.dataset.stored !== "user") {
+                body.confirm_envelope = true;
+            }
+        }
+        return body;
     }
 
     async function submitForm(e) {
@@ -504,14 +557,27 @@
                 addTd(r.duration_ms ? (r.duration_ms / 1000).toFixed(1) + "s" : "—", "col-status");
                 const summary = r.error || (r.output || "").slice(0, 160);
                 addTd(summary, "col-name");
-                // Click → toggle a full-detail row (whole output +
-                // per-target delivery results) under this one.
+                // Click, Enter or Space → toggle a full-detail row (whole
+                // output + per-target delivery results) under this one; it
+                // is the only place delivery failures show, and it took
+                // mouse clicks only.
+                tr.tabIndex = 0;
+                tr.setAttribute("role", "button");
+                tr.setAttribute("aria-expanded", "false");
+                tr.addEventListener("keydown", (e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        tr.click();
+                    }
+                });
                 tr.addEventListener("click", () => {
                     const next = tr.nextElementSibling;
                     if (next && next.classList.contains("action-run-detail")) {
                         next.remove();
+                        tr.setAttribute("aria-expanded", "false");
                         return;
                     }
+                    tr.setAttribute("aria-expanded", "true");
                     const detail = document.createElement("tr");
                     detail.className = "action-run-detail";
                     const td = document.createElement("td");

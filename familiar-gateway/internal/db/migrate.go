@@ -1108,10 +1108,10 @@ ALTER TABLE scheduled_actions
 		//   one_shot   — run_at required
 		//   page_saved — fires on page-saved events in watch_book_id;
 		//                min_interval_seconds throttles autosave
-		//                bursts, and the runner refuses to watch a
-		//                book containing the action's own page target
-		//                (self-trigger loop prevention is also
-		//                enforced per-event)
+		//                bursts; a save of the action's own page
+		//                target, or of any page an action delivery
+		//                just wrote, triggers nothing (the runner's
+		//                per-event loop prevention)
 		//   webhook    — fired by POST /console/api/actions/hooks/
 		//                {token}; webhook_token is the bearer secret,
 		//                generated server-side at create

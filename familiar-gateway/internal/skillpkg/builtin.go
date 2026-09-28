@@ -111,9 +111,11 @@ func (s *Store) syncBuiltin(ctx context.Context, name string, knownTools map[str
 	dest := filepath.Join(s.Root, name)
 	// A user-scoped skill sharing the name doesn't block the instance
 	// install (per-scope uniqueness; the owner's copy deliberately
-	// wins on their trusted path — that's the duplicate-as-mine
-	// customization escape hatch), but the shadowing should be loud:
-	// those users won't see builtin upgrades.
+	// wins on their trusted path — customizing a builtin means authoring
+	// a skill of the same name, from scratch: Duplicate takes only the
+	// user's own skills, and the builtin's references/ files aren't
+	// copied), but the shadowing should be loud: those users won't see
+	// builtin upgrades.
 	if owners, oErr := s.userScopedOwners(ctx, name); oErr == nil && len(owners) > 0 {
 		log.Printf("[skillpkg] builtin %q: user-scoped skills with the same name shadow it for their owners: %v", name, owners)
 	}

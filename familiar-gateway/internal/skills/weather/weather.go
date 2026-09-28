@@ -453,7 +453,7 @@ func (s *Skill) forecast(ctx context.Context, location string, days int) (skills
 		points = points[:days]
 	}
 
-	content := formatForecast(loc, out.Daily.Summary, points)
+	content := formatForecast(loc, out.Daily.Summary, points, forecastZone(out.Timezone, loc.Timezone))
 	data, _ := json.Marshal(map[string]any{
 		"location": loc,
 		"daily": map[string]any{
@@ -525,7 +525,25 @@ func formatCurrent(loc *geocodeResult, c pirateCurrently) string {
 	)
 }
 
-func formatForecast(loc *geocodeResult, summary string, points []pirateDailyPoint) string {
+// forecastZone is the location's time zone for labelling days: the
+// forecast's own, else the geocoder's, else UTC.
+func forecastZone(names ...string) *time.Location {
+	for _, n := range names {
+		if n == "" || n == "auto" {
+			continue
+		}
+		if z, err := time.LoadLocation(n); err == nil {
+			return z
+		}
+	}
+	return time.UTC
+}
+
+// formatForecast labels each day with its date in zone. A daily point
+// starts at local midnight, and in UTC that is the previous date for
+// every place east of UTC: Tokyo's forecast for the 24th printed as the
+// 23rd, and the model named the wrong day.
+func formatForecast(loc *geocodeResult, summary string, points []pirateDailyPoint, zone *time.Location) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Forecast for %s", locationLabel(loc))
 	if summary != "" {
@@ -533,7 +551,7 @@ func formatForecast(loc *geocodeResult, summary string, points []pirateDailyPoin
 	}
 	b.WriteString(":\n")
 	for _, p := range points {
-		day := time.Unix(p.Time, 0).UTC().Format("2006-01-02")
+		day := time.Unix(p.Time, 0).In(zone).Format("2006-01-02")
 		fmt.Fprintf(&b, "- %s: %s, high %.0f°F / low %.0f°F, precip %.2f in (%.0f%%), wind up to %.0f mph\n",
 			day,
 			iconText(p.Icon),
@@ -681,8 +699,31 @@ func (c *ttlCache) get(key string) (cacheEntry, bool) {
 	return rec.entry, true
 }
 
+// maxCacheEntries caps the cache: keys come from model-supplied
+// location strings and per-user coordinates, and an expired entry was
+// only dropped when the same key was read again, so the map grew for
+// the life of the process.
+const maxCacheEntries = 512
+
 func (c *ttlCache) set(key string, entry cacheEntry, ttl time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.m[key] = cacheRecord{entry: entry, expires: time.Now().Add(ttl)}
+	now := time.Now()
+	if len(c.m) >= maxCacheEntries {
+		var oldestKey string
+		var oldest time.Time
+		for k, rec := range c.m {
+			if now.After(rec.expires) {
+				delete(c.m, k)
+				continue
+			}
+			if oldestKey == "" || rec.expires.Before(oldest) {
+				oldestKey, oldest = k, rec.expires
+			}
+		}
+		if len(c.m) >= maxCacheEntries && oldestKey != "" {
+			delete(c.m, oldestKey)
+		}
+	}
+	c.m[key] = cacheRecord{entry: entry, expires: now.Add(ttl)}
 }

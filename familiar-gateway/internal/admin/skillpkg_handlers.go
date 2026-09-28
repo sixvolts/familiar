@@ -57,44 +57,67 @@ func (h *Handler) listSkillPackages(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
-// readImportPayload extracts the archive bytes + confirm flag +
-// source URL from an import request: multipart/form-data with a
-// "file" zip part (and optional "confirm" field), or JSON
-// {"url": ..., "confirm": bool} for a direct-zip fetch. Shared by the
-// admin (instance) and user (/skills/mine) import endpoints.
-func readImportPayload(r *http.Request) (data []byte, confirm bool, sourceURL string, err error) {
+// Request body caps. Nothing bounded these bodies: a multipart upload
+// spilled to temp disk for as long as it streamed, and a JSON body was
+// decoded whole into memory, from any signed-in user.
+const (
+	maxImportRequestBytes = 22 << 20  // a 21MB archive plus form overhead
+	maxSkillRequestBytes  = 512 << 10 // authored skills (256KB body) and small JSON
+)
+
+// limitBody caps r's body at n bytes; reading past it fails.
+func limitBody(w http.ResponseWriter, r *http.Request, n int64) {
+	r.Body = http.MaxBytesReader(w, r.Body, n)
+}
+
+// importPayload is an import request: the archive, whether it's the
+// confirm step, the source URL, and the digest the preview showed.
+type importPayload struct {
+	data      []byte
+	confirm   bool
+	sourceURL string
+	digest    string
+}
+
+// readImportPayload extracts an import request: multipart/form-data
+// with a "file" zip part (and optional "confirm" and "digest" fields),
+// or JSON {"url": ..., "confirm": bool, "digest": ...} for a direct-zip
+// fetch.
+func readImportPayload(w http.ResponseWriter, r *http.Request) (importPayload, error) {
+	limitBody(w, r, maxImportRequestBytes)
 	ct := r.Header.Get("Content-Type")
 	switch {
 	case strings.HasPrefix(ct, "multipart/form-data"):
 		if err := r.ParseMultipartForm(25 << 20); err != nil {
-			return nil, false, "", fmt.Errorf("invalid upload: %w", err)
+			return importPayload{}, fmt.Errorf("invalid upload: %w", err)
 		}
 		f, _, err := r.FormFile("file")
 		if err != nil {
-			return nil, false, "", fmt.Errorf("missing file part")
+			return importPayload{}, fmt.Errorf("missing file part")
 		}
 		defer f.Close()
-		data, err = io.ReadAll(io.LimitReader(f, 21<<20))
+		data, err := io.ReadAll(io.LimitReader(f, 21<<20))
 		if err != nil {
-			return nil, false, "", fmt.Errorf("read upload: %w", err)
+			return importPayload{}, fmt.Errorf("read upload: %w", err)
 		}
-		return data, r.FormValue("confirm") == "true", "", nil
+		return importPayload{data: data, confirm: r.FormValue("confirm") == "true", digest: r.FormValue("digest")}, nil
 	default:
 		var body struct {
 			URL     string `json:"url"`
 			Confirm bool   `json:"confirm"`
+			Digest  string `json:"digest"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			return nil, false, "", fmt.Errorf("invalid body: %w", err)
+			return importPayload{}, fmt.Errorf("invalid body: %w", err)
 		}
 		if body.URL == "" {
-			return nil, false, "", fmt.Errorf("url required (or upload a zip via multipart)")
+			return importPayload{}, fmt.Errorf("url required (or upload a zip via multipart)")
 		}
 		fetched, err := fetchSkillArchive(r.Context(), body.URL)
 		if err != nil {
-			return nil, false, "", err
+			return importPayload{}, err
 		}
-		return fetched, body.Confirm, body.URL, nil
+		return importPayload{data: fetched, confirm: body.Confirm, sourceURL: body.URL, digest: body.Digest}, nil
 	}
 }
 
@@ -129,16 +152,28 @@ func (h *Handler) importSkillPackage(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusUnauthorized, "missing authenticated user")
 		return
 	}
-	data, confirm, sourceURL, err := readImportPayload(r)
+	in, err := readImportPayload(w, r)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !confirm {
-		h.writeImportPreview(w, data)
+	if !in.confirm {
+		h.writeImportPreview(w, in.data)
 		return
 	}
-	pkg, err := h.skillPkgs.ImportZip(r.Context(), data, au.UserID, sourceURL, h.skillPkgKnownTools)
+	// Admit only what the admin previewed. Confirm re-uploads or
+	// re-fetches the archive, and a URL (or anything on the path of a
+	// plain http one) could serve a different package the second time.
+	loaded, _, _, err := h.skillPkgs.PreviewZip(in.data, h.skillPkgKnownTools)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if in.digest == "" || loaded.Digest != in.digest {
+		writeJSONError(w, http.StatusConflict, "the package isn't the one previewed (its digest changed) — preview it again")
+		return
+	}
+	pkg, err := h.skillPkgs.ImportZip(r.Context(), in.data, au.UserID, in.sourceURL, h.skillPkgKnownTools)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
@@ -231,6 +266,7 @@ func (h *Handler) setSkillPackageChat(w http.ResponseWriter, r *http.Request) {
 	if !h.requireSkillPkgs(w) {
 		return
 	}
+	limitBody(w, r, maxSkillRequestBytes)
 	var body struct {
 		Enabled bool `json:"enabled"`
 	}
@@ -299,34 +335,6 @@ func (h *Handler) listMySkills(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
-// importMySkill mirrors the admin import flow (preview → confirm,
-// zip upload or SSRF-guarded URL fetch) into the caller's private
-// library.
-func (h *Handler) importMySkill(w http.ResponseWriter, r *http.Request) {
-	if !h.requireSkillPkgs(w) {
-		return
-	}
-	uid, ok := h.requireUserSession(w, r)
-	if !ok {
-		return
-	}
-	data, confirm, sourceURL, err := readImportPayload(r)
-	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if !confirm {
-		h.writeImportPreview(w, data)
-		return
-	}
-	pkg, err := h.skillPkgs.ImportZipForUser(r.Context(), uid, data, sourceURL, h.skillPkgKnownTools)
-	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusCreated, pkg)
-}
-
 func (h *Handler) setMySkillDisabled(disabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !h.requireSkillPkgs(w) {
@@ -371,6 +379,7 @@ func (h *Handler) setMySkillChat(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	limitBody(w, r, maxSkillRequestBytes)
 	var body struct {
 		Enabled bool `json:"enabled"`
 	}
@@ -415,11 +424,11 @@ func (h *Handler) putMySkill(w http.ResponseWriter, r *http.Request) {
 	}
 	name := r.PathValue("name")
 	if name == "import" {
-		// Route-shape collision guard: POST /skills/mine/import is the
-		// import endpoint; a skill by that name would shadow it.
+		// Reserved: the path of the (removed) personal import endpoint.
 		writeJSONError(w, http.StatusBadRequest, `"import" is a reserved name`)
 		return
 	}
+	limitBody(w, r, maxSkillRequestBytes)
 	var body struct {
 		Description string `json:"description"`
 		Body        string `json:"body"`
@@ -428,7 +437,17 @@ func (h *Handler) putMySkill(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid body: "+err.Error())
 		return
 	}
-	pkg, err := h.skillPkgs.SaveAuthored(r.Context(), uid, name, body.Description, body.Body, h.skillPkgKnownTools)
+	// ?create=1 (the New skill editor) refuses an existing name instead
+	// of overwriting that skill.
+	save := h.skillPkgs.SaveAuthored
+	if r.URL.Query().Get("create") == "1" {
+		save = h.skillPkgs.CreateAuthored
+	}
+	pkg, err := save(r.Context(), uid, name, body.Description, body.Body, h.skillPkgKnownTools)
+	if errors.Is(err, skillpkg.ErrExists) {
+		writeJSONError(w, http.StatusConflict, "you already have a skill named "+name+" — open it to edit, or pick another name")
+		return
+	}
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
@@ -476,6 +495,7 @@ func (h *Handler) duplicateMySkill(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	limitBody(w, r, maxSkillRequestBytes)
 	var body struct {
 		Name string `json:"name"`
 	}
@@ -579,6 +599,7 @@ func (h *Handler) putShardSkills(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusNotFound, "shard not found")
 		return
 	}
+	limitBody(w, r, maxSkillRequestBytes)
 	var body struct {
 		SkillIDs []string `json:"skill_ids"`
 	}

@@ -537,7 +537,6 @@ func (h *Handler) Mux(authed http.Handler) http.Handler {
 	authedMux.HandleFunc("POST /console/api/research/runs/{id}/cancel", h.cancelResearchRun)
 	// owner's shards in Phase A; trusted-path exposure is Phase B.
 	authedMux.HandleFunc("GET /console/api/skills/mine", h.listMySkills)
-	authedMux.HandleFunc("POST /console/api/skills/mine/import", h.importMySkill)
 	authedMux.HandleFunc("POST /console/api/skills/mine/{id}/enable", h.setMySkillDisabled(false))
 	authedMux.HandleFunc("POST /console/api/skills/mine/{id}/disable", h.setMySkillDisabled(true))
 	authedMux.HandleFunc("POST /console/api/skills/mine/{id}/chat", h.setMySkillChat)

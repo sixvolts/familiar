@@ -622,6 +622,13 @@ func main() {
 			if len(pkgs) == 0 {
 				return nil
 			}
+			// Capped like the chat block (it wasn't: a shard bound to
+			// many skills got an unbudgeted prompt block that could
+			// overflow a small model's window).
+			pkgs, dropped := skillpkg.CapPromptSkills(pkgs, skillpkg.MaxPromptSkills)
+			if dropped > 0 {
+				log.Printf("[skills] shard %s binds %d skills; advertising %d", ov.ShardID, len(pkgs)+dropped, len(pkgs))
+			}
 			ps := make([]skillpkg.PromptSkill, 0, len(pkgs))
 			for _, p := range pkgs {
 				ps = append(ps, skillpkg.PromptSkill{Name: p.Name, Description: p.Description})
@@ -648,10 +655,9 @@ func main() {
 			if len(pkgs) == 0 {
 				return ""
 			}
-			const maxChatSkills = 20
-			if len(pkgs) > maxChatSkills {
-				log.Printf("[skills] user %s has %d chat-enabled skills; advertising first %d", userID, len(pkgs), maxChatSkills)
-				pkgs = pkgs[:maxChatSkills]
+			pkgs, dropped := skillpkg.CapPromptSkills(pkgs, skillpkg.MaxPromptSkills)
+			if dropped > 0 {
+				log.Printf("[skills] user %s has %d chat-enabled skills; advertising %d (built-ins kept)", userID, len(pkgs)+dropped, len(pkgs))
 			}
 			ps := make([]skillpkg.PromptSkill, 0, len(pkgs))
 			for _, p := range pkgs {

@@ -87,10 +87,7 @@ func (h *Handler) servePageEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	allowEvent := func(e pageevents.Event) bool {
-		if au.IsAdmin() {
-			return true
-		}
-		return bookIDs[e.BookID]
+		return pageEventAllowed(au, bookIDs, e.BookID)
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -145,4 +142,19 @@ func (h *Handler) servePageEvents(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+// pageEventAllowed reports whether a session may see a page event from
+// bookID: an admin sees every book, anyone else the books they're a
+// member of, and a shard session only the books in its envelope (it
+// used to receive titles and slugs from every book its owner belongs
+// to).
+func pageEventAllowed(au AuthUser, memberOf map[string]bool, bookID string) bool {
+	if !au.CanAccessBook(bookID) {
+		return false
+	}
+	if au.IsAdmin() {
+		return true
+	}
+	return memberOf[bookID]
 }

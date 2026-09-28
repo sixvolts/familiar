@@ -13,7 +13,7 @@ type StatusProvider interface {
 	Snapshot(ctx context.Context) (StatusSnapshot, error)
 }
 
-// StatusSnapshot is the JSON shape returned by GET /admin/api/status.
+// StatusSnapshot is the JSON shape returned by GET /console/api/status.
 // Every field is scalar or a small slice so the whole thing is cheap
 // to serialise and poll on a 30-second cadence from the browser.
 type StatusSnapshot struct {
@@ -86,14 +86,14 @@ type SessionStatus struct {
 }
 
 // AttachStatusProvider wires a snapshot source into the handler. Must
-// be called before Mux() for GET /admin/api/status to respond with
+// be called before Mux() for GET /console/api/status to respond with
 // live data; without it the endpoint returns 503 so the frontend can
 // render a graceful "status not available" state.
 func (h *Handler) AttachStatusProvider(sp StatusProvider) {
 	h.status = sp
 }
 
-// status serves GET /admin/api/status. Pure read-through to the
+// status serves GET /console/api/status. Pure read-through to the
 // provider — no caching, no aggregation here.
 func (h *Handler) getStatus(w http.ResponseWriter, r *http.Request) {
 	if h.status == nil {

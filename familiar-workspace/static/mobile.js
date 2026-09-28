@@ -106,6 +106,19 @@
         return mdDepsPromise;
     }
 
+    // openWikiPageBySlug follows a [[book/page]] link: the route takes a
+    // page id, a link carries a slug, so resolve it first. Routing the
+    // slug as an id opened "Page not found" with a blank body.
+    async function openWikiPageBySlug(bookSlug, pageSlug) {
+        try {
+            var p = await apiJSON('/console/api/books/' + encodeURIComponent(bookSlug) +
+                '/pages/' + encodeURIComponent(pageSlug));
+            if (p && p.id) location.hash = 'wiki/' + encodeURIComponent(bookSlug) + '/' + encodeURIComponent(p.id);
+        } catch (e) {
+            console.warn('mobile wiki: link target not found', bookSlug, pageSlug, e);
+        }
+    }
+
     function escapeHTML(s) {
         return String(s == null ? '' : s)
             .replace(/&/g, '&amp;').replace(/</g, '&lt;')
@@ -247,7 +260,15 @@
             } catch (_) { /* transient — don't log out on a network blip */ }
         }
         document.addEventListener('visibilitychange', function () {
-            if (document.hidden) return;
+            if (document.hidden) {
+                // iOS fires neither beforeunload nor pagehide when the app
+                // is switched away from, and may evict it from the
+                // background: save a pending edit now, not after the
+                // debounce that a frozen page never runs.
+                if (typeof Notes !== 'undefined' && Notes.flushIfDirty) Notes.flushIfDirty(true);
+                if (typeof Wiki !== 'undefined' && Wiki.flushIfDirty) Wiki.flushIfDirty(true);
+                return;
+            }
             probe();
             // PWA resume: SSE dropped while backgrounded and missed
             // events aren't replayed, so an open wiki page may be stale.
@@ -315,6 +336,11 @@
         // Update hash to match without re-firing hashchange.
         var want = '#' + p.tab + (p.detail ? '/' + p.detail : '');
         if (location.hash !== want) history.replaceState(null, '', want);
+
+        // The research poll belongs to the open thread: leaving it stops
+        // the poll (re-entering restarts it). It ran every 5s for the rest
+        // of the session.
+        if (screenName !== 'chat-thread') Chat.stopResearchPoll();
 
         // Wake up screen-specific data loaders.
         if      (p.tab === 'home')                { HomePins.refresh(); HomeRecent.refresh(); }
@@ -506,6 +532,7 @@
             if (state.currentId === id && state.messages.length > 0) return;
 
             state.currentId = id;
+            state.current = null;
             state.messages = [];
             var titleEl = document.getElementById('mob-thread-title');
             var scrollEl = document.getElementById('mob-thread-scroll');
@@ -514,6 +541,7 @@
             try {
                 var resp = await apiJSON('/console/api/conversations/' + encodeURIComponent(id));
                 var conv = resp && resp.conversation;
+                if (state.currentId === id) state.current = conv || null;
                 state.messages = (resp && resp.messages) || [];
                 if (titleEl) titleEl.textContent = (conv && conv.title) || 'Conversation';
                 renderThread();
@@ -596,6 +624,7 @@
         async function pollResearch() {
             var id = state.researchPollId;
             if (!id) return;
+            if (document.hidden) return; // backgrounded: skip the tick
             var run = null;
             try {
                 var resp = await apiJSON(
@@ -949,7 +978,20 @@
                     body: JSON.stringify(userMsg),
                 });
             } catch (e) {
+                // Stop here, as desktop does. Streaming anyway saved the
+                // reply with no question above it: after a reload the
+                // thread showed an answer to nothing. The text goes back
+                // in the composer for a retry.
                 console.warn('mobile chat: persist user msg failed', e);
+                state.messages.pop();
+                scroll.appendChild(messageEl({
+                    role: 'assistant',
+                    content: '\u26a0 Couldn\u2019t save your message (' + (e.message || e) + '). Nothing was sent \u2014 try again.',
+                }, renderMD));
+                scroll.scrollTop = scroll.scrollHeight;
+                var inp = document.getElementById('mob-thread-input');
+                if (inp && !inp.value) inp.value = text;
+                return;
             }
 
             // This turn belongs to the thread it was sent in, whatever the
@@ -994,6 +1036,16 @@
             aWrap.append(aWho, aReasoning, aBubble);
             scroll.appendChild(aWrap);
             scroll.scrollTop = scroll.scrollHeight;
+            // Follow the reply only while the reader is at the bottom:
+            // scrolling up to re-read (the code they pasted, an earlier
+            // answer) used to be undone by every token. Back at the
+            // bottom, it follows again.
+            var stuck = true;
+            var onThreadScroll = function () {
+                stuck = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 40;
+            };
+            scroll.addEventListener('scroll', onThreadScroll, { passive: true });
+            var follow = function () { if (stuck) scroll.scrollTop = scroll.scrollHeight; };
 
             var sendBtn = document.querySelector('.mob-thread-send');
             state.streaming = true;
@@ -1067,7 +1119,7 @@ var reader = resp.body.getReader();
                         dropThinkPx(); // real output began — hand motion to the text
                         assistantText += c;
                         aBubble.innerHTML = renderMD(assistantText);
-                        scroll.scrollTop = scroll.scrollHeight;
+                        follow();
                     } else if (kind === 'reasoning') {
                         var c2 = (payload && payload.chunk) || '';
                         if (!c2) return;
@@ -1085,7 +1137,7 @@ var reader = resp.body.getReader();
                         aReasoning.style.display = '';
                         updateReasoning(aReasoning, reasoningText, true);
                         showThinkPx(); // reasoning resumed → working
-                        scroll.scrollTop = scroll.scrollHeight;
+                        follow();
                     } else if (kind === 'status') {
                         var s = (payload && payload.message) || '';
                         if (!s) return;
@@ -1094,6 +1146,21 @@ var reader = resp.body.getReader();
                         updateReasoning(aReasoning, reasoningText, true);
                         showThinkPx(); // tool/search status → working, relight
                     } else if (kind === 'done') {
+                        // The final content is authoritative: what streamed
+                        // can include reasoning the gateway's formatter split
+                        // out afterwards. Mobile showed the raw stream (and
+                        // saved it, when it saved the reply). Mirrors chat.js.
+                        if (payload && typeof payload.content === 'string' && payload.content !== assistantText) {
+                            assistantText = payload.content;
+                            aBubble.innerHTML = renderMD(assistantText);
+                        }
+                        if (payload && typeof payload.reasoning_content === 'string' && payload.reasoning_content) {
+                            reasoningText = reasoningText.trim()
+                                ? reasoningText + '\n' + payload.reasoning_content
+                                : payload.reasoning_content;
+                            aReasoning.style.display = '';
+                            updateReasoning(aReasoning, reasoningText, false);
+                        }
                         if (payload && payload.model_id) resolvedModel = payload.model_id;
                         if (payload && payload.research_note && payload.research_note.page_slug) {
                             researchNote = payload.research_note;
@@ -1159,6 +1226,7 @@ var reader = resp.body.getReader();
                 state.streaming = false;
                 state.currentAbort = null;
                 state.currentSessionId = null;
+                scroll.removeEventListener('scroll', onThreadScroll);
                 dropThinkPx();
                 setMobStop(sendBtn, false);
                 aWrap.classList.remove('is-streaming');
@@ -1302,8 +1370,14 @@ var reader = resp.body.getReader();
             }
         }
 
+        // The open conversation's pin state comes from the conversation
+        // itself (state.current, from openThread's GET), not the list
+        // cache: that holds only the 50 newest and is empty until the Chat
+        // list is visited, so an older or deep-linked pinned chat read as
+        // unpinned and could never be unpinned here.
         function currentPinned() {
             if (!state.currentId) return false;
+            if (state.current && state.current.id === state.currentId) return !!state.current.pinned;
             var c = state.conversations.find(function (x) { return x.id === state.currentId; });
             return !!(c && c.pinned);
         }
@@ -1320,6 +1394,7 @@ var reader = resp.body.getReader();
                 });
                 var idx = state.conversations.findIndex(function (x) { return x.id === id; });
                 if (idx >= 0) state.conversations[idx] = c;
+                if (state.current && state.current.id === id) state.current = c;
                 if (window.HomePins && window.HomePins.refresh) window.HomePins.refresh();
             } catch (e) {
                 alert('Couldn\'t pin: ' + (e.message || e));
@@ -1349,6 +1424,7 @@ var reader = resp.body.getReader();
 
         return {
             refreshList: refreshList, openThread: openThread, send: send,
+            stopResearchPoll: stopResearchPoll,
             startNew: startNew, deleteCurrent: deleteCurrent,
             togglePin: togglePin, currentPinned: currentPinned, stop: stopStream,
         };
@@ -1436,7 +1512,7 @@ var reader = resp.body.getReader();
                 }
                 return;
             }
-            location.hash = 'wiki/' + encodeURIComponent(parsed.pageSlug);
+            await openWikiPageBySlug(parsed.bookSlug, parsed.pageSlug);
         }
 
         function ensureEditor() {
@@ -1645,14 +1721,14 @@ var reader = resp.body.getReader();
             }, 500);
         }
 
-        function flushSave() {
+        function flushSave(keepalive) {
             if (!state.note) return Promise.resolve();
             if (state.saving) {
                 state.pendingResave = true;
                 return state.savePromise || Promise.resolve();
             }
             if (state.saveBlocked) return Promise.resolve(); // conflict — banner decides
-            state.savePromise = doSave().finally(function () {
+            state.savePromise = doSave(keepalive).finally(function () {
                 state.savePromise = null;
                 if (state.pendingResave) {
                     state.pendingResave = false;
@@ -1662,7 +1738,7 @@ var reader = resp.body.getReader();
             return state.savePromise;
         }
 
-        async function doSave() {
+        async function doSave(keepalive) {
             state.saving = true;
             var statusEl = document.getElementById('mob-note-status');
             var savingId = state.note.id;
@@ -1681,6 +1757,8 @@ var reader = resp.body.getReader();
                     credentials: 'include',
                     headers: headers,
                     body: JSON.stringify(patch),
+                    // Lets a save started as the page goes away finish.
+                    keepalive: !!keepalive,
                 });
                 var text = await resp.text();
                 var body = null;
@@ -1889,12 +1967,25 @@ var reader = resp.body.getReader();
             }
         }
 
+        // flushIfDirty saves only a real edit. Leaving a note (Back, the
+        // page going away, the app going to the background) used to save
+        // unconditionally: a note that was only read went back as Toast
+        // UI's re-serialized markdown, a phantom edit that was broadcast
+        // and 409'd the device actually editing it. keepalive lets the
+        // request outlive the page.
+        function flushIfDirty(keepalive) {
+            if (!state.note || !isDirty()) return Promise.resolve();
+            if (state.saveTimer) { clearTimeout(state.saveTimer); state.saveTimer = null; }
+            return flushSave(keepalive);
+        }
+
         return {
             refreshList: refreshList,
             openNote: openNote,
             startNew: startNew,
             scheduleSave: scheduleSave,
             flushSave: flushSave,
+            flushIfDirty: flushIfDirty,
             deleteCurrent: deleteCurrent,
             togglePin: togglePin,
             currentPinned: currentPinned,
@@ -2028,20 +2119,10 @@ var reader = resp.body.getReader();
             }, true);
         }
 
+        // Same-book and cross-book links alike (cross-book links used to
+        // do nothing).
         async function mobileWikiNavigate(parsed) {
-            var bookSlug = parsed.bookSlug || state.currentBookSlug;
-            if (bookSlug !== state.currentBookSlug) {
-                console.warn('mobile wiki: cross-book wiki-link nav not yet wired', parsed);
-                return;
-            }
-            try {
-                var p = await apiJSON(
-                    '/console/api/books/' + encodeURIComponent(bookSlug) +
-                    '/pages/' + encodeURIComponent(parsed.pageSlug));
-                if (p && p.id) location.hash = 'wiki/' + encodeURIComponent(bookSlug) + '/' + encodeURIComponent(p.id);
-            } catch (e) {
-                console.warn('mobile wiki: link target not found', parsed, e);
-            }
+            await openWikiPageBySlug(parsed.bookSlug || state.currentBookSlug, parsed.pageSlug);
         }
 
         // Mirrors the Notes module's editor lifecycle.
@@ -2135,7 +2216,17 @@ var reader = resp.body.getReader();
                 var resp = await apiJSON('/console/api/books');
                 state.books = (resp && resp.items) || [];
             } catch (e) {
-                state.books = [];
+                // A failed fetch is not an empty list. It read "No books
+                // yet — create one", and on a bad connection people made
+                // duplicate books.
+                if (listEl) {
+                    listEl.innerHTML = '<div class="mob-empty">Couldn\'t load books: ' + escapeHTML(e.message || String(e)) +
+                        '<br><button type="button" class="mob-retry" id="mob-wiki-retry">Retry</button></div>';
+                    var retry = document.getElementById('mob-wiki-retry');
+                    if (retry) retry.addEventListener('click', function () { refresh(); });
+                }
+                if (newBtn) newBtn.disabled = true;
+                return;
             }
             renderBooksRow();
             if (state.books.length === 0) {
@@ -2291,13 +2382,19 @@ var reader = resp.body.getReader();
             // A page stuck in a conflict reloads, so reopening it is a way out.
             if (state.page && state.page.id === pageId && !state.saveBlocked) return;
 
-            if (wantBook && wantBook !== state.currentBookSlug) {
-                if (!state.books.length) { await refresh(); }
+            // Select the page's book. A book missing from the cached list
+            // (joined since the list loaded) means the list is stale:
+            // reload it and try again. Only an empty list was refreshed,
+            // so a pin into a newly shared book opened "Page not found".
+            var selectWantBook = async function () {
+                if (!wantBook || wantBook === state.currentBookSlug) return;
+                if (!state.books.find(function (b) { return b.slug === wantBook; })) await refresh();
                 if (state.books.find(function (b) { return b.slug === wantBook; })) {
                     state.currentBookSlug = wantBook;
                     await loadPagesForCurrentBook();
                 }
-            }
+            };
+            await selectWantBook();
 
             // Flush a pending save from the previously-open page, and wait
             // out one in flight (resolving after the switch it repointed
@@ -2322,6 +2419,7 @@ var reader = resp.body.getReader();
             var rec = state.pages.find(function (p) { return p.id === pageId; });
             if (!rec) {
                 await refresh();
+                await selectWantBook();
                 rec = state.pages.find(function (p) { return p.id === pageId; });
                 if (!rec) {
                     var titleEl = document.getElementById('mob-wiki-page-title');
@@ -2692,9 +2790,12 @@ var reader = resp.body.getReader();
         // broadcast, 409'ing the OTHER device. keepalive lets the
         // request outlive the page.
         function flushOnUnload() {
-            if (!isDirty()) return;
+            flushIfDirty(true);
+        }
+        function flushIfDirty(keepalive) {
+            if (!state.page || !isDirty()) return Promise.resolve();
             if (state.saveTimer) { clearTimeout(state.saveTimer); state.saveTimer = null; }
-            flushSave(/*keepalive=*/true);
+            return flushSave(keepalive);
         }
 
         return {
@@ -2702,6 +2803,7 @@ var reader = resp.body.getReader();
             openPage: openPage,
             scheduleSave: scheduleSave,
             flushSave: flushSave,
+            flushIfDirty: flushIfDirty,
             newBook: newBook,
             newPage: newPage,
             archiveBook: archiveBook,
@@ -3659,8 +3761,8 @@ var reader = resp.body.getReader();
             if      (action === 'new-note')           { Notes.startNew(); }
             else if (action === 'new-chat')           { Chat.startNew(); }
             else if (action === 'back-to-chat-list')  { location.hash = 'chat'; }
-            else if (action === 'back-to-notes-list') { Notes.flushSave(); location.hash = 'notes'; }
-            else if (action === 'back-to-wiki-list')  { Wiki.flushSave(); location.hash = 'wiki'; }
+            else if (action === 'back-to-notes-list') { Notes.flushIfDirty(); location.hash = 'notes'; }
+            else if (action === 'back-to-wiki-list')  { Wiki.flushIfDirty(); location.hash = 'wiki'; }
             else if (action === 'back-to-home')       { location.hash = 'home'; }
             else if (action === 'back-to-memory')     { location.hash = 'memory'; }
             else if (action === 'new-wiki-book')      {
@@ -3798,8 +3900,8 @@ var reader = resp.body.getReader();
 
         // Flush pending saves on tab/page switch so a backgrounded
         // tab doesn't lose the last few keystrokes.
-        window.addEventListener('pagehide', function () { Notes.flushSave(); Wiki.flushOnUnload(); });
-        window.addEventListener('beforeunload', function () { Notes.flushSave(); Wiki.flushOnUnload(); });
+        window.addEventListener('pagehide', function () { Notes.flushIfDirty(true); Wiki.flushIfDirty(true); });
+        window.addEventListener('beforeunload', function () { Notes.flushIfDirty(true); Wiki.flushIfDirty(true); });
 
         // Notes-list refresh on tool-effect signal. Chat dispatches
         // familiar:notesChanged when an assistant turn writes a note
@@ -3837,18 +3939,51 @@ var reader = resp.body.getReader();
             window.familiarPageEvents = es;
         })();
 
+        // Overflow menus announce their state: aria-expanded follows the
+        // menu's is-open class however it changes (toggle, outside tap,
+        // an item's action).
+        document.querySelectorAll('.mob-overflow').forEach(function (host) {
+            var toggle = host.querySelector('[data-action="toggle-overflow"]');
+            if (!toggle) return;
+            new MutationObserver(function () {
+                toggle.setAttribute('aria-expanded', host.classList.contains('is-open') ? 'true' : 'false');
+            }).observe(host, { attributes: true, attributeFilter: ['class'] });
+        });
+
         var threadForm = document.getElementById('mob-thread-form');
         if (threadForm) {
+            var sendBtn = threadForm.querySelector('.mob-thread-send');
+            var threadInput = document.getElementById('mob-thread-input');
+            var fitInput = function () {
+                threadInput.style.height = 'auto';
+                threadInput.style.height = Math.min(threadInput.scrollHeight, 160) + 'px';
+            };
+            // While generating, the Send button is a Stop, and only a tap
+            // on it stops. The keyboard's Return submitted the same form,
+            // so typing a follow-up and hitting Return cut the answer off.
+            if (sendBtn) {
+                sendBtn.addEventListener('click', function (ev) {
+                    if (!sendBtn.classList.contains('is-stop')) return;
+                    ev.preventDefault();
+                    Chat.stop();
+                });
+            }
             threadForm.addEventListener('submit', function (ev) {
                 ev.preventDefault();
-                // While generating the Send button is a Stop — tap aborts.
-                var btn = threadForm.querySelector('.mob-thread-send');
-                if (btn && btn.classList.contains('is-stop')) { Chat.stop(); return; }
-                var inp = document.getElementById('mob-thread-input');
-                var v = inp.value;
-                inp.value = '';
+                if (sendBtn && sendBtn.classList.contains('is-stop')) return; // a reply is streaming
+                var v = threadInput.value;
+                threadInput.value = '';
+                fitInput();
                 Chat.send(v);
             });
+            // Return sends, Shift+Return is a newline (and a Return that
+            // commits an IME composition does neither).
+            threadInput.addEventListener('keydown', function (ev) {
+                if (ev.key !== 'Enter' || ev.shiftKey || ev.isComposing) return;
+                ev.preventDefault();
+                threadForm.requestSubmit();
+            });
+            threadInput.addEventListener('input', fitInput);
         }
 
         window.addEventListener('hashchange', function () { activate(readHashRoute()); });
@@ -4187,11 +4322,29 @@ var reader = resp.body.getReader();
             });
         }
 
+        var lastPrincipalKey = '';
+        function principalKey(sess) {
+            if (!sess || !sess.authenticated) return '';
+            return sess.principal_type === 'shard' ? 's:' + (sess.shard_id || '') : 'u:' + (sess.user || '');
+        }
+
         async function boot() {
             showView('loading');
             try {
                 var status = await apiJSON('/console/api/auth/status');
                 if (status && status.authenticated) {
+                    // Someone else signed in on the session-expired
+                    // overlay: start clean. The previous user's open note,
+                    // thread and lists stayed on screen (and edits went to
+                    // their ids). Same principal: carry on where they were.
+                    // (Tracked here, not read off FAMILIAR_SESSION: the
+                    // lapse that shows the overlay clears that.)
+                    var nextKey = principalKey(status);
+                    if (lastPrincipalKey && lastPrincipalKey !== nextKey) {
+                        location.reload();
+                        return;
+                    }
+                    lastPrincipalKey = nextKey;
                     window.FAMILIAR_SESSION = status;
                     // SHARD-AUTH-SPEC: stamp body so CSS hide rules
                     // mirror desktop. Mobile is read-mostly so we

@@ -57,14 +57,6 @@
         const mon = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
         return mon[dt.getMonth()] + " " + String(dt.getDate()).padStart(2, "0");
     }
-    function updateStatusBar(content) {
-        const sb = window.familiarStatusBar;
-        if (!sb || !sb.setContext) return;
-        const text = (content || "").trim();
-        const words = text === "" ? 0 : text.split(/\s+/).length;
-        sb.setContext(words + " word" + (words === 1 ? "" : "s"));
-    }
-
     // ── Markdown pipeline (read-only research view) ───────────────
     //
     // The normal editable page uses Toast UI. The transient
@@ -126,7 +118,6 @@
     }
 
     function render(host, tab) {
-        updateStatusBar("");
         // Mark every OTHER shell as background — render() is the
         // workspace's signal that `tab` is the active wiki tab in
         // its panel, so any sibling wiki shell that was foreground
@@ -762,7 +753,6 @@
 
             tuiEditor.on("change", () => {
                 if (localState.suppressSave) return;
-                updateStatusBar(tuiEditor.getMarkdown());
                 scheduleSave();
             });
             // Cmd/Ctrl+S anywhere inside the editor flushes the
@@ -1017,7 +1007,6 @@
                         localState.suppressSave = false;
                     }
                 }
-                updateStatusBar(keepLocal ? currentContent() : (p.content || ""));
                 renderPageList();
                 updateShareIndicator();
                 // Page-links footer (outbound + backlinks) disabled
@@ -1868,7 +1857,6 @@
             if (window.FamiliarWorkspace && window.FamiliarWorkspace.updateTabTitle) {
                 window.FamiliarWorkspace.updateTabTitle(tab.id, fresh.title || "Untitled");
             }
-            updateStatusBar(fresh.content || "");
             // Refresh the row in the index too — its updated_at /
             // title may have moved.
             const idx = localState.pages.findIndex((x) => x.id === fresh.id);
@@ -2366,12 +2354,14 @@
         const idInp = document.getElementById("wiki-members-add-id");
         if (idInp) idInp.value = "";
         modal.hidden = false;
+        if (window.familiarDialog) window.familiarDialog.show(modal, closeMembersModal);
         await reloadMembers();
     }
 
     function closeMembersModal() {
         const modal = document.getElementById("wiki-members-modal");
         if (modal) modal.hidden = true;
+        if (modal && window.familiarDialog) window.familiarDialog.hide(modal);
         modalCtx = null;
         showModalError(null);
     }

@@ -426,11 +426,6 @@ to `--sun`, hardcodes several state colors as hex, and loads **no web fonts**
 Reality the code carries that a future cleanup should resolve (these are *bugs /
 drift*, documented so the doc stays honest):
 
-- **Undefined radius aliases render square.** `--radius-card`, `--radius-input`,
-  and `--radius-popover` are referenced (skill/dash cards, several inputs) but never
-  defined and have no `var()` fallback → they resolve to `0`. Those elements have
-  sharp corners despite the "soft radii" intent. Define them (≈ 6 / 6 / 14px) or
-  replace with the real scale.
 - **Dead serif.** `--font-serif` (Instrument Serif) is defined and the italic
   weight is still downloaded via Google Fonts, but nothing renders it. Drop the
   token, the font request, and the two stale "serif display" comments.

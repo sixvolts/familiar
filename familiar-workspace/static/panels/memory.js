@@ -528,6 +528,7 @@
         document.getElementById("detail-versions").innerHTML = '<span class="micro">LOADING…</span>';
         document.getElementById("detail-triples").innerHTML = '<span class="micro">LOADING…</span>';
         panel.hidden = false;
+        if (window.familiarDialog) window.familiarDialog.show(panel, closeDetail);
         try {
             const row = await apiJSON("/console/api/memories/" + encodeURIComponent(id));
             memState.currentRow = row;
@@ -766,6 +767,7 @@
 
     function closeDetail() {
         document.getElementById("memory-detail").hidden = true;
+        if (window.familiarDialog) window.familiarDialog.hide(document.getElementById("memory-detail"));
         memState.currentID = null;
         memState.currentRow = null;
         memState.editing = false;

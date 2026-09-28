@@ -27,6 +27,69 @@
     }
     apply(get());
     window.familiarZoom = { get: get, set: set, LEVELS: LEVELS };
+    // familiarPageZoom is the zoom in effect: code that positions an
+    // element from pointer or viewport coordinates divides by it.
+    window.familiarPageZoom = function () {
+        return parseFloat(getComputedStyle(document.documentElement).zoom) || 1;
+    };
+})();
+
+// ── Dialogs ──────────────────────────────────────────────────────
+// familiarDialog gives an overlay (detail flyouts, modals) dialog
+// behaviour: role=dialog + aria-modal, focus moves in when it opens and
+// back where it was when it closes, Tab stays inside, Escape closes
+// through the overlay's own close function. The overlays were plain
+// divs: focus stayed on the page behind them, Tab walked through hidden
+// content, and Escape didn't close the modals.
+window.familiarDialog = (function () {
+    var state = new Map(); // el -> { returnTo, onKey }
+    var FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), ' +
+        'select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    function focusables(el) {
+        return Array.prototype.filter.call(el.querySelectorAll(FOCUSABLE), function (n) {
+            return !n.closest("[hidden]") && n.getClientRects().length > 0;
+        });
+    }
+    function show(el, close) {
+        if (!el) return;
+        el.setAttribute("role", "dialog");
+        el.setAttribute("aria-modal", "true");
+        if (!el.hasAttribute("aria-labelledby")) {
+            var h = el.querySelector("h1, h2, h3");
+            if (h) {
+                if (!h.id) h.id = el.id + "-title";
+                el.setAttribute("aria-labelledby", h.id);
+            }
+        }
+        if (state.has(el)) return; // already open: leave focus where it is
+        var onKey = function (e) {
+            if (e.key === "Escape") {
+                e.preventDefault();
+                e.stopPropagation();
+                close();
+                return;
+            }
+            if (e.key !== "Tab") return;
+            var f = focusables(el);
+            if (!f.length) return;
+            var first = f[0], last = f[f.length - 1];
+            if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+            else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+        };
+        el.addEventListener("keydown", onKey);
+        state.set(el, { returnTo: document.activeElement, onKey: onKey });
+        var f = focusables(el);
+        if (f.length) f[0].focus();
+        else { el.tabIndex = -1; el.focus(); }
+    }
+    function hide(el) {
+        var st = el && state.get(el);
+        if (!st) return;
+        el.removeEventListener("keydown", st.onKey);
+        state.delete(el);
+        if (st.returnTo && document.contains(st.returnTo) && st.returnTo.focus) st.returnTo.focus();
+    }
+    return { show: show, hide: hide };
 })();
 // Registration and login ceremonies follow the standard two-step
 // begin/finish pattern. The server stashes SessionData in memory keyed
@@ -135,14 +198,18 @@
         }
         if (resp.status === 401) {
             handleUnauthorized();
-            throw new Error("Your session expired. Please sign in again.");
+            const err = new Error("Your session expired. Please sign in again.");
+            err.status = 401;
+            throw err;
         }
         const text = await resp.text();
         let body = null;
         try { body = text ? JSON.parse(text) : null; } catch (e) { /* ignore */ }
         if (!resp.ok) {
             const msg = (body && body.error) || ("HTTP " + resp.status);
-            throw new Error(msg);
+            const err = new Error(msg);
+            err.status = resp.status;
+            throw err;
         }
         return body;
     }
@@ -155,40 +222,14 @@
         if (!container) return;
         const el = document.createElement("div");
         el.className = "toast toast-" + type;
+        // Errors interrupt (announced at once); others wait politely.
+        if (type === "error") el.setAttribute("role", "alert");
         el.textContent = message;
         container.appendChild(el);
         setTimeout(() => {
             el.classList.add("toast-out");
             setTimeout(() => el.remove(), 220);
         }, 3000);
-    }
-
-    // ── Loading overlay helper ─────────────────────────────────────
-
-    function withLoading(targetEl, fn) {
-        return async function () {
-            if (!targetEl) return fn.apply(this, arguments);
-            targetEl.classList.add("is-loading");
-            const overlay = document.createElement("div");
-            overlay.className = "loading-overlay";
-            // Brand F-mark loader (static F + pulsing yellow dot),
-            // same markup as the boot screen. SVG namespace so the
-            // path/circle render — createElement("svg") would build
-            // an inert HTML element.
-            overlay.innerHTML =
-                '<svg class="fmark-loader" viewBox="78 56 96 110" aria-hidden="true">' +
-                '<g transform="translate(-82 0)">' +
-                '<path d="M 165.41 64.56 L 244.48 64.56 L 233.02 79.97 L 180.48 79.97 L 180.48 100.21 L 218.40 100.21 L 206.94 115.63 L 181.04 115.63 L 181.04 154.56 L 165.41 154.56 Z" fill="var(--accent, #6A4CE0)"/>' +
-                '<circle class="fmark-loader-dot" cx="198.69" cy="146.74" r="7.817" fill="#E8BE55"/>' +
-                '</g></svg>';
-            targetEl.appendChild(overlay);
-            try {
-                return await fn.apply(this, arguments);
-            } finally {
-                overlay.remove();
-                targetEl.classList.remove("is-loading");
-            }
-        };
     }
 
     // ── View switching ──────────────────────────────────────────
@@ -351,16 +392,24 @@
     function applyMaintenanceBanner(m) {
         const host = document.getElementById("maintenance-banner-host");
         if (!host) return;
-        if (!m || !m.active) {
+        // A silent failover (the chat model's chain moved to a backup)
+        // arrives as active:false, reason:"failover". It was dropped
+        // here, so users got a different, often slower model with no
+        // word of it.
+        const failover = !!(m && !m.active && m.reason === "failover");
+        if (!m || (!m.active && !failover)) {
             if (host.dataset.msg) { host.innerHTML = ""; host.dataset.msg = ""; }
             return;
         }
-        const msg = m.message || ("Maintenance mode — using " + (m.model || "a fallback model"));
+        const msg = failover
+            ? "The main model is unavailable — " + (m.model || "a backup model") + " is answering for now."
+            : (m.message || ("Maintenance mode — using " + (m.model || "a fallback model")));
         if (host.dataset.msg === msg) return;
         host.dataset.msg = msg;
         host.innerHTML = "";
         const banner = document.createElement("div");
         banner.className = "maintenance-banner";
+        banner.setAttribute("role", "status");
         const icon = document.createElement("span");
         icon.className = "maintenance-banner-icon";
         icon.textContent = "⚠";
@@ -414,6 +463,7 @@
         document.body.dataset.principalType = principalType;
         applyPermissionEnvelope(perms);
         window.FAMILIAR_SESSION = session || {};
+        openPageEvents();
         if (window.FamiliarWorkspace && window.FamiliarWorkspace.bindPrincipal) {
             window.FamiliarWorkspace.bindPrincipal(familiarPrincipalKey(session));
         }
@@ -460,8 +510,7 @@
         }
 
         // Title bar removed; sidebar header now owns the F-mark
-        // and search affordance. The view-shell grid collapsed
-        // to two rows — sidebar/content + statusbar.
+        // and search affordance.
 
         show("dashboard");
         wireSidebar();
@@ -553,17 +602,6 @@
     function wireSidebar() {
         if (sidebarWired) return;
         sidebarWired = true;
-        for (const link of document.querySelectorAll(".nav-item")) {
-            link.addEventListener("click", (e) => {
-                // Primary surfaces (data-surface=*) are handled by
-                // workspace.js's capture-phase listener. Skip them
-                // here so we don't double-handle.
-                if (link.dataset.surface) return;
-                e.preventDefault();
-                const target = link.dataset.panel;
-                if (target) switchPanel(target);
-            });
-        }
 
         // Shard sessions: intercept the sidebar profile click on a
         // higher-priority capture-phase listener so workspace.js
@@ -611,8 +649,9 @@
         // Anchor above the sidebar row so it doesn't get clipped by
         // the sidebar's overflow.
         const r = anchor.getBoundingClientRect();
-        pop.style.left = (r.left + 8) + "px";
-        pop.style.bottom = (window.innerHeight - r.top + 4) + "px";
+        const z = window.familiarPageZoom ? window.familiarPageZoom() : 1; // see showSidebarContextMenu
+        pop.style.left = (r.left + 8) / z + "px";
+        pop.style.bottom = (window.innerHeight - r.top + 4) / z + "px";
 
         // Dismiss on outside click / Esc. Use capture for the click
         // so any in-popover button click runs first and the listener
@@ -659,14 +698,21 @@
         for (const p of document.querySelectorAll(".content > .panel")) {
             p.hidden = p.id !== ("panel-" + name);
         }
-        for (const link of document.querySelectorAll(".nav-item")) {
-            link.classList.toggle("is-active", link.dataset.panel === name);
-        }
         currentPanel = name;
+        // The sidebar highlight follows the panel however it was
+        // reached (Home cards, pins, child rows); it used to change only
+        // on a click in the sidebar itself.
+        if (window.FamiliarWorkspace && window.FamiliarWorkspace.markPanel) {
+            window.FamiliarWorkspace.markPanel(name);
+        }
         if (!panelLoaded[name]) {
             panelLoaded[name] = true;
             const loader = panelLoaders[name];
             if (loader) loader();
+        } else if (name === "home") {
+            // Home is live content (Recent, pins, weather, greeting):
+            // refresh it on every visit, not just the first.
+            loadHome();
         }
         // The dashboard is a personal surface: normal navigation
         // always lands on your own. The Users-panel jump re-enters
@@ -870,10 +916,19 @@
     // beyond letting the browser do its thing. Shard sessions skip
     // SSE entirely (they don't run editors and a shard session
     // shouldn't be holding a long-lived auth channel anyway).
-    (function wirePageEventsSSE() {
+    // Page-event stream: live refresh for notes, wiki and the sidebar.
+    // Opened once the session is known (renderDashboard). Opened at
+    // script load it met a 401 whenever the page loaded signed out, and
+    // an EventSource gives up for good on any non-200 answer, a 502
+    // while the gateway restarts included: the tab never live-refreshed
+    // again. Shard sessions don't get it (the route is owner-only).
+    let pageEvents = null;
+    let pageEventsRetryMs = 1000;
+    function openPageEvents() {
         const sess = window.FAMILIAR_SESSION || {};
-        if (sess.principal_type === "shard") return;
+        if (!sess.authenticated || sess.principal_type === "shard") return;
         if (typeof EventSource !== "function") return; // ancient browser
+        if (pageEvents && pageEvents.readyState !== EventSource.CLOSED) return;
         let es;
         try {
             es = new EventSource("/console/api/events/pages", { withCredentials: true });
@@ -881,6 +936,7 @@
             console.warn("page events: EventSource failed:", e);
             return;
         }
+        pageEvents = es;
         const dispatch = (raw, kind) => {
             try {
                 const data = JSON.parse(raw);
@@ -889,32 +945,21 @@
                 }));
             } catch (e) { /* malformed event — ignore */ }
         };
+        es.addEventListener("open", () => { pageEventsRetryMs = 1000; });
         es.addEventListener("page-saved", (ev) => dispatch(ev.data, "page-saved"));
         es.addEventListener("page-deleted", (ev) => dispatch(ev.data, "page-deleted"));
         es.addEventListener("error", () => {
-            // EventSource will auto-reconnect; don't log on every
-            // hiccup or the console drowns in noise during sleep/wake.
+            // A dropped connection reconnects by itself (CONNECTING); a
+            // refused one is CLOSED for good, so open a new one, backing
+            // off. Signed out, stop: renderDashboard reopens it.
+            if (es.readyState !== EventSource.CLOSED) return;
+            const dash = document.getElementById("view-dashboard");
+            if (!dash || dash.hidden) return;
+            setTimeout(openPageEvents, pageEventsRetryMs);
+            pageEventsRetryMs = Math.min(pageEventsRetryMs * 2, 60000);
         });
-        // Keep a handle for debug + so future code can re-open after
-        // logout. Read-only.
         window.familiarPageEvents = es;
-    })();
-
-    // Status bar context setter (DESIGN.md). Surface
-    // modules call this with their per-category context string
-    // when they become the active tab. The right cluster of the
-    // status bar reflects the active document kind:
-    //   Notes   → "N words · N backlinks"
-    //   Wiki    → "N linked pages · reviewed YYYY-MM-DD"
-    //   Chat    → "model · ctx N/N"
-    //   Shards  → "last run · status"
-    // Empty string clears the slot.
-    window.familiarStatusBar = {
-        setContext(text) {
-            const el = document.getElementById("statusbar-context");
-            if (el) el.textContent = text || "";
-        },
-    };
+    }
 
     // ── Dashboard (FAMILIAR-DASHBOARD-SPEC Phase G) ─────────────
     //
@@ -940,7 +985,7 @@
     // scope-change guard.)
     window.addEventListener("familiar:memoryChanged", () => {
         if (!dashState.initialized) return;
-        if (currentPanel === "dashboard") {
+        if (activeSection() === "dashboard") {
             loadDashboard();
         } else {
             dashState.dirty = true;
@@ -998,8 +1043,14 @@
     // loadDashboard fetches every card's data in parallel and renders
     // them independently. Each render is fault-tolerant: a single
     // endpoint's failure does not prevent the rest from rendering.
+    let dashLoadGen = 0;
     async function loadDashboard() {
         setError("dash-global-error", null);
+        // Only the newest load renders. Switching whose dashboard is
+        // shown starts a new load while the previous one is in flight,
+        // and a card used to render whichever response landed last: an
+        // admin's own facts under "Viewing dashboard of alice".
+        const gen = ++dashLoadGen;
 
         const calls = [
             ["overview",          "/console/api/dashboard/overview",          renderHero],
@@ -1019,7 +1070,7 @@
             const p = seen.has(url) ? seen.get(url) : apiJSON(url);
             seen.set(url, p);
             return p.then(
-                (data) => render(data),
+                (data) => { if (gen === dashLoadGen) render(data); },
                 (err) => console.warn("dashboard " + key + ": " + err.message),
             );
         });
@@ -1393,6 +1444,14 @@
         }
     }
 
+    // activeSection is the panel actually on screen: a section opened
+    // from the user sub-nav lives inside panel-user, so currentPanel
+    // alone says "user" for all of them (System status's 30s refresh and
+    // the "/" memory-search shortcut checked currentPanel and never ran).
+    function activeSection() {
+        return currentPanel === "user" ? lastUserSection : currentPanel;
+    }
+
     function switchUserSection(name) {
         lastUserSection = name;
         const host = document.getElementById("user-content-host");
@@ -1446,6 +1505,9 @@
             panelLoaded[loaderKey] = true;
             const fn = panelLoaders[loaderKey];
             if (fn) fn();
+        } else if (name === "system-status") {
+            // Status is live: show the current snapshot on every visit.
+            loadSystemStatus();
         }
 
         // The personal Memory/Graph sections are always self-scoped
@@ -1619,34 +1681,36 @@
         if (!list) return;
         list.innerHTML = "";
 
-        // Pull a unified recent feed from the existing dashboard
-        // endpoints. Two streams: recent_writes (notes/memories
-        // saved recently) + recent_sessions (chat conversations).
-        // Merge by timestamp, render up to 12 rows.
-        let writes = [];
-        let sessions = [];
+        // Recent is documents you can open: conversations and notes,
+        // newest first, each opening itself. It used to be memory-fact
+        // snippets and raw session ids, and a click on any row created a
+        // new, empty note or chat.
+        let convs = [];
+        let notes = [];
         try {
-            const resp = await apiJSON("/console/api/dashboard/recent_writes?limit=8");
-            writes = (resp && resp.items) || [];
-        } catch (e) { /* skill or endpoint not available — soft-fail */ }
+            const resp = await apiJSON("/console/api/conversations?limit=12");
+            convs = (resp && resp.items) || [];
+        } catch (e) { /* chat unavailable — Home keeps rendering with what it has */ }
         try {
-            const resp = await apiJSON("/console/api/dashboard/recent_sessions?limit=8");
-            sessions = (resp && resp.items) || [];
-        } catch (e) { /* same — Home keeps rendering with what it has */ }
+            const resp = await apiJSON("/console/api/books/personal/pages");
+            notes = (resp && resp.items) || [];
+        } catch (e) { /* same */ }
 
         const rows = [];
-        for (const w of writes) {
-            rows.push({
-                kind: "note",
-                title: w.snippet || w.source_type || "memory",
-                ts: new Date(w.created_at).getTime() || 0,
-            });
-        }
-        for (const s of sessions) {
+        for (const c of convs) {
             rows.push({
                 kind: "chat",
-                title: s.channel_id || s.id || "session",
-                ts: new Date(s.last_active).getTime() || 0,
+                id: c.id,
+                title: c.title || "Untitled chat",
+                ts: new Date(c.updated_at).getTime() || 0,
+            });
+        }
+        for (const p of notes) {
+            rows.push({
+                kind: "note",
+                id: p.id,
+                title: p.title || "Untitled",
+                ts: new Date(p.updated_at).getTime() || 0,
             });
         }
         rows.sort((a, b) => b.ts - a.ts);
@@ -1661,16 +1725,21 @@
         }
         for (const r of top) {
             const li = document.createElement("li");
-            li.className = "home-rec-item";
-            li.innerHTML = homeKindIcon(r.kind);
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "home-rec-item";
+            btn.dataset.kind = r.kind;
+            btn.dataset.id = r.id;
+            btn.innerHTML = homeKindIcon(r.kind);
             const title = document.createElement("span");
             title.className = "home-rec-title";
             title.textContent = r.title;
             const ago = document.createElement("span");
             ago.className = "home-rec-ago";
             ago.textContent = agoOrDateLocal(r.ts);
-            li.append(title, ago);
-            li.addEventListener("click", () => openNewDoc(r.kind === "chat" ? "chat" : "notes"));
+            btn.append(title, ago);
+            btn.addEventListener("click", () => openPin({ kind: r.kind, id: r.id, title: r.title }));
+            li.appendChild(btn);
             list.appendChild(li);
         }
     }
@@ -1940,7 +2009,7 @@
         loadSystemStatus();
         if (dashTimer) clearInterval(dashTimer);
         dashTimer = setInterval(() => {
-            if (currentPanel === "system-status") loadSystemStatus();
+            if (activeSection() === "system-status" && !document.hidden) loadSystemStatus();
         }, DASH_REFRESH_MS);
     }
 
@@ -1976,6 +2045,7 @@
         sessEl.appendChild(document.createTextNode(fmtInt(sessCount)));
 
         renderModelsTable(data.models || []);
+        renderRolesTable(data.roles || []);
         renderSkills(data.skills || []);
         renderMaintenanceControl(data.models || []);
     }
@@ -2098,6 +2168,50 @@
         }
     }
 
+    // renderRolesTable shows each model role's failover chain: which
+    // candidate is serving, at which tier, and whether it's degraded
+    // (running on a backup). The snapshot carried this; nothing drew it.
+    function renderRolesTable(roles) {
+        const tbody = document.getElementById("dash-roles-rows");
+        if (!tbody) return;
+        tbody.innerHTML = "";
+        if (!roles.length) {
+            const tr = document.createElement("tr");
+            tr.className = "row-empty";
+            const td = document.createElement("td");
+            td.colSpan = 3;
+            td.textContent = "NO ROLES";
+            tr.appendChild(td);
+            tbody.appendChild(tr);
+            return;
+        }
+        for (const r of roles) {
+            const tr = document.createElement("tr");
+            if (r.degraded) tr.classList.add("is-degraded");
+            const cRole = document.createElement("td");
+            cRole.className = "col-content";
+            cRole.textContent = r.role || "—";
+            const cActive = document.createElement("td");
+            const dot = document.createElement("span");
+            dot.className = "health-dot " + (r.degraded ? "warning" : r.active_id ? "healthy" : "critical");
+            cActive.appendChild(dot);
+            cActive.append((r.active_id || "none") + (r.active_id ? " (tier " + r.active_tier + ")" : ""));
+            if (r.degraded) {
+                const pill = document.createElement("span");
+                pill.className = "status-pill warning";
+                pill.textContent = "BACKUP";
+                cActive.appendChild(pill);
+            }
+            const cChain = document.createElement("td");
+            cChain.className = "col-created";
+            cChain.textContent = (r.candidates || [])
+                .map((c) => c.model_id + " (" + (c.status || "unknown") + ")")
+                .join(" → ") || "—";
+            tr.append(cRole, cActive, cChain);
+            tbody.appendChild(tr);
+        }
+    }
+
     function renderSkills(skills) {
         const host = document.getElementById("dash-skills");
         host.innerHTML = "";
@@ -2148,9 +2262,19 @@
     async function initUsersBrowser() {
         if (usersState.initialized) return;
         // Probe the endpoint; 503 means user management isn't wired.
+        // Anything else (a gateway blip) shows the error and lets the
+        // next visit or the Retry button try again; it used to leave
+        // the panel blank until a page reload.
+        const loadErr = document.getElementById("users-load-error");
+        if (loadErr) loadErr.hidden = true;
         try {
             await apiJSON("/console/api/users");
         } catch (e) {
+            panelLoaded.users = false;
+            if (e.status !== 503 && loadErr) {
+                document.getElementById("users-load-error-msg").textContent = "Couldn't load users: " + e.message;
+                loadErr.hidden = false;
+            }
             return;
         }
         usersState.initialized = true;
@@ -2466,9 +2590,13 @@
         usersState.currentID = id;
         try {
             const u = await apiJSON("/console/api/users/" + encodeURIComponent(id));
+            // Clicking row A then row B: A's response can land last.
+            // Show only the most recent click's user.
+            if (usersState.currentID !== id) return;
             usersState.currentUser = u;
             renderUserDetail(u);
             document.getElementById("user-detail").hidden = false;
+            window.familiarDialog.show(document.getElementById("user-detail"), closeUserDetail);
             // Reset the enrollment-link surface from a prior open.
             const result = document.getElementById("user-enroll-result");
             if (result) result.hidden = true;
@@ -2546,6 +2674,7 @@
 
     function closeUserDetail() {
         document.getElementById("user-detail").hidden = true;
+        window.familiarDialog.hide(document.getElementById("user-detail"));
         usersState.currentID = null;
         usersState.currentUser = null;
         setError("user-detail-error", null);
@@ -2597,13 +2726,22 @@
         }
     }
 
+    // shownUserID is the user the flyout is showing: every action in
+    // it targets that user. It used to use the id of the latest click,
+    // which can differ while that click's fetch is in flight, so an
+    // admin could disable, link or mint an enrollment link for someone
+    // other than the user on screen.
+    function shownUserID() {
+        return (usersState.currentUser && usersState.currentUser.id) || null;
+    }
+
     async function adminGenerateEnrollmentLink() {
         const sel = document.getElementById("user-enroll-rp");
         const result = document.getElementById("user-enroll-result");
         const msg = document.getElementById("user-enroll-msg");
         const urlInput = document.getElementById("user-enroll-url");
         if (!sel || !result || !msg || !urlInput) return;
-        if (!usersState.currentID) {
+        if (!shownUserID()) {
             msg.textContent = "No user selected.";
             result.hidden = false;
             return;
@@ -2632,7 +2770,7 @@
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    canonical_id: usersState.currentID,
+                    canonical_id: shownUserID(),
                     target_rp_id: rpid,
                 }),
             });
@@ -2649,7 +2787,7 @@
             const hoursLeft = Math.max(0, Math.round((new Date(resp.expires_at) - Date.now()) / 3600000));
             const validFor = hoursLeft >= 1 ? hoursLeft + "h" : "<1h";
             msg.textContent = (copied ? "Copied — " : "") +
-                "share with " + usersState.currentID + " (valid " + validFor + "):";
+                "share with " + shownUserID() + " (valid " + validFor + "):";
         } catch (e) {
             msg.textContent = "Couldn't generate link: " + (e.message || e);
         }
@@ -2661,12 +2799,12 @@
         const result = document.getElementById("user-enroll-result");
         const msg = document.getElementById("user-enroll-msg");
         const urlInput = document.getElementById("user-enroll-url");
-        if (!usersState.currentID || !result || !msg) return;
-        if (!confirm("Revoke every unused enrollment link for " + usersState.currentID + "?")) return;
+        if (!shownUserID() || !result || !msg) return;
+        if (!confirm("Revoke every unused enrollment link for " + shownUserID() + "?")) return;
         result.hidden = false;
         if (urlInput) urlInput.value = "";
         try {
-            const resp = await apiJSON("/console/api/users/" + encodeURIComponent(usersState.currentID) + "/enrollment-tokens", {
+            const resp = await apiJSON("/console/api/users/" + encodeURIComponent(shownUserID()) + "/enrollment-tokens", {
                 method: "DELETE",
             });
             const n = resp.revoked || 0;
@@ -2677,18 +2815,19 @@
     }
 
     async function setUserStatus(status) {
-        if (!usersState.currentID) return;
-        if (status === "denied" && !confirm("Deny this access request? This tombstones the user — repeat DMs won't re-open it.")) return;
-        if (status === "disabled" && !confirm("Disable this user? They'll lose access on all platforms immediately.")) return;
+        if (!shownUserID()) return;
+        const who = (usersState.currentUser && (usersState.currentUser.display_name || usersState.currentUser.id)) || shownUserID();
+        if (status === "denied" && !confirm("Deny " + who + "'s access request? This tombstones the user — repeat DMs won't re-open it.")) return;
+        if (status === "disabled" && !confirm("Disable " + who + "? They'll lose access on all platforms immediately.")) return;
         setError("user-detail-error", null);
         try {
-            await apiJSON("/console/api/users/" + encodeURIComponent(usersState.currentID) + "/status", {
+            await apiJSON("/console/api/users/" + encodeURIComponent(shownUserID()) + "/status", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ status }),
             });
             toast("USER " + status.toUpperCase(), "success");
-            await openUserDetail(usersState.currentID);
+            await openUserDetail(shownUserID());
             loadUsers();
         } catch (e) {
             setError("user-detail-error", e);
@@ -2698,14 +2837,14 @@
 
     async function submitLink(e) {
         e.preventDefault();
-        if (!usersState.currentID) return;
+        if (!shownUserID()) return;
         const platform = document.getElementById("link-platform").value;
         const platformID = document.getElementById("link-platform-id").value.trim();
         const displayName = document.getElementById("link-display-name").value.trim();
         if (!platformID) return;
         setError("user-detail-error", null);
         try {
-            await apiJSON("/console/api/users/" + encodeURIComponent(usersState.currentID) + "/identities", {
+            await apiJSON("/console/api/users/" + encodeURIComponent(shownUserID()) + "/identities", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -2717,7 +2856,7 @@
             document.getElementById("link-platform-id").value = "";
             document.getElementById("link-display-name").value = "";
             toast("IDENTITY LINKED", "success");
-            await openUserDetail(usersState.currentID);
+            await openUserDetail(shownUserID());
             loadUsers();
         } catch (err) {
             setError("user-detail-error", err);
@@ -2726,17 +2865,17 @@
     }
 
     async function unlinkIdentity(platform, platformID) {
-        if (!usersState.currentID) return;
+        if (!shownUserID()) return;
         if (!confirm("Unlink " + platform + ":" + platformID + "?")) return;
         setError("user-detail-error", null);
         try {
             await apiJSON(
-                "/console/api/users/" + encodeURIComponent(usersState.currentID) +
+                "/console/api/users/" + encodeURIComponent(shownUserID()) +
                 "/identities/" + encodeURIComponent(platform) +
                 "/" + encodeURIComponent(platformID),
                 { method: "DELETE" }
             );
-            await openUserDetail(usersState.currentID);
+            await openUserDetail(shownUserID());
             loadUsers();
         } catch (e) {
             setError("user-detail-error", e);
@@ -2746,16 +2885,29 @@
 
     // ── Boot ────────────────────────────────────────────────────
 
+    let bootRetryMs = 2000;
     async function boot() {
         show("loading");
+        const bootMsg = document.getElementById("view-loading-msg");
+        if (bootMsg) bootMsg.textContent = "Checking session";
         try {
             const status = await apiJSON("/console/api/auth/status");
             if (status && status.authenticated) {
+                bootRetryMs = 2000;
                 renderDashboard(status);
                 return;
             }
         } catch (e) {
             // 401 is the expected unauthenticated branch — fall through.
+            // Anything else (the gateway restarting, the network down)
+            // says nothing about the session: wait and try again rather
+            // than send a signed-in user through a passkey ceremony.
+            if (e.status !== 401) {
+                if (bootMsg) bootMsg.textContent = "Can't reach Familiar (" + e.message + "). Retrying…";
+                setTimeout(boot, bootRetryMs);
+                bootRetryMs = Math.min(bootRetryMs * 2, 30000);
+                return;
+            }
         }
 
         // Not authenticated. The login + setup views live inline in
@@ -2779,6 +2931,13 @@
     // ── Event wiring ────────────────────────────────────────────
 
     function wire() {
+        const usersRetry = document.getElementById("users-load-retry");
+        if (usersRetry) {
+            usersRetry.addEventListener("click", () => {
+                panelLoaded.users = true;
+                initUsersBrowser();
+            });
+        }
         document.getElementById("btn-setup-register").addEventListener("click", async () => {
             setError("setup-error", null);
             const email = (document.getElementById("setup-email").value || "").trim();
@@ -2898,7 +3057,7 @@
                     e.preventDefault();
                 }
             }
-            if (e.key === "/" && currentPanel === "memory") {
+            if (e.key === "/" && activeSection() === "memory") {
                 const searchField = document.getElementById("m-q");
                 if (searchField) { e.preventDefault(); searchField.focus(); }
             }

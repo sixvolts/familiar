@@ -202,25 +202,7 @@
     // re-renders (resize, layout switch, sidebar refresh).
     const shells = new Map(); // tab.id -> { root, model }
 
-    // updateStatusBar pushes the chat-tab's context-sensitive
-    // status text (DESIGN.md: "model · ctx N/N"). Called
-    // whenever a chat tab renders or its active conversation
-    // changes. Best-effort — if window.familiarStatusBar isn't
-    // wired (e.g. older app.js), the call no-ops.
-    function updateStatusBar(model, msgCount) {
-        const sb = window.familiarStatusBar;
-        if (!sb || !sb.setContext) return;
-        const m = model || "familiar";
-        const n = msgCount || 0;
-        sb.setContext(m + " · " + n + " message" + (n === 1 ? "" : "s"));
-    }
-
     function render(host, tab) {
-        // Push status bar context immediately on render so the
-        // model + count appears the moment a chat tab is focused.
-        // The model gets refined inside the model object once a
-        // conversation loads.
-        updateStatusBar("familiar", 0);
         const cached = shells.get(tab.id);
         if (cached) {
             host.innerHTML = "";

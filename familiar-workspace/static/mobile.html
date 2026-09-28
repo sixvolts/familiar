@@ -151,20 +151,22 @@
                     <span class="mob-title mob-brand-name">Familiar</span>
                 </div>
                 <div class="mob-overflow" data-overflow="home">
-                    <button class="mob-icon-btn mob-overflow-btn" aria-label="More" data-action="toggle-overflow">
+                    <button class="mob-icon-btn mob-overflow-btn" aria-label="More" aria-haspopup="menu" aria-expanded="false" data-action="toggle-overflow">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
                             <circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>
                         </svg>
                     </button>
                     <div class="mob-overflow-menu" role="menu">
-                        <button type="button" class="mob-overflow-item" data-action="open-account">Account</button>
-                        <button type="button" class="mob-overflow-item" data-action="open-memory" data-shard-panel="memory">Memory</button>
-                        <div class="mob-overflow-sep"></div>
-                        <button type="button" class="mob-overflow-item is-danger" data-action="logout">Sign out</button>
+                        <button type="button" role="menuitem" class="mob-overflow-item" data-action="open-account">Account</button>
+                        <button type="button" role="menuitem" class="mob-overflow-item" data-action="open-memory" data-shard-panel="memory">Memory</button>
+                        <div class="mob-overflow-sep" role="separator"></div>
+                        <button type="button" role="menuitem" class="mob-overflow-item is-danger" data-action="logout">Sign out</button>
                     </div>
                 </div>
             </div>
-            <button class="mob-search-pill">
+            <!-- Search isn't built yet (there's no search API); hidden rather
+                 than a button that does nothing. -->
+            <button class="mob-search-pill" hidden>
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
                     <circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" />
                 </svg>
@@ -215,7 +217,7 @@
         <div class="mob-title-header">
             <div class="mob-title">Chat</div>
             <div class="mob-title-actions">
-                <button class="mob-icon-btn" aria-label="Search">
+                <button class="mob-icon-btn" aria-label="Search" hidden>
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
                 </button>
                 <button class="mob-icon-btn is-iris" aria-label="New chat" data-action="new-chat">
@@ -241,14 +243,14 @@
             </button>
             <div class="mob-thread-title" id="mob-thread-title">…</div>
             <div class="mob-overflow" data-overflow="chat">
-                <button class="mob-icon-btn mob-overflow-btn" aria-label="More" data-action="toggle-overflow">
+                <button class="mob-icon-btn mob-overflow-btn" aria-label="More" aria-haspopup="menu" aria-expanded="false" data-action="toggle-overflow">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
                         <circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>
                     </svg>
                 </button>
                 <div class="mob-overflow-menu" role="menu">
-                    <button type="button" class="mob-overflow-item" data-action="toggle-pin-chat" id="mob-toggle-pin-chat">Pin chat</button>
-                    <button type="button" class="mob-overflow-item is-danger" data-action="delete-chat">Delete chat</button>
+                    <button type="button" role="menuitem" class="mob-overflow-item" data-action="toggle-pin-chat" id="mob-toggle-pin-chat">Pin chat</button>
+                    <button type="button" role="menuitem" class="mob-overflow-item is-danger" data-action="delete-chat">Delete chat</button>
                 </div>
             </div>
         </div>
@@ -260,7 +262,7 @@
         <div class="mob-research-strip" id="mob-research-strip" hidden></div>
         <div class="mob-thread-input-wrap">
             <form class="mob-thread-input" id="mob-thread-form" autocomplete="off">
-                <input id="mob-thread-input" placeholder="Message Familiar…" />
+                <textarea id="mob-thread-input" rows="1" placeholder="Message Familiar…" enterkeyhint="send"></textarea>
                 <button type="submit" class="mob-thread-send">Send</button>
             </form>
         </div>
@@ -273,7 +275,7 @@
         <div class="mob-title-header">
             <div class="mob-title">Notes</div>
             <div class="mob-title-actions">
-                <button class="mob-icon-btn" aria-label="Search">
+                <button class="mob-icon-btn" aria-label="Search" hidden>
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
                 </button>
                 <button class="mob-icon-btn is-iris" aria-label="New note" data-action="new-note">
@@ -305,14 +307,14 @@
             <input class="mob-note-title-input" id="mob-note-title" placeholder="Untitled" autocomplete="off"/>
             <span class="mob-note-status" id="mob-note-status"></span>
             <div class="mob-overflow" data-overflow="note">
-                <button class="mob-icon-btn mob-overflow-btn" aria-label="More" data-action="toggle-overflow">
+                <button class="mob-icon-btn mob-overflow-btn" aria-label="More" aria-haspopup="menu" aria-expanded="false" data-action="toggle-overflow">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
                         <circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>
                     </svg>
                 </button>
                 <div class="mob-overflow-menu" role="menu">
-                    <button type="button" class="mob-overflow-item" data-action="toggle-pin-note" id="mob-toggle-pin-note">Pin note</button>
-                    <button type="button" class="mob-overflow-item is-danger" data-action="delete-note">Delete note</button>
+                    <button type="button" role="menuitem" class="mob-overflow-item" data-action="toggle-pin-note" id="mob-toggle-pin-note">Pin note</button>
+                    <button type="button" role="menuitem" class="mob-overflow-item is-danger" data-action="delete-note">Delete note</button>
                 </div>
             </div>
         </div>
@@ -333,14 +335,14 @@
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
                 </button>
                 <div class="mob-overflow" data-overflow="wiki-list">
-                    <button class="mob-icon-btn mob-overflow-btn" aria-label="More" data-action="toggle-overflow">
+                    <button class="mob-icon-btn mob-overflow-btn" aria-label="More" aria-haspopup="menu" aria-expanded="false" data-action="toggle-overflow">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
                             <circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>
                         </svg>
                     </button>
                     <div class="mob-overflow-menu" role="menu">
-                        <button type="button" class="mob-overflow-item" data-action="new-wiki-book">Create book</button>
-                        <button type="button" class="mob-overflow-item is-danger" data-action="archive-wiki-book" id="mob-wiki-archive-book">Archive book</button>
+                        <button type="button" role="menuitem" class="mob-overflow-item" data-action="new-wiki-book">Create book</button>
+                        <button type="button" role="menuitem" class="mob-overflow-item is-danger" data-action="archive-wiki-book" id="mob-wiki-archive-book">Archive book</button>
                     </div>
                 </div>
             </div>
@@ -368,14 +370,14 @@
             <input class="mob-note-title-input" id="mob-wiki-page-title" placeholder="Untitled" autocomplete="off"/>
             <span class="mob-note-status" id="mob-wiki-page-status"></span>
             <div class="mob-overflow" data-overflow="wiki-page">
-                <button class="mob-icon-btn mob-overflow-btn" aria-label="More" data-action="toggle-overflow">
+                <button class="mob-icon-btn mob-overflow-btn" aria-label="More" aria-haspopup="menu" aria-expanded="false" data-action="toggle-overflow">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
                         <circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>
                     </svg>
                 </button>
                 <div class="mob-overflow-menu" role="menu">
-                    <button type="button" class="mob-overflow-item" data-action="toggle-pin-wiki" id="mob-toggle-pin-wiki">Pin page</button>
-                    <button type="button" class="mob-overflow-item is-danger" data-action="delete-wiki-page" id="mob-delete-wiki-page">Delete page</button>
+                    <button type="button" role="menuitem" class="mob-overflow-item" data-action="toggle-pin-wiki" id="mob-toggle-pin-wiki">Pin page</button>
+                    <button type="button" role="menuitem" class="mob-overflow-item is-danger" data-action="delete-wiki-page" id="mob-delete-wiki-page">Delete page</button>
                     <div class="mob-overflow-empty" id="mob-wiki-page-readonly" hidden>Read-only</div>
                 </div>
             </div>
@@ -419,14 +421,14 @@
             </button>
             <div class="mob-thread-title" id="mob-sa-detail-title">…</div>
             <div class="mob-overflow" data-overflow="scheduled">
-                <button class="mob-icon-btn mob-overflow-btn" aria-label="More" data-action="toggle-overflow">
+                <button class="mob-icon-btn mob-overflow-btn" aria-label="More" aria-haspopup="menu" aria-expanded="false" data-action="toggle-overflow">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
                         <circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>
                     </svg>
                 </button>
                 <div class="mob-overflow-menu" role="menu">
-                    <button type="button" class="mob-overflow-item" data-action="toggle-enable-action" id="mob-sa-enable-item">Disable</button>
-                    <button type="button" class="mob-overflow-item is-danger" data-action="delete-action">Delete action</button>
+                    <button type="button" role="menuitem" class="mob-overflow-item" data-action="toggle-enable-action" id="mob-sa-enable-item">Disable</button>
+                    <button type="button" role="menuitem" class="mob-overflow-item is-danger" data-action="delete-action">Delete action</button>
                 </div>
             </div>
         </div>

@@ -378,6 +378,10 @@ func (p *Pipeline) runPostTurnExtract(sess *session.Session, userMsg, responseTe
 	pbFacts := make([]*pb.FactProto, 0, len(prep))
 	var skipped, updated int
 
+	// decided[i] is how pbFacts[i] was resolved; its events go out once
+	// the commit says which row the fact landed on.
+	type decision struct{ action, targetID, category string }
+	var decided []decision
 	for i, p2 := range prep {
 		action, targetID := resolveDecision(i, batch.Decisions, p2.neighbors,
 			p.memoryCfg.SupersedeThresholdOrDefault())
@@ -416,17 +420,7 @@ func (p *Pipeline) runPostTurnExtract(sess *session.Session, userMsg, responseTe
 			ExcludeFromHot:    excludeFromHotFor(overrides),
 		}
 		pbFacts = append(pbFacts, fact)
-		p.events.Emit(sess.ID, memevents.KindConflictResolved, memevents.ConflictResolvedPayload{
-			Action:      action,
-			FactID:      fact.Id,
-			TargetID:    targetID,
-			FactPreview: previewString(p2.fact.Content, 200),
-		})
-		p.events.Emit(sess.ID, memevents.KindFactExtracted, memevents.FactExtractedPayload{
-			FactID:   fact.Id,
-			Content:  p2.fact.Content,
-			Category: p2.fact.Category,
-		})
+		decided = append(decided, decision{action: action, targetID: targetID, category: p2.fact.Category})
 	}
 	if skipped > 0 || updated > 0 {
 		log.Printf("[pipeline] post-turn extract for session %s: candidates=%d skipped=%d updated=%d",
@@ -455,6 +449,13 @@ func (p *Pipeline) runPostTurnExtract(sess *session.Session, userMsg, responseTe
 		}
 		sess.AddRecentFacts(contents)
 
+		// CommitFacts rewrites each fact's Id to the row that holds it: a
+		// restated fact lands on its existing row. Keep the generated ids
+		// to tell those apart.
+		generated := make([]string, len(pbFacts))
+		for i, f := range pbFacts {
+			generated[i] = f.Id
+		}
 		commitCtx, ccancel := context.WithTimeout(ctx, 5*time.Second)
 		if _, err := p.engine.CommitFacts(commitCtx, sess.ID, pbFacts); err != nil {
 			ccancel()
@@ -469,8 +470,26 @@ func (p *Pipeline) runPostTurnExtract(sess *session.Session, userMsg, responseTe
 		ccancel()
 		log.Printf("[pipeline] committed %d post-turn facts for session %s", len(pbFacts), sess.ID)
 
+		// Announce the facts only now, with the ids they were stored
+		// under; they used to go out before the commit, naming ids that
+		// a restatement or a failed commit never created.
+		for i, fact := range pbFacts {
+			d := decided[i]
+			p.events.Emit(sess.ID, memevents.KindConflictResolved, memevents.ConflictResolvedPayload{
+				Action:      d.action,
+				FactID:      fact.Id,
+				TargetID:    d.targetID,
+				FactPreview: previewString(fact.Content, 200),
+			})
+			p.events.Emit(sess.ID, memevents.KindFactExtracted, memevents.FactExtractedPayload{
+				FactID:   fact.Id,
+				Content:  fact.Content,
+				Category: d.category,
+			})
+		}
+
 		if p.versioner != nil {
-			recordVersions(ctx, p.versioner, pbFacts)
+			recordVersions(ctx, p.versioner, pbFacts, generated)
 		}
 	}
 
@@ -647,14 +666,21 @@ func resolveDecision(i int, decisions []sidecar.BatchDecision, neighbors []memor
 // recordVersions writes admin-timeline rows for a batch of committed
 // facts. Each ADD records "created"; each UPDATE (fact.Supersedes set)
 // records "superseded" on the old memory and "created" on the new.
+// generated[i], when given, is the id facts[i] had before the commit:
+// a fact whose id changed landed on an existing row (a restatement),
+// which records "reasserted" rather than "created".
 // Errors are logged but never block the write path.
-func recordVersions(ctx context.Context, v MemoryVersioner, facts []*pb.FactProto) {
-	for _, fact := range facts {
+func recordVersions(ctx context.Context, v MemoryVersioner, facts []*pb.FactProto, generated []string) {
+	for i, fact := range facts {
+		created := "created"
+		if i < len(generated) && generated[i] != fact.Id {
+			created = "reasserted"
+		}
 		if fact.Supersedes == "" {
 			verCtx, vCancel := context.WithTimeout(ctx, 2*time.Second)
 			if err := v.RecordVersion(verCtx, fact.Id, fact.Content,
-				fact.Scope, fact.SourceType, "system:extraction", "created"); err != nil {
-				log.Printf("[pipeline] record version (created) %s: %v", fact.Id, err)
+				fact.Scope, fact.SourceType, "system:extraction", created); err != nil {
+				log.Printf("[pipeline] record version (%s) %s: %v", created, fact.Id, err)
 			}
 			vCancel()
 			continue
@@ -667,8 +693,8 @@ func recordVersions(ctx context.Context, v MemoryVersioner, facts []*pb.FactProt
 		vCancel()
 		verCtx2, vCancel2 := context.WithTimeout(ctx, 2*time.Second)
 		if err := v.RecordVersion(verCtx2, fact.Id, fact.Content,
-			fact.Scope, fact.SourceType, "system:extraction", "created"); err != nil {
-			log.Printf("[pipeline] record version (created-new) %s: %v", fact.Id, err)
+			fact.Scope, fact.SourceType, "system:extraction", created); err != nil {
+			log.Printf("[pipeline] record version (%s-new) %s: %v", created, fact.Id, err)
 		}
 		vCancel2()
 	}

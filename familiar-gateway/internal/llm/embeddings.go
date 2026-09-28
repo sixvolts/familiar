@@ -107,6 +107,31 @@ type embedResponse struct {
 	} `json:"error,omitempty"`
 }
 
+// EmbedAPIError is an embeddings server answering a request with an
+// error, as opposed to not answering at all (a transport failure).
+type EmbedAPIError struct {
+	Status  int // HTTP status; 200 when the error came in a 200 body
+	Message string
+}
+
+func (e *EmbedAPIError) Error() string {
+	return fmt.Sprintf("embed API error (HTTP %d): %s", e.Status, e.Message)
+}
+
+// InputRejected reports whether the failure is about this input (too
+// long for the model, malformed) rather than the server being
+// unavailable: the server answered, with a status that isn't "busy" or
+// "unreachable upstream". The re-embed sweep uses it to tell a row it
+// should skip from an outage it should wait out.
+func (e *EmbedAPIError) InputRejected() bool {
+	switch e.Status {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests,
+		http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return false
+	}
+	return true
+}
+
 // Embed returns the dense vector for text.
 //
 // The "search_query: " prefix is required by nomic-embed-text-v1.5 for
@@ -143,11 +168,22 @@ func (p *EmbeddingsProvider) Embed(ctx context.Context, text string) ([]float32,
 	}
 
 	var er embedResponse
-	if err := json.Unmarshal(respBytes, &er); err != nil {
-		return nil, fmt.Errorf("parsing embed response: %w", err)
+	jsonErr := json.Unmarshal(respBytes, &er)
+	if resp.StatusCode >= 400 {
+		msg := strings.TrimSpace(string(respBytes))
+		if jsonErr == nil && er.Error != nil {
+			msg = er.Error.Message
+		}
+		if len(msg) > 300 {
+			msg = msg[:300]
+		}
+		return nil, &EmbedAPIError{Status: resp.StatusCode, Message: msg}
+	}
+	if jsonErr != nil {
+		return nil, fmt.Errorf("parsing embed response: %w", jsonErr)
 	}
 	if er.Error != nil {
-		return nil, fmt.Errorf("embed API error: %s", er.Error.Message)
+		return nil, &EmbedAPIError{Status: resp.StatusCode, Message: er.Error.Message}
 	}
 	if len(er.Data) == 0 {
 		return nil, fmt.Errorf("empty embedding response")

@@ -152,6 +152,19 @@ test("the chat surface round-trips a conversation with the model", async ({ stac
             )
             .toEqual(["assistant", "user"]);
 
+        // The gateway, not the browser, wrote the reply, with the model and
+        // the thinking panel's text, so a reload shows the same trace.
+        const saved = await (
+            await request.get(`${stack.workspaceURL}/console/api/conversations/${convID}/messages`, {
+                headers: authed(user),
+            })
+        ).json();
+        const reply = (saved.items ?? saved.messages ?? []).find((m: any) => m.role === "assistant");
+        expect(reply?.model, "persisted reply carries its model").toBeTruthy();
+        expect(reply?.reasoning_content ?? "", "persisted reply carries the thinking trace").toContain(
+            "Generating response",
+        );
+
         await page.reload();
         await page.evaluate((id) => {
             window.dispatchEvent(new CustomEvent("familiar:openDoc", { detail: { surface: "chat", id } }));

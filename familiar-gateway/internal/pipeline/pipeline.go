@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -109,6 +110,31 @@ type RouteInfo struct {
 	// the partial produced up to that point; the done event reports
 	// finish="stopped" so the UI can label it.
 	Stopped bool
+
+	// thinking records the reasoning chunks and status lines streamed to
+	// the client during the turn, in order: the thinking panel's text.
+	// commitAndExtract persists it with the final reply so a reload shows
+	// the same panel the user watched.
+	thinking thinkingLog
+}
+
+// thinkingLog accumulates streamed thinking text. Callbacks may fire from
+// the tool loop's goroutines, so it is locked.
+type thinkingLog struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *thinkingLog) add(s string) {
+	l.mu.Lock()
+	l.b.WriteString(s)
+	l.mu.Unlock()
+}
+
+func (l *thinkingLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
 }
 
 // ResearchNoteRef locates a research note the turn wrote to the user's
@@ -497,6 +523,10 @@ type IntermediateMessage struct {
 	Content    string
 	ToolCalls  []byte // JSON-encoded llm.ToolCall slice
 	ToolCallID string
+	// Model and ReasoningContent are set on the turn's final assistant
+	// row, which the gateway now persists itself (see commitAndExtract).
+	Model            string
+	ReasoningContent string
 }
 
 // Deps bundles every dependency the Pipeline needs at construction.
@@ -1569,11 +1599,12 @@ func (p *Pipeline) handleStream(
 				modelShort = route.modelID[idx+1:]
 			}
 			statusMsg := fmt.Sprintf("Complexity: %s | Model: %s", complexityLabel, modelShort)
-			onStatus(statusMsg + "\n")
+			info.recordThinking(onStatus)(statusMsg + "\n")
 		}
 	}
 
-	text, err := p.runTurn(turnCtx, sess, userMsg, route, "", info, onChunk, onReasoningChunk, onStatus, preamble, overrides)
+	text, err := p.runTurn(turnCtx, sess, userMsg, route, "", info, onChunk,
+		info.recordThinking(onReasoningChunk), info.recordThinking(onStatus), preamble, overrides)
 	if err != nil {
 		return "", info, err
 	}
@@ -2777,14 +2808,19 @@ func (p *Pipeline) commitAndExtract(ctx context.Context, sess *session.Session, 
 	}
 	sess.AddTurn("assistant", responseText)
 
-	// Mirror the intermediate messages into the messages table so a
-	// gateway restart's hydration path can replay them too. The
-	// frontend continues to POST the user prompt + final assistant
-	// text via /console/api/conversations/{id}/messages; this fills
-	// in the middle. A non-UUID session id (Slack hash etc.) is a
+	// Persist the turn into the conversation: the tool loop's messages,
+	// then the final reply, in one transaction so their order is the
+	// order the model produced them. The gateway owns the final reply.
+	// It used to be written only by the browser after the stream's done
+	// event, so a dropped stream (network change, laptop sleep, the
+	// 10-minute write cutoff) lost the answer while the model's session
+	// remembered giving it, and a Stop raced the client's partial ahead
+	// of the tool rows. The user prompt is still persisted by the client
+	// before the turn starts. A session id that isn't a conversation the
+	// session's user owns (Slack hash, shard API, action, research) is a
 	// no-op inside AppendIntermediateMessages.
-	if p.conversations != nil && len(loopMsgs) > 0 {
-		ims := make([]IntermediateMessage, 0, len(loopMsgs))
+	if p.conversations != nil {
+		ims := make([]IntermediateMessage, 0, len(loopMsgs)+1)
 		for _, m := range loopMsgs {
 			ims = append(ims, IntermediateMessage{
 				Role:       m.Role,
@@ -2793,6 +2829,7 @@ func (p *Pipeline) commitAndExtract(ctx context.Context, sess *session.Session, 
 				ToolCallID: m.ToolCallID,
 			})
 		}
+		ims = append(ims, persistedReply(responseText, info))
 		appendCtx, cancelAppend := context.WithTimeout(ctx, 5*time.Second)
 		if err := p.conversations.AppendIntermediateMessages(appendCtx, sess.ID, sess.CanonicalID(), ims); err != nil {
 			log.Printf("[pipeline] AppendIntermediateMessages error (continuing): %v", err)
@@ -2808,6 +2845,48 @@ func (p *Pipeline) commitAndExtract(ctx context.Context, sess *session.Session, 
 	}
 	p.kickoffPostTurnExtract(sess, userMsg, responseText, retrievedRels, overrides)
 	p.maybeSummarize(sess, overrides)
+}
+
+// recordThinking wraps a streaming callback so what it sends is also kept
+// for the persisted reply. A nil callback stays nil (no stream to mirror).
+func (info *RouteInfo) recordThinking(cb func(string)) func(string) {
+	if cb == nil || info == nil {
+		return cb
+	}
+	return func(s string) {
+		info.thinking.add(s)
+		cb(s)
+	}
+}
+
+// persistedReply is the final assistant row as the workspace shows it:
+// the answer plus the research-note link the client appends, and the
+// thinking panel's text (streamed reasoning and status lines, then any
+// post-hoc reasoning, the same assembly the client does).
+func persistedReply(responseText string, info *RouteInfo) IntermediateMessage {
+	m := IntermediateMessage{Role: "assistant", Content: responseText}
+	if info == nil {
+		return m
+	}
+	m.Model = info.ModelID
+	if ref := info.ResearchNote; ref.PageSlug != "" && !strings.Contains(m.Content, "#note/") {
+		label := strings.NewReplacer("[", "", "]", "").Replace(ref.Title)
+		if label == "" {
+			label = "the note"
+		}
+		m.Content += "\n\n**[📄 Open " + label + " →](#note/" +
+			url.QueryEscape(ref.BookSlug) + "/" + url.QueryEscape(ref.PageSlug) + ")**"
+	}
+	thinking := info.thinking.String()
+	if pr := info.ReasoningContent; pr != "" {
+		if strings.TrimSpace(thinking) == "" {
+			thinking = pr
+		} else {
+			thinking += "\n" + pr
+		}
+	}
+	m.ReasoningContent = thinking
+	return m
 }
 
 // marshalToolCalls encodes an llm.ToolCall slice into the JSON

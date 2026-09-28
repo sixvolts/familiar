@@ -6246,6 +6246,20 @@ code {
    ---------------------------------------------------------------- */
 .wiki-sync-banner-host { flex: 0 0 auto; }
 .wiki-sync-banner-host:empty { display: none; }
+/* In the notes and wiki shells the editor is absolutely pinned below the
+   32px header (see .notes-editor), so a banner in normal flow sat UNDER
+   it: visible edges, unclickable buttons. Pin the banner over the top of
+   the editor instead. */
+.notes-right > .wiki-sync-banner-host {
+    position: absolute;
+    top: 32px;
+    left: 0;
+    right: 0;
+    z-index: 5;
+}
+/* Contain Toast UI's internal z-indexes in the editor's own stacking
+   context, so they can't rise above the banner. */
+.notes-right > .notes-editor { z-index: 0; }
 .wiki-sync-banner {
     display: flex;
     align-items: center;

@@ -471,6 +471,29 @@ Workspace **binary** change (Go code under `familiar-workspace/`, not static):
 
 Database migrations apply automatically on the next gateway boot — no manual step.
 
+**Wiki knowledge re-index (one time).** Wiki facts are now stored under
+the page's id instead of its slug. The migration that re-keys them drops
+the facts no live page's slug still matches, which includes much of the
+knowledge of any page that was titled after its first save. To give it
+back, the gateway re-extracts every wiki page once, in the background,
+after the first boot on the new code:
+
+- It needs the sidecar's extract model; with the sidecar disabled it
+  waits for a boot that has one.
+- One page at a time, with a pause between pages. A large page goes to
+  the `extract_large` route, which can take minutes; if that route is
+  your chat model, chat replies wait behind it while it runs.
+- Progress is in `wiki_reindex_progress`, so a restart resumes it. Watch
+  it with `journalctl -u familiar-gateway | grep 're-index'`. Pages it
+  can't extract after 3 tries are left for their next save.
+- Pages saved after it started are skipped (their save already
+  re-extracted them). When it is done it records
+  `wiki_knowledge_reindex` in `applied_data_fixes` and never runs again.
+- `wiki_reindex = false` under `[memory]` turns it off. To run it again
+  (every page):
+  `DELETE FROM applied_data_fixes WHERE name LIKE 'wiki_knowledge_reindex%';
+  TRUNCATE wiki_reindex_progress;` and restart the gateway.
+
 ---
 
 ## 7. Configuration reference (where to look)

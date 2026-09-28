@@ -195,6 +195,10 @@
             // tracked so we don't stack multiple banners on rapid
             // polls.
             baseUpdatedAt: null,
+            // Save coordination: a save requested mid-flight re-runs when
+            // the first lands (pendingResave); navigation awaits savePromise.
+            pendingResave: false,
+            savePromise: null,
             baseTitle: "",
             baseContent: "",
             pollTimer: null,
@@ -854,6 +858,20 @@
         // path always lands on the book-splash so sidebar Book
         // clicks behave consistently.
         async function loadBook(slug, reuseViewMode) {
+            // Save the open page's pending edits under the book they
+            // belong to before switching: the debounced save used to fire
+            // after bookSlug changed (404) or after the page was cleared
+            // (dropped), losing whatever was typed in the last 500ms.
+            if (localState.page && (localState.saveTimer || isDirty())) {
+                if (localState.saveTimer) {
+                    clearTimeout(localState.saveTimer);
+                    localState.saveTimer = null;
+                }
+                await flushSave(true);
+            }
+            if (localState.savePromise) {
+                try { await localState.savePromise; } catch (_) { /* reported by the save */ }
+            }
             localState.bookSlug = slug;
             tab.state = { ...(tab.state || {}), bookSlug: slug };
             try {
@@ -942,13 +960,18 @@
             const reloadingOpenDirty =
                 localState.page && localState.page.slug === pageSlug && isDirty();
 
-            // Flush any pending save before switching.
+            // Flush any pending save before switching, and wait out one
+            // already in flight (its response is ignored once the page
+            // changes, so a keystroke typed during it must be saved now).
             if (localState.saveTimer) {
                 clearTimeout(localState.saveTimer);
                 localState.saveTimer = null;
                 await flushSave(true);
-            } else if (reloadingOpenDirty) {
+            } else if (reloadingOpenDirty || (localState.page && isDirty())) {
                 await flushSave(true); // best-effort; keeps a failed edit alive
+            }
+            if (localState.savePromise) {
+                try { await localState.savePromise; } catch (_) { /* reported by the save */ }
             }
             localState.pageSlug = pageSlug;
             // Reflect the (possibly just-mutated) history in the
@@ -1507,15 +1530,46 @@
             }, 500);
         }
 
-        async function flushSave(immediate, keepalive) {
-            if (!localState.page || localState.saving) return;
+        // pageURL addresses a page by id. Slugs follow the title, so when
+        // another editor renamed the page, every slug-addressed poll, save
+        // and delete from this tab 404'd and its edits stopped saving.
+        function pageURL(bookSlug, pageId) {
+            return "/console/api/books/" + encodeURIComponent(bookSlug) +
+                "/page-by-id/" + encodeURIComponent(pageId);
+        }
+
+        function flushSave(immediate, keepalive) {
+            if (!localState.page) return Promise.resolve();
+            if (localState.saving) {
+                // A save is in flight. Returning here dropped the
+                // keystrokes typed during its round trip (the status then
+                // said "Saved"); instead, save again once it lands.
+                localState.pendingResave = true;
+                return localState.savePromise || Promise.resolve();
+            }
+            localState.savePromise = doSave(immediate, keepalive).finally(() => {
+                localState.savePromise = null;
+                if (localState.pendingResave) {
+                    localState.pendingResave = false;
+                    if (localState.page && isDirty()) flushSave();
+                }
+            });
+            return localState.savePromise;
+        }
+
+        async function doSave(immediate, keepalive) {
             localState.saving = true;
+            // The page this save is for; its response must not touch
+            // another page the user has moved to in the meantime.
+            const savingId = localState.page.id;
             const patch = {
-                title: titleInput.value || "Untitled",
                 content: tuiEditor ? tuiEditor.getMarkdown() : "",
             };
-            const url = "/console/api/books/" + encodeURIComponent(localState.bookSlug) +
-                "/pages/" + encodeURIComponent(localState.page.slug);
+            // Send the title only when it changed. An unchanged title in
+            // every save made the server treat each save as a rename,
+            // ruling out its three-way merge of concurrent edits.
+            if (currentTitle() !== localState.baseTitle) patch.title = titleInput.value || "Untitled";
+            const url = pageURL(localState.bookSlug, savingId);
             const headers = { "Content-Type": "application/json" };
             // CHAT-REARCH: send the updated_at we last observed as
             // If-Match. The server (PATCH /pages/{slug}) rejects with
@@ -1539,14 +1593,27 @@
                 const text = await resp.text();
                 let body = null;
                 try { body = text ? JSON.parse(text) : null; } catch (_) { /* ignore */ }
+                const stillHere = localState.page && localState.page.id === savingId;
                 if (resp.status === 409) {
-                    handleStaleConflict(body && body.current);
+                    if (stillHere) handleStaleConflict(body && body.current);
                     return;
                 }
                 if (!resp.ok) {
                     throw new Error((body && body.error) || ("HTTP " + resp.status));
                 }
                 const p = body;
+                if (!stillHere) return;
+                // Merged while the user kept typing: keep the old base, so
+                // the next save is stale against the merged version and
+                // the server merges again, keeping both their new text and
+                // the other writer's edit. Adopting the merged version as
+                // the base while the editor lacks the other edit made the
+                // next save overwrite it.
+                if (p.merged && tuiEditor && currentContent() !== patch.content) {
+                    localState.pendingResave = true;
+                    savedDot.textContent = "Merging…";
+                    return;
+                }
                 // PATCH responses don't join share state (only GET
                 // does) — carry it forward for the render trigger.
                 if (!p.share && localState.page && localState.page.share) p.share = localState.page.share;
@@ -1732,8 +1799,7 @@
             const baseAtRequest = localState.baseUpdatedAt;
             try {
                 const fresh = await apiJSON(
-                    "/console/api/books/" + encodeURIComponent(localState.bookSlug) +
-                    "/pages/" + encodeURIComponent(localState.page.slug));
+                    pageURL(localState.bookSlug, localState.page.id));
                 if (!fresh || !fresh.updated_at) return;
                 // Race guard: if a save started or the baseline moved
                 // while this GET was in flight, this response may
@@ -1746,7 +1812,12 @@
                 // remote edit. RFC3339 UTC strings sort chronologically.
                 if (fresh.updated_at < localState.baseUpdatedAt) return;
                 if (isDirty()) {
-                    showStaleBanner(fresh);
+                    // Save now against our base: the server merges the
+                    // other writer's edit with ours when they don't
+                    // overlap (a 409 then shows the banner). Asking the
+                    // user to pick mine-or-theirs here threw one of two
+                    // compatible edits away.
+                    mergeRemoteChange(fresh);
                 } else {
                     swapInRemote(fresh, /*silent=*/!localState.isForeground);
                 }
@@ -1755,6 +1826,19 @@
                 // shouldn't surface as an error to the user.
                 console.debug("wiki: poll failed", e);
             }
+        }
+
+        // mergeRemoteChange handles a remote edit that arrived while the
+        // editor has unsaved changes: save them now against the old base
+        // so the server three-way merges both. Only an overlapping edit
+        // comes back 409 and shows the choice banner.
+        function mergeRemoteChange(fresh) {
+            if (localState.saveTimer) {
+                clearTimeout(localState.saveTimer);
+                localState.saveTimer = null;
+            }
+            savedDot.textContent = "Merging…";
+            flushSave();
         }
 
         // swapInRemote replaces the editor + title with the
@@ -1932,10 +2016,7 @@
             if (!localState.page) return;
             if (!confirm('Delete "' + (localState.page.title || "Untitled") + '"?')) return;
             try {
-                await apiJSON(
-                    "/console/api/books/" + encodeURIComponent(localState.bookSlug) +
-                    "/pages/" + encodeURIComponent(localState.page.slug),
-                    { method: "DELETE" });
+                await apiJSON(pageURL(localState.bookSlug, localState.page.id), { method: "DELETE" });
                 const idx = localState.pages.findIndex((x) => x.id === localState.page.id);
                 if (idx >= 0) localState.pages.splice(idx, 1);
                 localState.page = null;
@@ -2091,9 +2172,7 @@
                 return;
             }
             try {
-                const p = await apiJSON(
-                    "/console/api/books/" + encodeURIComponent(localState.bookSlug) +
-                    "/pages/" + encodeURIComponent(localState.pageSlug));
+                const p = await apiJSON(pageURL(localState.bookSlug, localState.page.id));
                 // Same discipline as poll(): NEVER overwrite a dirty
                 // editor. This fires from many unrelated events (any AI
                 // tool effect, another panel's save) and used to
@@ -2104,7 +2183,7 @@
                 // clean -> swapInRemote (which reseeds the baseline).
                 if (p && p.updated_at && p.updated_at !== localState.baseUpdatedAt) {
                     if (isDirty()) {
-                        showStaleBanner(p);
+                        mergeRemoteChange(p);
                     } else {
                         swapInRemote(p, /*silent=*/!localState.isForeground);
                     }

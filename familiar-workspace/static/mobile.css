@@ -1977,6 +1977,30 @@ body[data-principal-type="shard"] [data-owner-only] { display: none !important; 
     cursor: pointer;
 }
 .mob-pill:active { transform: scale(0.97); }
+
+/* Edit conflict: a save collided with another writer's overlapping edit.
+   Sits above the editor body until the user picks a side. */
+.mob-edit-conflict {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin: 8px 16px;
+    padding: 10px 12px;
+    border-radius: 12px;
+    border: 1px solid rgba(var(--danger-rgb), 0.45);
+    background: rgba(var(--danger-rgb), 0.10);
+}
+.mob-edit-conflict-msg {
+    flex: 1 1 100%;
+    font-size: 13px;
+    line-height: 1.4;
+    color: var(--fg-1);
+}
+.mob-pill-primary {
+    border-color: rgba(var(--danger-rgb), 0.6);
+    background: rgba(var(--danger-rgb), 0.18);
+}
 .mob-pill:disabled { opacity: 0.5; cursor: default; }
 .mob-pill[hidden] { display: none; }
 

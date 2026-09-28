@@ -1,15 +1,15 @@
 // Package wikiknowledge runs the async knowledge-ingestion pipeline
 // for wiki pages (BOOKS-WIKI-ARCHITECTURE Phase 1 step 6).
 //
-// On every page save:
+// On a page save (debounced, one run per page at a time; see PageSaved):
 //
-//  1. DELETE any prior memory rows for this page (source_ref +
-//     scope_tag) so re-ingest is a clean replace, not an
-//     accumulation.
-//  2. Hand the page body to the sidecar's ExtractFacts (same
-//     extraction it uses on conversation turns) and CommitFacts
-//     each result with scope_tag = "book:{id}", source_type =
-//     "wiki_page", source_ref = "{book_slug}/{page_slug}".
+//  1. Hand the page body to the sidecar's ExtractFacts (same
+//     extraction it uses on conversation turns).
+//  2. Only if that succeeded, replace the page's facts with the
+//     result in one transaction (Engine.ReplaceSourceFacts), with
+//     scope_tag = "book:{id}", source_type = "wiki_page", source_ref =
+//     "page:{page_id}". A failed or timed-out extraction leaves the
+//     page's existing facts alone.
 //  3. Upsert any extracted entity-relationship triples into
 //     relationships, again carrying the book scope_tag.
 //  4. For every resolved [[]] outbound link on this page, emit
@@ -35,10 +35,12 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/familiar/gateway/internal/admin"
 	"github.com/familiar/gateway/internal/memory"
+	"github.com/familiar/gateway/internal/safego"
 	"github.com/familiar/gateway/internal/sidecar"
 
 	pb "github.com/familiar/gateway/proto/engine"
@@ -49,7 +51,7 @@ import (
 // EngineClient is the slice of engine.Service we depend on. Defined
 // here so tests can stub without dragging the real memengine in.
 type EngineClient interface {
-	CommitFacts(ctx context.Context, sessionID string, facts []*pb.FactProto) (*pb.CommitFactsResponse, error)
+	ReplaceSourceFacts(ctx context.Context, sessionID, sourceType, sourceRef, scopeTag string, facts []*pb.FactProto) (int64, error)
 }
 
 // SidecarClient is the slice of *sidecar.Client we depend on.
@@ -67,7 +69,7 @@ type SidecarClient interface {
 const largeExtractChars = 4000
 
 // MemoryStore is the slice of *memory.PgVectorStore we depend on
-// for stale-fact cleanup.
+// for page-delete cleanup.
 type MemoryStore interface {
 	DeleteMemoriesBySource(ctx context.Context, sourceType, sourceRef, scopeTag string) (int64, error)
 }
@@ -93,30 +95,63 @@ type Deps struct {
 	RelStore    RelationshipStore
 	Embedder    EmbedFunc
 
-	// Timeout caps the entire OnPageSaved run. Set conservatively
-	// because the goroutine fires from request context.Background()
-	// and we don't want runaway sidecar calls to leak forever. Zero
-	// uses a sensible default.
+	// Timeout caps one ingestion run, so a wedged sidecar can't leak a
+	// goroutine forever. It has to outlast the slowest extraction: a
+	// large page goes to the extract_large route, which takes minutes
+	// and first waits for the model's slot. The old 30s cap cancelled
+	// every large page's extraction. Zero uses defaultTimeout.
 	Timeout time.Duration
+
+	// Debounce is how long a page must go without a save before it is
+	// ingested. Editors autosave 500ms after typing stops, and each
+	// save used to start its own extraction. Zero uses defaultDebounce.
+	Debounce time.Duration
 }
 
+const (
+	// defaultTimeout is the extract_large ceiling plus a minute for the
+	// sidecar's slot gate.
+	defaultTimeout  = sidecar.LargeExtractTimeout + time.Minute
+	defaultDebounce = 10 * time.Second
+)
+
 // Pipeline is the wiki knowledge runner. Construct one per gateway
-// process and pass its OnPageSaved / OnPageDeleted methods to
-// admin.WikiStore.SetPageSaveHook / SetPageDeleteHook.
+// process; the wiki store's save hook calls PageSaved and its delete
+// hook calls OnPageDeleted.
 type Pipeline struct {
 	deps Deps
+
+	mu    sync.Mutex
+	pages map[string]*pageState // by page id; guarded by mu
+}
+
+// pageState tracks one page between saves and ingestion runs.
+type pageState struct {
+	// gen counts the page's saves and deletes. A run commits only if
+	// gen hasn't moved since it read the page, so an older draft's
+	// extraction can never land after a newer one's. Guarded by
+	// Pipeline.mu, like latest and timer.
+	gen    uint64
+	latest SaveEvent   // the newest save
+	timer  *time.Timer // the pending debounce, nil when none
+
+	run    sync.Mutex // one ingestion run per page at a time
+	commit sync.Mutex // a run's check-and-commit vs. the page's delete
 }
 
 // New constructs a Pipeline. Returns nil if Deps is empty enough
 // that no work could happen.
 func New(deps Deps) *Pipeline {
 	if deps.Timeout <= 0 {
-		deps.Timeout = 30 * time.Second
+		deps.Timeout = defaultTimeout
+	}
+	if deps.Debounce <= 0 {
+		deps.Debounce = defaultDebounce
 	}
 	if deps.Engine == nil && deps.Sidecar == nil && deps.MemoryStore == nil && deps.RelStore == nil {
 		return nil
 	}
-	return &Pipeline{deps: deps}
+	return &Pipeline{deps: deps, pages: map[string]*pageState{}}
 }
 
 // SaveEvent is the payload the wiki store hands the pipeline after
@@ -143,61 +178,143 @@ type DeleteEvent struct {
 	PageSlug string
 }
 
-// OnPageSaved runs the full ingestion sequence for one page.
-// Synchronous from the caller's POV — but since the wiki store's
-// hook invokes us with context.Background() in a goroutine, this
-// is effectively async with respect to the original HTTP request.
+// skipBook reports books whose pages are never ingested. Research
+// evidence books (slug research:{userID}) hold transient raw web
+// scratch that gets reaped, not knowledge worth remembering —
+// extracting facts from it would pollute memory with low-value,
+// possibly prompt-injected content (RESEARCH-SKILL-SPEC §9) and leave
+// facts orphaned when the sweep deletes the page.
+func skipBook(bookSlug string) bool {
+	return strings.HasPrefix(bookSlug, "research:")
+}
+
+// PageSaved schedules ingestion for a saved page and returns at once.
+// The run starts once the page has gone Debounce without another save
+// and always ingests the newest save. Runs for one page never overlap,
+// and a run that a newer save or a delete overtook while it was
+// extracting discards its result.
+func (p *Pipeline) PageSaved(evt SaveEvent) {
+	if p == nil || skipBook(evt.BookSlug) || evt.PageID == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	st := p.pages[evt.PageID]
+	if st == nil {
+		st = &pageState{}
+		p.pages[evt.PageID] = st
+	}
+	st.gen++
+	st.latest = evt
+	if st.timer != nil {
+		st.timer.Stop()
+	}
+	due := st.gen
+	st.timer = time.AfterFunc(p.deps.Debounce, func() { p.fire(evt.PageID, st, due) })
+}
+
+// fire runs a debounced ingestion. due is the save that armed the
+// timer: if a later save re-armed it (Stop can lose that race) or the
+// page was deleted, this firing does nothing.
+func (p *Pipeline) fire(pageID string, st *pageState, due uint64) {
+	defer safego.Recover("wiki knowledge extraction " + pageID)
+	p.mu.Lock()
+	if p.pages[pageID] != st || st.gen != due {
+		p.mu.Unlock()
+		return
+	}
+	st.timer = nil
+	p.mu.Unlock()
+
+	st.run.Lock()
+	defer st.run.Unlock()
+
+	p.mu.Lock()
+	evt, gen, live := st.latest, st.gen, p.pages[pageID] == st
+	p.mu.Unlock()
+	if live {
+		_ = p.ingest(context.Background(), evt, st, gen)
+	}
+
+	// Forget an idle page, so the map (and the content in latest)
+	// doesn't grow with every page ever saved.
+	p.mu.Lock()
+	if p.pages[pageID] == st && st.gen == gen && st.timer == nil {
+		delete(p.pages, pageID)
+	}
+	p.mu.Unlock()
+}
+
+// current reports whether gen is still the page's newest save.
+func (p *Pipeline) current(pageID string, st *pageState, gen uint64) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.pages[pageID] == st && st.gen == gen
+}
+
+// OnPageSaved ingests one page synchronously, with no debounce and no
+// check for newer saves. PageSaved is the entry point for the save
+// hook; this is the direct form.
 //
 // Step ordering matters:
-//  1. Stale cleanup BEFORE re-ingest, otherwise old facts persist
-//     alongside the fresh ones until the next save.
-//  2. Embed + commit facts BEFORE relationships, so a relationship
-//     that references a fresh fact id (Phase 2 work) finds it.
+//  1. Extract BEFORE touching the page's existing facts, and replace
+//     them only with a successful result: a sidecar that is down,
+//     busy or slow must not leave the page with no facts at all.
+//  2. Facts BEFORE relationships, so a relationship that references
+//     a fresh fact id (Phase 2 work) finds it.
 //  3. Wiki link triples LAST, after the extracted relationships,
 //     so a links_to edge to a page that's also mentioned in the
 //     content overwrites cleanly.
 func (p *Pipeline) OnPageSaved(ctx context.Context, evt SaveEvent) {
-	if p == nil {
+	if p == nil || skipBook(evt.BookSlug) {
 		return
 	}
-	// Research evidence books (slug research:{userID}) hold transient
-	// raw web scratch that gets reaped, not knowledge worth remembering
-	// — extracting facts from it would pollute memory with low-value,
-	// possibly prompt-injected content (RESEARCH-SKILL-SPEC §9) and
-	// leave facts orphaned when the sweep deletes the page. Skip them
-	// entirely: no extraction, so nothing to clean up either.
-	if strings.HasPrefix(evt.BookSlug, "research:") {
-		return
-	}
+	_ = p.ingest(ctx, evt, nil, 0)
+}
+
+// Outcome is what one ingestion did with a page.
+type Outcome int
+
+const (
+	// Committed: the page's facts now come from this content (a body too
+	// short to extract from committed none).
+	Committed Outcome = iota
+	// Superseded: a newer save or a delete overtook the run, which
+	// changed nothing; the newer save's own run handles the page.
+	Superseded
+	// Skipped: the page isn't ingested (research evidence, or gone).
+	Skipped
+	// Failed: extraction or the write failed; the page's existing
+	// facts were left as they were.
+	Failed
+)
+
+// ingest runs one ingestion. With st set, it commits only while gen is
+// still the page's newest save (see pageState.gen).
+func (p *Pipeline) ingest(ctx context.Context, evt SaveEvent, st *pageState, gen uint64) Outcome {
 	ctx, cancel := context.WithTimeout(ctx, p.deps.Timeout)
 	defer cancel()
 
 	scopeTag := scopeTagFor(evt.BookID)
-	sourceRef := evt.BookSlug + "/" + evt.PageSlug
+	sourceRef := pageSourceRef(evt.PageID)
 
-	// 1. Stale cleanup.
-	if p.deps.MemoryStore != nil {
-		if n, err := p.deps.MemoryStore.DeleteMemoriesBySource(ctx, "wiki_page", sourceRef, scopeTag); err != nil {
-			log.Printf("[wikiknowledge] stale cleanup failed for %s: %v", sourceRef, err)
-		} else if n > 0 {
-			log.Printf("[wikiknowledge] cleared %d stale facts for %s", n, sourceRef)
-		}
-	}
-
-	// 2. Extract → commit facts. ExtractFacts takes []Turn — we
-	// wrap the page as a single user turn with the title for
-	// context. Skip the call if the body is too small to be worth
-	// the LLM round-trip (an empty page or a one-word note isn't
-	// going to yield meaningful triples).
+	// 1. Extract. ExtractFacts takes []Turn — we wrap the page as a
+	// single user turn with the title for context. A body too small to
+	// be worth the LLM round-trip (an empty page or a one-word note)
+	// holds no knowledge, so it replaces the page's facts with none.
 	body := strings.TrimSpace(evt.Content)
-	if p.deps.Sidecar != nil && len(body) > 32 {
+	var extraction sidecar.ExtractionResult
+	extracted := false
+	switch {
+	case len(body) <= 32:
+		extracted = true
+	case p.deps.Sidecar != nil:
 		turns := []sidecar.Turn{
 			{Role: "user", Content: "Page title: " + evt.Title + "\n\n" + body},
 		}
 		// Large documents (research write-ups) overrun the small extract
 		// model — route them to the big-model extract, which falls back
 		// to the small one when no large route is configured.
-		var extraction sidecar.ExtractionResult
 		var err error
 		if len(body) > largeExtractChars {
 			extraction, err = p.deps.Sidecar.ExtractFactsLarge(ctx, turns)
@@ -205,31 +322,123 @@ func (p *Pipeline) OnPageSaved(ctx context.Context, evt SaveEvent) {
 			extraction, err = p.deps.Sidecar.ExtractFacts(ctx, turns)
 		}
 		if err != nil {
-			log.Printf("[wikiknowledge] extract failed for %s: %v", sourceRef, err)
+			log.Printf("[wikiknowledge] extract failed for %s (keeping its existing facts): %v", sourceRef, err)
 		} else {
-			p.commitExtractedFacts(ctx, evt, scopeTag, sourceRef, extraction.Facts)
-			p.upsertExtractedRelationships(ctx, evt, scopeTag, extraction.Relationships)
+			extracted = true
 		}
+	}
+	var facts []*pb.FactProto
+	if extracted {
+		facts = p.buildFacts(ctx, evt, scopeTag, sourceRef, extraction.Facts)
+	}
+
+	// 2. Replace the page's facts, unless a newer save or a delete got
+	// here first. commit is held across the check and the write so a
+	// delete can't slip in between them.
+	if st != nil {
+		st.commit.Lock()
+		defer st.commit.Unlock()
+		if !p.current(evt.PageID, st, gen) {
+			log.Printf("[wikiknowledge] discarding superseded run for %s", sourceRef)
+			return Superseded
+		}
+	}
+	outcome := Failed
+	if extracted && p.deps.Engine != nil && evt.PageID != "" {
+		removed, err := p.deps.Engine.ReplaceSourceFacts(ctx, "wiki:"+evt.BookID, "wiki_page", sourceRef, scopeTag, facts)
+		if err != nil {
+			log.Printf("[wikiknowledge] replacing facts for %s failed (keeping the old ones): %v", sourceRef, err)
+		} else {
+			log.Printf("[wikiknowledge] %s: %d fact(s), replacing %d", sourceRef, len(facts), removed)
+			outcome = Committed
+		}
+	}
+	if extracted {
+		p.upsertExtractedRelationships(ctx, evt, scopeTag, extraction.Relationships)
 	}
 
 	// 3. Wiki link triples for resolved outbound links.
 	p.upsertLinkTriples(ctx, evt, scopeTag)
+	return outcome
 }
 
-// OnPageDeleted clears memory rows for the page. We leave the
-// relationship triples behind — they may have been authored by
+// Reingest re-extracts one page now, for the re-index job, reading its
+// content through load (false: the page is gone). It runs under the same
+// per-page rules as a save:
+//
+//   - a page with a save pending or being ingested is left to that run,
+//     which has content at least as new (Superseded);
+//   - the content is read only after the page is registered here, so a
+//     save that lands after the read bumps the page's generation, and
+//     this run's result is discarded rather than committed over it.
+func (p *Pipeline) Reingest(ctx context.Context, pageID string, load func(context.Context) (SaveEvent, bool, error)) (Outcome, error) {
+	if p == nil || pageID == "" {
+		return Skipped, nil
+	}
+	p.mu.Lock()
+	if p.pages[pageID] != nil {
+		p.mu.Unlock()
+		return Superseded, nil
+	}
+	st := &pageState{gen: 1}
+	p.pages[pageID] = st
+	p.mu.Unlock()
+
+	st.run.Lock()
+	defer func() {
+		st.run.Unlock()
+		p.mu.Lock()
+		if p.pages[pageID] == st && st.gen == 1 && st.timer == nil {
+			delete(p.pages, pageID)
+		}
+		p.mu.Unlock()
+	}()
+
+	evt, ok, err := load(ctx)
+	if err != nil {
+		return Failed, err
+	}
+	if !ok || skipBook(evt.BookSlug) {
+		return Skipped, nil
+	}
+	return p.ingest(ctx, evt, st, 1), nil
+}
+
+// OnPageDeleted clears memory rows for the page, and stops any pending
+// or in-flight ingestion of it from committing afterwards. We leave
+// the relationship triples behind — they may have been authored by
 // other pages that mention this page's entities, and there's no
-// per-page provenance on the relationships table to know which
-// rows to drop. Phase 2's smarter cleanup can address.
+// per-page provenance on the relationships table to know which rows
+// to drop. Phase 2's smarter cleanup can address.
 func (p *Pipeline) OnPageDeleted(ctx context.Context, evt DeleteEvent) {
-	if p == nil || p.deps.MemoryStore == nil {
+	if p == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, p.deps.Timeout)
+	p.mu.Lock()
+	st := p.pages[evt.PageID]
+	if st != nil {
+		st.gen++
+		if st.timer != nil {
+			st.timer.Stop()
+			st.timer = nil
+		}
+		delete(p.pages, evt.PageID)
+	}
+	p.mu.Unlock()
+	if st != nil {
+		// Wait out a run that is mid-commit, so its rows are there to
+		// delete; any later check sees the bumped gen and discards.
+		st.commit.Lock()
+		defer st.commit.Unlock()
+	}
+	if p.deps.MemoryStore == nil || evt.PageID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	scopeTag := scopeTagFor(evt.BookID)
-	sourceRef := evt.BookSlug + "/" + evt.PageSlug
+	sourceRef := pageSourceRef(evt.PageID)
 	if n, err := p.deps.MemoryStore.DeleteMemoriesBySource(ctx, "wiki_page", sourceRef, scopeTag); err != nil {
 		log.Printf("[wikiknowledge] delete cleanup failed for %s: %v", sourceRef, err)
 	} else if n > 0 {
@@ -239,10 +448,14 @@ func (p *Pipeline) OnPageDeleted(ctx context.Context, evt DeleteEvent) {
 
 // ── Internals ─────────────────────────────────────────────────────
 
-func (p *Pipeline) commitExtractedFacts(ctx context.Context, evt SaveEvent, scopeTag, sourceRef string, facts []sidecar.ExtractedFact) {
-	if p.deps.Engine == nil || len(facts) == 0 {
-		return
-	}
+// pageSourceRef is the source_ref a page's facts carry. It is the page
+// id, not its slug: slugs change on every title edit, and facts keyed
+// by slug were orphaned by a rename.
+func pageSourceRef(pageID string) string {
+	return "page:" + pageID
+}
+
+func (p *Pipeline) buildFacts(ctx context.Context, evt SaveEvent, scopeTag, sourceRef string, facts []sidecar.ExtractedFact) []*pb.FactProto {
 	now := time.Now()
 	pbFacts := make([]*pb.FactProto, 0, len(facts))
 	for _, f := range facts {
@@ -277,19 +490,7 @@ func (p *Pipeline) commitExtractedFacts(ctx context.Context, evt SaveEvent, scop
 			ScopeTag:          scopeTag,
 		})
 	}
-	if len(pbFacts) == 0 {
-		return
-	}
-	// SessionID is a routing bucket on the engine side; book scope
-	// is the actual visibility key (carried in ScopeTag). Use a
-	// synthetic per-book id so wiki commits from different books
-	// stay logically separated in the engine.
-	sessionID := "wiki:" + evt.BookID
-	if _, err := p.deps.Engine.CommitFacts(ctx, sessionID, pbFacts); err != nil {
-		log.Printf("[wikiknowledge] CommitFacts failed for %s: %v", sourceRef, err)
-		return
-	}
-	log.Printf("[wikiknowledge] committed %d facts for %s", len(pbFacts), sourceRef)
+	return pbFacts
 }
 
 func (p *Pipeline) upsertExtractedRelationships(ctx context.Context, evt SaveEvent, scopeTag string, rels []sidecar.ExtractedRelationship) {

@@ -132,8 +132,8 @@ func TestExtractLargeGetsLongTimeout(t *testing.T) {
 	if r == nil {
 		t.Fatal("extract_large should resolve to a router")
 	}
-	if r.client.Timeout != largeExtractTimeout {
-		t.Errorf("extract_large router timeout = %v, want %v", r.client.Timeout, largeExtractTimeout)
+	if r.client.Timeout != LargeExtractTimeout {
+		t.Errorf("extract_large router timeout = %v, want %v", r.client.Timeout, LargeExtractTimeout)
 	}
 	// A critical-path task on a *different* endpoint keeps the short
 	// ceiling — the long timeout is scoped to the large route's key.
@@ -142,7 +142,7 @@ func TestExtractLargeGetsLongTimeout(t *testing.T) {
 		map[string]string{"fast": modelrole.StatusOnline},
 		map[string]string{"fast": "http://127.0.0.1:8400"},
 	)
-	if got := c2.routerFor(TaskClassify).client.Timeout; got == largeExtractTimeout {
+	if got := c2.routerFor(TaskClassify).client.Timeout; got == LargeExtractTimeout {
 		t.Errorf("classify router should not carry the large-extract ceiling, got %v", got)
 	}
 }

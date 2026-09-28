@@ -587,11 +587,13 @@ func (s *ConversationStore) AppendIntermediateMessages(ctx context.Context, conv
 			tc = string(m.ToolCalls)
 		}
 		toolCallID := sql.NullString{String: m.ToolCallID, Valid: m.ToolCallID != ""}
+		model := sql.NullString{String: m.Model, Valid: m.Model != ""}
+		reasoning := sql.NullString{String: m.ReasoningContent, Valid: m.ReasoningContent != ""}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO messages
-			    (conversation_id, role, content, tool_calls, tool_call_id)
-			VALUES ($1::uuid, $2, $3, $4::jsonb, $5)`,
-			conversationID, m.Role, m.Content, tc, toolCallID); err != nil {
+			    (conversation_id, role, content, tool_calls, tool_call_id, model, reasoning_content)
+			VALUES ($1::uuid, $2, $3, $4::jsonb, $5, $6, $7)`,
+			conversationID, m.Role, m.Content, tc, toolCallID, model, reasoning); err != nil {
 			return fmt.Errorf("messages: append intermediate: %w", err)
 		}
 	}
@@ -599,6 +601,32 @@ func (s *ConversationStore) AppendIntermediateMessages(ctx context.Context, conv
 		return fmt.Errorf("messages: bump conversation: %w", err)
 	}
 	return tx.Commit()
+}
+
+// RecentAssistantDuplicate returns the conversation's latest message when
+// it is an assistant row with exactly this content, written within the
+// last ten minutes; nil otherwise.
+func (s *ConversationStore) RecentAssistantDuplicate(ctx context.Context, conversationID, content string) (*Message, error) {
+	if strings.TrimSpace(content) == "" {
+		return nil, nil
+	}
+	var m Message
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id::text, conversation_id::text, role, content, created_at
+		  FROM messages
+		 WHERE conversation_id = $1::uuid
+		 ORDER BY seq DESC
+		 LIMIT 1`, conversationID).Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if m.Role != "assistant" || m.Content != content || time.Since(m.CreatedAt) > 10*time.Minute {
+		return nil, nil
+	}
+	return &m, nil
 }
 
 // AppendMessage records one turn. Returns the inserted row with its
@@ -970,6 +998,16 @@ func (h *Handler) appendConversationMessage(w http.ResponseWriter, r *http.Reque
 	if body.Role == "" {
 		writeJSONError(w, http.StatusBadRequest, "role required")
 		return
+	}
+	// The gateway now persists each turn's final reply itself. A client
+	// from before that (a tab left open across the deploy, or a service-
+	// worker-cached mobile build) still POSTs the reply after the stream;
+	// hand back the row the gateway wrote instead of storing it twice.
+	if body.Role == "assistant" {
+		if dup, err := h.conversations.RecentAssistantDuplicate(r.Context(), id, body.Content); err == nil && dup != nil {
+			writeJSON(w, http.StatusCreated, dup)
+			return
+		}
 	}
 	m, err := h.conversations.AppendMessage(r.Context(), &Message{
 		ConversationID:   id,

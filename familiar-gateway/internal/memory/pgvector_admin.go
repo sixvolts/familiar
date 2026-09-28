@@ -75,7 +75,7 @@ type MemoryRow struct {
 	Scope        string
 	UserID       string // empty string when the row's user_id column is NULL
 	SourceType   string
-	SourceRef    string // provenance: session id / book/page slug, "" when unset
+	SourceRef    string // provenance: session id / "page:<id>" for wiki facts, "" when unset
 	ScopeTag     string // shard:<id> / book:<id> isolation tag, "" = top-level
 	Confidence   float64
 	Tags         []string
@@ -138,6 +138,17 @@ const (
 // ErrMemoryNotFound is returned by GetMemory / DeleteMemory when the
 // requested id does not exist.
 var ErrMemoryNotFound = errors.New("memory: not found")
+
+// ErrDuplicateContent is returned when an edit would give a row the
+// same identity (owner, scope and content; see FactHash) as another
+// row. The edit is refused rather than silently merging two facts.
+var ErrDuplicateContent = errors.New("memory: another memory already says exactly that")
+
+// isUniqueViolation reports a Postgres unique_violation (23505).
+func isUniqueViolation(err error) bool {
+	var pqErr *pq.Error
+	return errors.As(err, &pqErr) && pqErr.Code == "23505"
+}
 
 // memoryRowCols is the shared SELECT list for MemoryRow scans.
 // superseded_by picks the NEWEST replacing row when several point at
@@ -239,21 +250,49 @@ func (s *PgVectorStore) GetMemory(ctx context.Context, id string) (*MemoryRow, e
 	return &r, nil
 }
 
-// DeleteMemory hard-deletes a memory row by ID. The admin console
-// treats this as a destructive operator-level action — no soft-delete,
-// no supersedes chain bookkeeping. Callers should prefer semantic
-// UPDATE (via the previous engine's resolve_conflicts pass) for routine
-// cleanup; this is the escape hatch for bad data.
+// DeleteVersionsSQL deletes row $1 together with every older version
+// it replaced (its supersedes ancestry), and detaches any other row
+// that pointed at one of them. $2 confines the whole walk to one
+// owner; NULL means any owner (the operator's console).
+//
+// Deleting only the row itself brought back the stale fact it had
+// replaced: a row counts as superseded only while another row points
+// at it, so once the newest version ("I live in NYC") was gone, nothing
+// hid the older one ("I live in Boston") and the next turn recalled it
+// as current. Forgetting a fact has to forget its history with it.
+//
+// The walk stays in the deleted row's scope. A shard's row that
+// superseded one of the owner's top-level facts must not take that fact
+// with it when the shard forgets its own: the older row in another
+// scope is left, and live again (a shard's row should never have hidden
+// it). Rows that pointed INTO the deleted set are detached, not
+// deleted: a newer version of a middle row stays live. UNION (not UNION ALL) makes
+// the walk terminate on a hand-corrupted cycle. The memengine's
+// DeleteFact runs the same statement.
+const DeleteVersionsSQL = `
+	WITH RECURSIVE doomed AS (
+		SELECT id, supersedes, scope_tag FROM memories
+		 WHERE id = $1::uuid AND ($2::text IS NULL OR user_id = $2::text)
+		UNION
+		SELECT m.id, m.supersedes, m.scope_tag
+		  FROM memories m JOIN doomed d ON m.id = d.supersedes
+		 WHERE ($2::text IS NULL OR m.user_id = $2::text)
+		   AND m.scope_tag IS NOT DISTINCT FROM d.scope_tag
+	),
+	detach AS (
+		UPDATE memories SET supersedes = NULL
+		 WHERE supersedes IN (SELECT id FROM doomed)
+		   AND id NOT IN (SELECT id FROM doomed)
+	)
+	DELETE FROM memories WHERE id IN (SELECT id FROM doomed)`
+
+// DeleteMemory hard-deletes a memory row by ID, along with the older
+// versions it replaced (see DeleteVersionsSQL). The admin console
+// treats this as a destructive operator-level action — no soft-delete.
+// Callers should prefer semantic UPDATE for routine cleanup; this is
+// the escape hatch for bad data.
 func (s *PgVectorStore) DeleteMemory(ctx context.Context, id string) error {
-	// Detach children first: the supersedes column is a self-FK, so
-	// deleting a row another row points at raises 23503. Deleting a
-	// superseded row is exactly the cleanup an operator attempts, so
-	// clear the pointers in the same CTE — matching MemEngine.DeleteFact.
-	res, err := s.db.ExecContext(ctx, `
-		WITH detach AS (
-			UPDATE memories SET supersedes = NULL WHERE supersedes = $1::uuid
-		)
-		DELETE FROM memories WHERE id = $1::uuid`, id)
+	res, err := s.db.ExecContext(ctx, DeleteVersionsSQL, id, nil)
 	if err != nil {
 		return fmt.Errorf("memory: delete: %w", err)
 	}
@@ -267,29 +306,23 @@ func (s *PgVectorStore) DeleteMemory(ctx context.Context, id string) error {
 	return nil
 }
 
-// DeleteMemoryOwned deletes a memory row only if it belongs to userID,
-// returning (true, nil) when a row was removed and (false, nil) when
-// the id doesn't exist or is owned by someone else — the two are
-// deliberately indistinguishable so a caller can't probe another
-// user's memory space by UUID. Strict user_id match (no NULL/global
-// rows): the chat-facing forget_fact tool must never delete
-// operator-curated global facts. This is the owner-scoped counterpart
-// to DeleteMemory, which is unscoped and reserved for the admin
-// browser path that gates ownership at the handler (loadScopedMemory).
+// DeleteMemoryOwned deletes a memory row, and the older versions it
+// replaced, only if it belongs to userID. It returns (true, nil) when a
+// row was removed and (false, nil) when the id doesn't exist or is
+// owned by someone else — the two are deliberately indistinguishable
+// so a caller can't probe another user's memory space by UUID. Strict
+// user_id match (no NULL/global rows): the chat-facing forget_fact tool
+// must never delete operator-curated global facts. This is the
+// owner-scoped counterpart to DeleteMemory, which is unscoped and
+// reserved for the admin browser path that gates ownership at the
+// handler (loadScopedMemory).
 func (s *PgVectorStore) DeleteMemoryOwned(ctx context.Context, id, userID string) (bool, error) {
 	if userID == "" {
 		return false, nil
 	}
-	// Detach children (self-FK) only when the target is actually owned
-	// by userID, so a non-owning caller neither deletes nor mutates
-	// anything. Same one-round-trip CTE as DeleteMemory.
-	res, err := s.db.ExecContext(ctx, `
-		WITH detach AS (
-			UPDATE memories SET supersedes = NULL
-			 WHERE supersedes = $1::uuid
-			   AND EXISTS (SELECT 1 FROM memories t WHERE t.id = $1::uuid AND t.user_id = $2)
-		)
-		DELETE FROM memories WHERE id = $1::uuid AND user_id = $2`, id, userID)
+	// A non-owning caller matches no row, so it neither deletes nor
+	// detaches anything.
+	res, err := s.db.ExecContext(ctx, DeleteVersionsSQL, id, userID)
 	if err != nil {
 		return false, fmt.Errorf("memory: delete owned: %w", err)
 	}
@@ -520,10 +553,18 @@ func (s *PgVectorStore) UpdateMemoryContent(ctx context.Context, id, newContent,
 	if len(embedding) > 0 {
 		vec = vectorToString(embedding)
 	}
+	// The content_hash moves with the content: it is the row's dedup
+	// identity, and a stale one made the next commit of the OLD text
+	// land on this (edited) row while the new text could be stored a
+	// second time.
+	hash := FactHash(row.UserID, row.ScopeTag, row.SourceType, row.SourceRef, newContent)
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE memories SET content = $1, embedding = $2::vector, updated_at = NOW() WHERE id = $3::uuid`,
-		newContent, vec, id)
+		`UPDATE memories SET content = $1, embedding = $2::vector, content_hash = $4, updated_at = NOW() WHERE id = $3::uuid`,
+		newContent, vec, id, hash)
 	if err != nil {
+		if isUniqueViolation(err) {
+			return ErrDuplicateContent
+		}
 		return fmt.Errorf("memory: update content: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {

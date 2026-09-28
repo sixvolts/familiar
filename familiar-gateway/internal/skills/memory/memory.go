@@ -17,6 +17,7 @@ package memory
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -78,40 +79,105 @@ func toolScope(sc skills.SessionContext) (scopeTag, refusal string) {
 // the owner-wide search.
 const errNoScopedMemory = "memory: shard-scoped memory is not configured"
 
-// locateInView finds the single best match for vec inside the caller's
-// view. Returns empty strings when nothing matches.
-func (s *Skill) locateInView(ctx context.Context, vec []float32, userID, scopeTag string) (id, content, refusal string, err error) {
-	if scopeTag != "" {
+// forget_fact and correct_fact destroy or overwrite the row a query
+// matches, so they act on a query alone only when the match is clear.
+// They used to take the nearest row whatever its score: "forget my
+// sister's birthday", with no such memory, deleted "Mom's birthday is
+// May 5". Below confidentMatch, or within matchMargin of the runner-up,
+// the tool lists the candidates and asks for an explicit id instead.
+const (
+	matchFloor     = 0.5  // below this a row isn't a candidate at all
+	confidentMatch = 0.75 // the best row must score at least this...
+	matchMargin    = 0.05 // ...and beat the next one by at least this
+	maxCandidates  = 3
+)
+
+// candidate is a row a destructive tool might mean.
+type candidate struct {
+	ID, Content string
+	Score       float64
+}
+
+// candidatesInView returns the rows closest to vec that the caller may
+// change, best first, scoring at least matchFloor.
+func (s *Skill) candidatesInView(ctx context.Context, vec []float32, userID, scopeTag string) (cands []candidate, refusal string, err error) {
+	fromStore := func(res []mem.MemoryResult) {
+		for _, r := range res {
+			cands = append(cands, candidate{r.ID, r.Content, r.Similarity})
+		}
+	}
+	// Over-fetch: global rows and other scopes are filtered out below.
+	const fetch = maxCandidates + 3
+	switch {
+	case scopeTag != "":
 		if s.manager == nil {
-			return "", "", errNoScopedMemory, nil
+			return nil, errNoScopedMemory, nil
 		}
 		searchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		res, err := s.manager.SearchInScope(searchCtx, vec, 1, 0.5, userID, scopeTag)
+		res, err := s.manager.SearchInScope(searchCtx, vec, fetch, matchFloor, userID, scopeTag)
 		cancel()
 		if err != nil {
-			return "", "", "", fmt.Errorf("search memory: %w", err)
+			return nil, "", fmt.Errorf("search memory: %w", err)
 		}
-		if len(res) > 0 {
-			return res[0].ID, res[0].Content, "", nil
+		fromStore(res)
+	default:
+		engineResults, engineErr := s.engineSemanticSearch(ctx, vec, fetch, userID)
+		if engineErr == nil {
+			for _, r := range engineResults {
+				if r.Fact != nil && float64(r.RelevanceScore) >= matchFloor {
+					cands = append(cands, candidate{r.Fact.Id, r.Fact.Content, float64(r.RelevanceScore)})
+				}
+			}
+		} else if s.store != nil {
+			searchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			res, err := s.store.Search(searchCtx, vec, fetch, matchFloor, userID)
+			cancel()
+			if err != nil {
+				return nil, "", fmt.Errorf("search memory: %w", err)
+			}
+			fromStore(res)
 		}
-		return "", "", "", nil
 	}
-	engineResults, engineErr := s.engineSemanticSearch(ctx, vec, 1, userID)
-	if engineErr == nil && len(engineResults) > 0 && engineResults[0].Fact != nil {
-		return engineResults[0].Fact.Id, engineResults[0].Fact.Content, "", nil
-	}
-	if s.store != nil {
-		searchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		res, err := s.store.Search(searchCtx, vec, 1, 0.5, userID)
-		cancel()
+	// Keep only rows the caller may change: search also surfaces global
+	// (NULL-owner) rows, which a chat turn must never delete or rewrite.
+	inView := cands[:0]
+	for _, c := range cands {
+		ok, err := s.checkInView(ctx, c.ID, userID, scopeTag)
 		if err != nil {
-			return "", "", "", fmt.Errorf("search memory: %w", err)
+			return nil, "", fmt.Errorf("check memory: %w", err)
 		}
-		if len(res) > 0 {
-			return res[0].ID, res[0].Content, "", nil
+		if ok {
+			inView = append(inView, c)
+		}
+		if len(inView) == maxCandidates {
+			break
 		}
 	}
-	return "", "", "", nil
+	return inView, "", nil
+}
+
+// clearMatch returns the candidate a query unambiguously names, if any.
+func clearMatch(cands []candidate) (candidate, bool) {
+	if len(cands) == 0 || cands[0].Score < confidentMatch {
+		return candidate{}, false
+	}
+	if len(cands) > 1 && cands[0].Score-cands[1].Score < matchMargin {
+		return candidate{}, false
+	}
+	return cands[0], true
+}
+
+// askForID is the tool result when a query doesn't clearly name one
+// memory: the candidates, and how to name the right one.
+func askForID(tool, query string, cands []candidate) skills.ToolResult {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Not sure which memory %q means, so nothing was changed. Closest matches:\n", query)
+	for _, c := range cands {
+		fmt.Fprintf(&b, "- id=%s (similarity %.2f): %s\n", c.ID, c.Score, c.Content)
+	}
+	fmt.Fprintf(&b, "If one of these is the memory the user means, call %s again with its id. If none is, tell the user no such memory was found.", tool)
+	content := b.String()
+	return skills.ToolResult{Content: content, Tokens: len(content) / 4}
 }
 
 // checkInView reports whether the caller may change row id. With no
@@ -261,7 +327,7 @@ var forgetFactParams = json.RawMessage(`{
   "properties": {
     "query": {
       "type": "string",
-      "description": "Description of the memory to forget. Searched by semantic similarity to find the best match."
+      "description": "Description of the memory to forget. Searched by semantic similarity; acts only on a clear match, otherwise returns the candidates so you can pass an id."
     },
     "id": {
       "type": "string",
@@ -275,14 +341,18 @@ var correctFactParams = json.RawMessage(`{
   "properties": {
     "query": {
       "type": "string",
-      "description": "Description of the memory to correct. Searched by semantic similarity to find the best match."
+      "description": "Description of the memory to correct. Searched by semantic similarity; acts only on a clear match, otherwise returns the candidates so you can pass an id."
+    },
+    "id": {
+      "type": "string",
+      "description": "Exact memory ID to correct. If provided, query is ignored."
     },
     "new_content": {
       "type": "string",
       "description": "The corrected fact to replace the old content with."
     }
   },
-  "required": ["query", "new_content"]
+  "required": ["new_content"]
 }`)
 
 func (s *Skill) Tools() []skills.ToolDefinition {
@@ -309,12 +379,12 @@ func (s *Skill) Tools() []skills.ToolDefinition {
 		},
 		{
 			Name:        "forget_fact",
-			Description: "Delete a memory. Use when the user asks you to forget something. Finds the closest match by semantic similarity or accepts an exact ID.",
+			Description: "Delete a memory and the older versions it replaced. Use when the user asks you to forget something. Finds a clear semantic match or accepts an exact ID; when the match is unclear it changes nothing and lists the candidates.",
 			Parameters:  forgetFactParams,
 		},
 		{
 			Name:        "correct_fact",
-			Description: "Update a memory with corrected content. Use when the user says something you remember is wrong and provides the correction.",
+			Description: "Update a memory with corrected content. Use when the user says something you remember is wrong and provides the correction. Finds a clear semantic match or accepts an exact ID; when the match is unclear it changes nothing and lists the candidates.",
 			Parameters:  correctFactParams,
 		},
 	}
@@ -926,17 +996,21 @@ func (s *Skill) execForgetFact(ctx context.Context, params json.RawMessage) (ski
 			return skills.ToolResult{}, fmt.Errorf("embed query: %w", err)
 		}
 
-		id, content, refusal, err := s.locateInView(ctx, vec, userID, scopeTag)
+		cands, refusal, err := s.candidatesInView(ctx, vec, userID, scopeTag)
 		if err != nil {
 			return skills.ToolResult{}, err
 		}
 		if refusal != "" {
 			return skills.ToolResult{Error: refusal}, nil
 		}
-		if id == "" {
+		if len(cands) == 0 {
 			return skills.ToolResult{Content: fmt.Sprintf("No memory found matching %q.", query)}, nil
 		}
-		targetID, targetContent = id, content
+		match, ok := clearMatch(cands)
+		if !ok {
+			return askForID("forget_fact", query, cands), nil
+		}
+		targetID, targetContent = match.ID, match.Content
 	}
 
 	// The id may come straight from the model, so check it's inside the
@@ -994,6 +1068,7 @@ func (s *Skill) execForgetFact(ctx context.Context, params json.RawMessage) (ski
 
 type correctFactArgs struct {
 	Query      string `json:"query"`
+	ID         string `json:"id,omitempty"`
 	NewContent string `json:"new_content"`
 }
 
@@ -1009,9 +1084,10 @@ func (s *Skill) execCorrectFact(ctx context.Context, params json.RawMessage) (sk
 		}
 	}
 	query := strings.TrimSpace(args.Query)
+	targetID := strings.TrimSpace(args.ID)
 	newContent := strings.TrimSpace(args.NewContent)
-	if query == "" {
-		return skills.ToolResult{Error: "query is required to identify the memory to correct"}, nil
+	if query == "" && targetID == "" {
+		return skills.ToolResult{Error: "provide either query or id to identify the memory to correct"}, nil
 	}
 	if newContent == "" {
 		return skills.ToolResult{Error: "new_content is required"}, nil
@@ -1033,31 +1109,39 @@ func (s *Skill) execCorrectFact(ctx context.Context, params json.RawMessage) (sk
 		return skills.ToolResult{Error: "memory: no user_id in skill context — caller is unauthenticated"}, nil
 	}
 
-	embedCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	vec, err := s.embed(embedCtx, query)
-	cancel()
-	if err != nil {
-		return skills.ToolResult{}, fmt.Errorf("embed query: %w", err)
-	}
-
 	scopeTag, refusal := toolScope(sc)
 	if refusal != "" {
 		return skills.ToolResult{Error: refusal}, nil
 	}
 
 	// Locate the target fact by semantic similarity inside the caller's
-	// view, then confirm the row is one the caller may change: search
-	// also surfaces global (NULL-owner) rows, which a chat turn must
-	// never rewrite.
-	targetID, targetContent, refusal, err := s.locateInView(ctx, vec, userID, scopeTag)
-	if err != nil {
-		return skills.ToolResult{}, err
-	}
-	if refusal != "" {
-		return skills.ToolResult{Error: refusal}, nil
-	}
+	// view, unless the model named it. Either way, confirm the row is
+	// one the caller may change: an id can name any row, and search also
+	// surfaces global (NULL-owner) rows, which a chat turn must never
+	// rewrite.
+	targetContent := ""
 	if targetID == "" {
-		return skills.ToolResult{Content: fmt.Sprintf("No memory found matching %q.", query)}, nil
+		embedCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		vec, err := s.embed(embedCtx, query)
+		cancel()
+		if err != nil {
+			return skills.ToolResult{}, fmt.Errorf("embed query: %w", err)
+		}
+		cands, refusal, err := s.candidatesInView(ctx, vec, userID, scopeTag)
+		if err != nil {
+			return skills.ToolResult{}, err
+		}
+		if refusal != "" {
+			return skills.ToolResult{Error: refusal}, nil
+		}
+		if len(cands) == 0 {
+			return skills.ToolResult{Content: fmt.Sprintf("No memory found matching %q.", query)}, nil
+		}
+		match, ok := clearMatch(cands)
+		if !ok {
+			return askForID("correct_fact", query, cands), nil
+		}
+		targetID, targetContent = match.ID, match.Content
 	}
 	if ok, err := s.checkInView(ctx, targetID, userID, scopeTag); err != nil {
 		return skills.ToolResult{}, fmt.Errorf("check memory: %w", err)
@@ -1097,6 +1181,10 @@ func (s *Skill) execCorrectFact(ctx context.Context, params json.RawMessage) (sk
 		cancelU()
 		if err == nil {
 			updated = true
+		} else if errors.Is(err, mem.ErrDuplicateContent) {
+			return skills.ToolResult{Content: fmt.Sprintf(
+				"Another memory already says exactly %q, so %s was left unchanged. If %s is now wrong, forget it instead.",
+				newContent, targetID, targetID)}, nil
 		} else if !strings.Contains(err.Error(), "not found") {
 			return skills.ToolResult{}, fmt.Errorf("update memory: %w", err)
 		}
@@ -1106,6 +1194,11 @@ func (s *Skill) execCorrectFact(ctx context.Context, params json.RawMessage) (sk
 		return skills.ToolResult{Content: fmt.Sprintf("Memory %s not found.", targetID)}, nil
 	}
 
-	content := fmt.Sprintf("Corrected %s:\n  was: %s\n  now: %s", targetID, targetContent, newContent)
+	var content string
+	if targetContent != "" {
+		content = fmt.Sprintf("Corrected %s:\n  was: %s\n  now: %s", targetID, targetContent, newContent)
+	} else {
+		content = fmt.Sprintf("Corrected %s:\n  now: %s", targetID, newContent)
+	}
 	return skills.ToolResult{Content: content, Tokens: len(content) / 4}, nil
 }

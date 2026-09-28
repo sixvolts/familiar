@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/familiar/gateway/internal/memory"
 	"github.com/familiar/gateway/internal/testutil"
 )
 
@@ -614,8 +615,9 @@ func TestShard_ScopeTagRenameRetagsMemory(t *testing.T) {
 		t.Fatalf("CreateShard: %v", err)
 	}
 	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO memories (agent_id, scope, content, source_type, user_id, scope_tag)
-		 VALUES ('test', 'user', 'salary review notes', 'explicit', 'owner', 'shard:hr')`); err != nil {
+		`INSERT INTO memories (agent_id, scope, content, content_hash, source_type, user_id, scope_tag)
+		 VALUES ('test', 'user', 'salary review notes', $1, 'explicit', 'owner', 'shard:hr')`,
+		memory.FactHash("owner", "shard:hr", "explicit", "", "salary review notes")); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	t.Cleanup(func() {
@@ -630,6 +632,13 @@ func TestShard_ScopeTagRenameRetagsMemory(t *testing.T) {
 	_ = s.db.QueryRowContext(ctx, `SELECT count(*) FROM memories WHERE user_id='owner' AND scope_tag='hr-v2'`).Scan(&renamed)
 	if old != 0 || renamed != 1 {
 		t.Errorf("after rename: %d rows under the old tag, %d under the new; want 0 and 1", old, renamed)
+	}
+	// The scope is part of the row's dedup identity, so it is rehashed:
+	// the shard restating the note lands on this row, not a second one.
+	var hash string
+	_ = s.db.QueryRowContext(ctx, `SELECT content_hash FROM memories WHERE user_id='owner' AND scope_tag='hr-v2'`).Scan(&hash)
+	if want := memory.FactHash("owner", "hr-v2", "explicit", "", "salary review notes"); hash != want {
+		t.Errorf("retagged row kept the old scope's hash %q, want %q", hash, want)
 	}
 }
 

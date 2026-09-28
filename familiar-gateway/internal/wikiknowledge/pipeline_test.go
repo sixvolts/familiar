@@ -2,10 +2,12 @@ package wikiknowledge
 
 // Pipeline tests run against fake collaborators — no engine, no
 // sidecar, no DB. They pin down the contract that matters:
-//   * Stale cleanup runs first, with the right (sourceType,
-//     sourceRef, scopeTag) tuple.
-//   * Each extracted fact arrives at CommitFacts carrying the
+//   * A page's facts are replaced, keyed by page id, only after a
+//     successful extraction.
+//   * Each extracted fact arrives at ReplaceSourceFacts carrying the
 //     book scope_tag, source_ref, source_type.
+//   * Saves are debounced and a run a newer save or a delete
+//     overtook never commits.
 //   * Extracted relationships and resolved-link triples both go
 //     through UpsertRelationships with scope_tag set.
 //   * Broken outbound links don't emit links_to triples.
@@ -14,8 +16,11 @@ package wikiknowledge
 
 import (
 	"context"
+	"errors"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/familiar/gateway/internal/admin"
 	"github.com/familiar/gateway/internal/memory"
@@ -26,39 +31,109 @@ import (
 
 // ── Fakes ─────────────────────────────────────────────────────────
 
-type fakeEngine struct {
-	commits [][]*pb.FactProto
+type replaceCall struct {
+	sourceType, sourceRef, scopeTag string
+	facts                           []*pb.FactProto
 }
 
-func (f *fakeEngine) CommitFacts(_ context.Context, _ string, facts []*pb.FactProto) (*pb.CommitFactsResponse, error) {
+type fakeEngine struct {
+	mu       sync.Mutex
+	replaces []replaceCall
+}
+
+func (f *fakeEngine) ReplaceSourceFacts(_ context.Context, _ string, sourceType, sourceRef, scopeTag string, facts []*pb.FactProto) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	cp := make([]*pb.FactProto, len(facts))
 	copy(cp, facts)
-	f.commits = append(f.commits, cp)
-	return &pb.CommitFactsResponse{}, nil
+	f.replaces = append(f.replaces, replaceCall{sourceType, sourceRef, scopeTag, cp})
+	return 0, nil
+}
+
+func (f *fakeEngine) calls() []replaceCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]replaceCall(nil), f.replaces...)
 }
 
 type fakeSidecar struct {
+	mu         sync.Mutex
 	result     sidecar.ExtractionResult
+	err        error
 	calls      int
 	largeCalls int
+	bodies     []string
+	deadline   time.Duration // time left on the ctx of the last call
+	// gate, when set, holds every extraction until it is closed, and
+	// started reports each call as it begins.
+	gate    chan struct{}
+	started chan string
+	// failOn fails every extraction whose page body contains it.
+	failOn string
 }
 
-func (f *fakeSidecar) ExtractFacts(_ context.Context, _ []sidecar.Turn) (sidecar.ExtractionResult, error) {
-	f.calls++
-	return f.result, nil
+func (f *fakeSidecar) extract(ctx context.Context, turns []sidecar.Turn, large bool) (sidecar.ExtractionResult, error) {
+	f.mu.Lock()
+	if large {
+		f.largeCalls++
+	} else {
+		f.calls++
+	}
+	body := turns[0].Content
+	f.bodies = append(f.bodies, body)
+	if dl, ok := ctx.Deadline(); ok {
+		f.deadline = time.Until(dl)
+	}
+	gate, started := f.gate, f.started
+	f.mu.Unlock()
+	if started != nil {
+		started <- body
+	}
+	if gate != nil {
+		<-gate
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return sidecar.ExtractionResult{}, f.err
+	}
+	if f.failOn != "" && strings.Contains(body, f.failOn) {
+		return sidecar.ExtractionResult{}, errors.New("extractor rejected this page")
+	}
+	res := f.result
+	if len(res.Facts) == 0 {
+		// Echo the page body as its one fact, so a test can tell which
+		// save a commit came from.
+		res.Facts = []sidecar.ExtractedFact{{Content: body}}
+	}
+	return res, nil
 }
 
-func (f *fakeSidecar) ExtractFactsLarge(_ context.Context, _ []sidecar.Turn) (sidecar.ExtractionResult, error) {
-	f.largeCalls++
-	return f.result, nil
+// n is the number of extractions so far, safe to poll while runs are
+// in flight.
+func (f *fakeSidecar) n() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls + f.largeCalls
+}
+
+func (f *fakeSidecar) ExtractFacts(ctx context.Context, turns []sidecar.Turn) (sidecar.ExtractionResult, error) {
+	return f.extract(ctx, turns, false)
+}
+
+func (f *fakeSidecar) ExtractFactsLarge(ctx context.Context, turns []sidecar.Turn) (sidecar.ExtractionResult, error) {
+	return f.extract(ctx, turns, true)
 }
 
 type fakeMem struct {
+	mu      sync.Mutex
 	deletes []deleteCall
 }
 type deleteCall struct{ sourceType, sourceRef, scopeTag string }
 
 func (f *fakeMem) DeleteMemoriesBySource(_ context.Context, st, sr, sg string) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.deletes = append(f.deletes, deleteCall{st, sr, sg})
 	return 0, nil
 }
@@ -121,22 +196,25 @@ func TestNew_ReturnsNilWhenNoCollaborators(t *testing.T) {
 	}
 }
 
-func TestOnPageSaved_StaleCleanupRunsFirst(t *testing.T) {
-	mem := &fakeMem{}
-	p := newPipelineWith(nil, nil, mem, nil)
+func TestOnPageSaved_ReplacesFactsKeyedByPageID(t *testing.T) {
+	eng := &fakeEngine{}
+	p := newPipelineWith(eng, &fakeSidecar{}, nil, nil)
 	p.OnPageSaved(context.Background(), sampleEvent())
-	if len(mem.deletes) != 1 {
-		t.Fatalf("expected 1 stale-cleanup call, got %d", len(mem.deletes))
+	calls := eng.calls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 replace call, got %d", len(calls))
 	}
-	d := mem.deletes[0]
-	if d.sourceType != "wiki_page" {
-		t.Errorf("source_type = %q, want wiki_page", d.sourceType)
+	c := calls[0]
+	if c.sourceType != "wiki_page" {
+		t.Errorf("source_type = %q, want wiki_page", c.sourceType)
 	}
-	if d.sourceRef != "engineering/deploy-process" {
-		t.Errorf("source_ref = %q, want bookSlug/pageSlug form", d.sourceRef)
+	// By page id: slugs change on every title edit, and facts keyed by
+	// slug were orphaned by a rename.
+	if c.sourceRef != "page:page-uuid" {
+		t.Errorf("source_ref = %q, want page:{page id}", c.sourceRef)
 	}
-	if d.scopeTag != "book:book-uuid" {
-		t.Errorf("scope_tag = %q, want book:book-uuid", d.scopeTag)
+	if c.scopeTag != "book:book-uuid" {
+		t.Errorf("scope_tag = %q, want book:book-uuid", c.scopeTag)
 	}
 }
 
@@ -151,10 +229,11 @@ func TestOnPageSaved_FactsCarryScopeAndSource(t *testing.T) {
 	p := newPipelineWith(eng, sc, nil, nil)
 	p.OnPageSaved(context.Background(), sampleEvent())
 
-	if len(eng.commits) != 1 {
-		t.Fatalf("expected 1 CommitFacts call, got %d", len(eng.commits))
+	calls := eng.calls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 replace call, got %d", len(calls))
 	}
-	facts := eng.commits[0]
+	facts := calls[0].facts
 	if len(facts) != 2 {
 		t.Fatalf("expected 2 facts committed, got %d", len(facts))
 	}
@@ -165,8 +244,8 @@ func TestOnPageSaved_FactsCarryScopeAndSource(t *testing.T) {
 		if f.SourceType != "wiki_page" {
 			t.Errorf("fact source_type = %q, want wiki_page", f.SourceType)
 		}
-		if f.SourceRef != "engineering/deploy-process" {
-			t.Errorf("fact source_ref = %q, want bookSlug/pageSlug", f.SourceRef)
+		if f.SourceRef != "page:page-uuid" {
+			t.Errorf("fact source_ref = %q, want page:page-uuid", f.SourceRef)
 		}
 		if f.UserId != "operator" {
 			t.Errorf("fact user_id = %q, want operator", f.UserId)
@@ -177,21 +256,57 @@ func TestOnPageSaved_FactsCarryScopeAndSource(t *testing.T) {
 	}
 }
 
-func TestOnPageSaved_SkipsExtractionForShortBody(t *testing.T) {
+// A failed extraction must leave the page's existing facts alone. The
+// old order deleted them first, so a sidecar that was down, busy, or
+// slower than the deadline wiped the page's knowledge on every save.
+func TestOnPageSaved_FailedExtractionKeepsFacts(t *testing.T) {
+	eng := &fakeEngine{}
+	mem := &fakeMem{}
+	sc := &fakeSidecar{err: errors.New("context deadline exceeded")}
+	p := newPipelineWith(eng, sc, mem, nil)
+	p.OnPageSaved(context.Background(), sampleEvent())
+	if n := len(eng.calls()); n != 0 {
+		t.Errorf("a failed extraction replaced the page's facts (%d replace calls)", n)
+	}
+	if n := len(mem.deletes); n != 0 {
+		t.Errorf("a failed extraction deleted the page's facts (%d deletes)", n)
+	}
+}
+
+func TestOnPageSaved_ShortBodyClearsFacts(t *testing.T) {
 	// Bodies under 32 chars don't make the LLM round-trip — the
 	// signal-to-noise ratio is poor and the cost adds up across a
-	// migration. Stale cleanup still runs.
+	// migration. The page holds no knowledge any more, so its facts
+	// are replaced with none.
 	sc := &fakeSidecar{}
-	mem := &fakeMem{}
-	p := newPipelineWith(nil, sc, mem, nil)
+	eng := &fakeEngine{}
+	p := newPipelineWith(eng, sc, nil, nil)
 	evt := sampleEvent()
 	evt.Content = "tiny"
 	p.OnPageSaved(context.Background(), evt)
 	if sc.calls != 0 {
 		t.Errorf("sidecar should NOT be called for short bodies; called %d times", sc.calls)
 	}
-	if len(mem.deletes) != 1 {
-		t.Errorf("stale cleanup should still run for short bodies; got %d", len(mem.deletes))
+	calls := eng.calls()
+	if len(calls) != 1 || len(calls[0].facts) != 0 {
+		t.Errorf("a short body should replace the page's facts with none; got %+v", calls)
+	}
+}
+
+// The deadline has to fit the large route, which takes minutes. The old
+// 30s cap cancelled every large page's extraction.
+func TestOnPageSaved_DeadlineFitsLargeExtraction(t *testing.T) {
+	sc := &fakeSidecar{}
+	p := newPipelineWith(&fakeEngine{}, sc, nil, nil)
+	evt := sampleEvent()
+	evt.Content = strings.Repeat("This is a long research write-up. ", 200)
+	p.OnPageSaved(context.Background(), evt)
+	if sc.largeCalls != 1 {
+		t.Fatalf("large body should use ExtractFactsLarge; largeCalls=%d", sc.largeCalls)
+	}
+	if sc.deadline < sidecar.LargeExtractTimeout {
+		t.Errorf("extraction deadline = %v, shorter than the large route's own %v ceiling",
+			sc.deadline.Round(time.Second), sidecar.LargeExtractTimeout)
 	}
 }
 
@@ -331,10 +446,134 @@ func TestOnPageDeleted_SweepsMemoriesNotRelationships(t *testing.T) {
 		PageID: "page-uuid", PageSlug: "deploy-process",
 	})
 	if len(mem.deletes) != 1 {
-		t.Errorf("expected 1 memory cleanup call; got %d", len(mem.deletes))
+		t.Fatalf("expected 1 memory cleanup call; got %d", len(mem.deletes))
+	}
+	if got := mem.deletes[0].sourceRef; got != "page:page-uuid" {
+		t.Errorf("delete source_ref = %q, want page:page-uuid (the id the facts were stored under)", got)
 	}
 	if len(rel.upserts) != 0 {
 		t.Errorf("delete must NOT touch relationships (cross-page); got %d upsert batches", len(rel.upserts))
+	}
+}
+
+// debounced builds a pipeline whose saves go through PageSaved.
+func debounced(eng *fakeEngine, sc *fakeSidecar, mem *fakeMem) *Pipeline {
+	p := newPipelineWith(eng, sc, mem, nil)
+	p.deps.Debounce = 20 * time.Millisecond
+	return p
+}
+
+func saveWith(content string) SaveEvent {
+	evt := sampleEvent()
+	evt.Content = content
+	return evt
+}
+
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func idle(p *Pipeline) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.pages) == 0
+}
+
+// A burst of autosaves is one extraction, of the last save.
+func TestPageSaved_DebouncesAutosaves(t *testing.T) {
+	eng := &fakeEngine{}
+	sc := &fakeSidecar{}
+	p := debounced(eng, sc, nil)
+	for _, c := range []string{"The dentist appointment is on Tue", "The dentist appointment is on Thursday", "The dentist appointment is on Thursday at 3pm"} {
+		p.PageSaved(saveWith(c))
+	}
+	waitFor(t, "the run to finish", func() bool { return len(eng.calls()) > 0 && idle(p) })
+	if sc.n() != 1 {
+		t.Errorf("3 quick saves ran %d extractions, want 1", sc.n())
+	}
+	calls := eng.calls()
+	if len(calls) != 1 || !strings.Contains(calls[0].facts[0].Content, "Thursday at 3pm") {
+		t.Errorf("want one commit of the last save, got %+v", calls)
+	}
+}
+
+// A run that a newer save overtook while it was extracting must not
+// commit: the older draft's facts would land after (or alongside) the
+// newer ones. The newer save runs once the older run finishes.
+func TestPageSaved_SupersededRunDiscarded(t *testing.T) {
+	eng := &fakeEngine{}
+	sc := &fakeSidecar{gate: make(chan struct{}), started: make(chan string, 4)}
+	p := debounced(eng, sc, nil)
+
+	p.PageSaved(saveWith("The dentist appointment is on Tuesday at 3pm"))
+	<-sc.started // run 1 is extracting
+	p.PageSaved(saveWith("The dentist appointment is on Thursday at 3pm"))
+	time.Sleep(60 * time.Millisecond) // run 2's debounce fires; it waits for run 1
+	close(sc.gate)
+
+	waitFor(t, "both runs to finish", func() bool { return sc.n() == 2 && idle(p) })
+	calls := eng.calls()
+	if len(calls) != 1 {
+		t.Fatalf("want exactly one commit (the newer save's), got %d: %+v", len(calls), calls)
+	}
+	if got := calls[0].facts[0].Content; !strings.Contains(got, "Thursday") {
+		t.Errorf("committed %q; the superseded Tuesday draft won", got)
+	}
+}
+
+// A delete during an extraction removes the page's facts, and the
+// extraction that was running doesn't bring them back.
+func TestPageSaved_DeleteBeatsInFlightRun(t *testing.T) {
+	eng := &fakeEngine{}
+	mem := &fakeMem{}
+	sc := &fakeSidecar{gate: make(chan struct{}), started: make(chan string, 4)}
+	p := debounced(eng, sc, mem)
+
+	p.PageSaved(saveWith("The dentist appointment is on Tuesday at 3pm"))
+	<-sc.started
+	p.OnPageDeleted(context.Background(), DeleteEvent{BookID: "book-uuid", PageID: "page-uuid"})
+	close(sc.gate)
+
+	waitFor(t, "the run to finish", func() bool { return idle(p) && sc.n() == 1 })
+	time.Sleep(20 * time.Millisecond)
+	if calls := eng.calls(); len(calls) != 0 {
+		t.Errorf("a run overtaken by the page's delete committed %+v", calls)
+	}
+	if len(mem.deletes) != 1 {
+		t.Errorf("want the delete's cleanup, got %d deletes", len(mem.deletes))
+	}
+}
+
+// A pending save for a deleted page never runs.
+func TestPageSaved_DeleteCancelsPendingSave(t *testing.T) {
+	eng := &fakeEngine{}
+	sc := &fakeSidecar{}
+	p := debounced(eng, sc, &fakeMem{})
+	p.deps.Debounce = 50 * time.Millisecond
+	p.PageSaved(saveWith("The dentist appointment is on Tuesday at 3pm"))
+	p.OnPageDeleted(context.Background(), DeleteEvent{BookID: "book-uuid", PageID: "page-uuid"})
+	time.Sleep(150 * time.Millisecond)
+	if sc.n() != 0 || len(eng.calls()) != 0 {
+		t.Errorf("a save pending when its page was deleted still ran: extractions=%d commits=%d", sc.n(), len(eng.calls()))
+	}
+}
+
+func TestPageSaved_SkipsResearchBooks(t *testing.T) {
+	sc := &fakeSidecar{}
+	p := debounced(&fakeEngine{}, sc, nil)
+	evt := sampleEvent()
+	evt.BookSlug = "research:operator"
+	p.PageSaved(evt)
+	time.Sleep(60 * time.Millisecond)
+	if sc.n() != 0 || !idle(p) {
+		t.Errorf("a research evidence page was scheduled for ingestion")
 	}
 }
 

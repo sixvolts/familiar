@@ -483,3 +483,42 @@ func TestListMemberBookIDs_IncludesHidden(t *testing.T) {
 		}
 	}
 }
+
+// The real client payload: every first-party client sends the title with
+// each save. An unchanged title must not block the merge; the old check
+// required it to be absent, so the merge never ran for any client.
+func TestUpdatePage_UnchangedTitleStillMerges(t *testing.T) {
+	s, user := wikiStoreForTest(t)
+	ctx := context.Background()
+	book, err := s.CreateBook(ctx, user, "Groceries", "", "")
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+	page, err := s.CreatePage(ctx, book.ID, user, "List", "- milk\n", "")
+	if err != nil {
+		t.Fatalf("CreatePage: %v", err)
+	}
+	base := page.UpdatedAt
+	if _, err := s.UpdatePage(ctx, book.ID, page.Slug, user, PagePatch{
+		Title: ptr("List"), Content: ptr("- milk\n- eggs\n"), IfMatch: &base,
+	}); err != nil {
+		t.Fatalf("writer A: %v", err)
+	}
+	b, err := s.UpdatePage(ctx, book.ID, page.Slug, user, PagePatch{
+		Title: ptr("List"), Content: ptr("- milk\n- bread\n"), IfMatch: &base,
+	})
+	if err != nil {
+		t.Fatalf("writer B sending its unchanged title: err = %v, want a clean merge", err)
+	}
+	if !b.Merged || !strings.Contains(b.Content, "eggs") || !strings.Contains(b.Content, "bread") {
+		t.Fatalf("merge = %+v, want both items", b)
+	}
+
+	// A real rename against the moved base still refuses.
+	_, err = s.UpdatePage(ctx, book.ID, page.Slug, user, PagePatch{
+		Title: ptr("Shopping"), Content: ptr("- milk\n- jam\n"), IfMatch: &base,
+	})
+	if !errors.Is(err, ErrPageStale) {
+		t.Fatalf("stale rename + edit: err = %v, want ErrPageStale", err)
+	}
+}

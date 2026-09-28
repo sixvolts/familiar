@@ -12,6 +12,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -255,5 +258,58 @@ func TestEnsureExternalConversation_RefusesAnotherUsersKey(t *testing.T) {
 	}
 	if c, err := s.EnsureExternalConversation(ctx, alice, key, "Slack thread"); err != nil || c.UserID != alice {
 		t.Fatalf("alice re-ensure: %+v, %v", c, err)
+	}
+}
+
+// The gateway now writes each turn's final reply. A client from before
+// that still POSTs the same reply after the stream; it must get the
+// gateway's row back rather than store a second copy.
+func TestAppendMessage_OldClientRepeatOfServerReplyIsNotStoredTwice(t *testing.T) {
+	pool := testutil.PgTestPool(t)
+	s := NewConversationStore(pool)
+	ctx := context.Background()
+	owner := fmt.Sprintf("dedupe-owner-%d", time.Now().UnixNano())
+	seedUser(t, s, owner)
+	c, err := s.Create(ctx, owner, "t", "familiar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AppendMessage(ctx, &Message{ConversationID: c.ID, Role: "user", Content: "hi"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendIntermediateMessages(ctx, c.ID, owner, []pipeline.IntermediateMessage{
+		{Role: "assistant", Content: "hello there", Model: "big", ReasoningContent: "Generating response...\n"},
+	}); err != nil {
+		t.Fatalf("server-side persist: %v", err)
+	}
+
+	h := &Handler{conversations: s}
+	post := func(body string) int {
+		req := httptest.NewRequest("POST", "/console/api/conversations/"+c.ID+"/messages", strings.NewReader(body))
+		req.SetPathValue("id", c.ID)
+		req = req.WithContext(ctxWithAuth(req.Context(), AuthUser{UserID: owner, Role: "user", PrincipalType: PrincipalTypeUser, PrincipalID: owner}))
+		w := httptest.NewRecorder()
+		h.appendConversationMessage(w, req)
+		return w.Code
+	}
+	if code := post(`{"role":"assistant","content":"hello there","model":"big"}`); code != http.StatusCreated {
+		t.Fatalf("repeat POST status %d", code)
+	}
+	msgs, err := s.MessagesAll(ctx, c.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("messages = %d, want 2 (the repeat must not be stored)", len(msgs))
+	}
+	if last := msgs[len(msgs)-1]; last.Model != "big" || last.ReasoningContent == "" {
+		t.Errorf("server row lost its model or reasoning: %+v", last)
+	}
+	// A different reply is a real new message and is stored.
+	if code := post(`{"role":"assistant","content":"something else"}`); code != http.StatusCreated {
+		t.Fatalf("new POST status %d", code)
+	}
+	if msgs, _ = s.MessagesAll(ctx, c.ID); len(msgs) != 3 {
+		t.Fatalf("messages = %d, want 3", len(msgs))
 	}
 }

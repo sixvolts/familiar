@@ -1327,7 +1327,7 @@ func (s *WikiStore) UpdatePage(ctx context.Context, bookID, pageSlug, userID str
 	// case: if the base moved under us we can three-way merge the body
 	// instead of rejecting. Title/slug edits aren't line-mergeable, so a
 	// stale precondition there is always a hard conflict.
-	mergeEligible := p.IfMatch != nil && p.Content != nil && p.Title == nil && p.Slug == nil
+	mergeEligible := p.IfMatch != nil && p.Content != nil
 
 	// Retry loop: each attempt re-reads the current row, resolves the
 	// write (fresh, or auto-merged against the base revision), then does
@@ -1373,7 +1373,16 @@ func (s *WikiStore) updatePageOnce(ctx context.Context, bookID, pageSlug, userID
 	// post-load write.
 	stale := p.IfMatch != nil && !microEqual(cur.UpdatedAt, *p.IfMatch)
 	if stale {
-		if !mergeEligible {
+		// A title or slug the client sent unchanged isn't an edit. Every
+		// first-party client sends the title with every save, so testing
+		// for its mere presence meant the merge never ran: two people
+		// adding different items to a list got a 409 and had to throw one
+		// away. Only a real rename against a moved base is unmergeable.
+		// (Revisions don't record titles, so "unchanged" is judged against
+		// the current title; a rename racing an edit still conflicts.)
+		titleEdit := p.Title != nil && *p.Title != cur.Title
+		slugEdit := p.Slug != nil && *p.Slug != "" && *p.Slug != cur.Slug
+		if !mergeEligible || titleEdit || slugEdit {
 			// Title/slug edit against a moved base — not line-mergeable.
 			return nil, false, ErrPageStale
 		}

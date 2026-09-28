@@ -874,3 +874,68 @@ func TestListBooks_StringBoolean(t *testing.T) {
 		t.Fatalf("string-boolean include_personal still errors: %s", res.Error)
 	}
 }
+
+func ctxInSession(userID, session string) context.Context {
+	return skills.WithContext(context.Background(), skills.SessionContext{UserID: userID, SessionID: session})
+}
+
+// update_page replaces the whole body, and the model may take a minute to
+// write it. It must write against the version the model READ, so the
+// server can merge (or refuse) a human edit made in between, rather than
+// against whatever is current when the write happens.
+func TestUpdatePage_WritesAgainstTheVersionTheModelRead(t *testing.T) {
+	b := newFakeWiki()
+	bk := b.seedBook("home", "Home", map[string]string{"operator": "owner"})
+	page := b.seedPage(bk.ID, "groceries", "Groceries", "- milk\n")
+	readVersion := page.UpdatedAt
+	s := newSkillWith(b)
+	ctx := ctxInSession("operator", "sess-1")
+
+	if res, _ := s.Execute(ctx, "read_page", json.RawMessage(`{"book_slug":"home","page_slug":"groceries"}`)); res.Error != "" {
+		t.Fatalf("read_page: %s", res.Error)
+	}
+	// A human edits the page while the model is thinking.
+	b.mu.Lock()
+	b.pages[bk.ID]["groceries"].Content = "- milk\n- eggs\n"
+	b.pages[bk.ID]["groceries"].UpdatedAt = readVersion.Add(time.Minute)
+	b.mu.Unlock()
+
+	if res, _ := s.Execute(ctx, "update_page",
+		json.RawMessage(`{"book_slug":"home","page_slug":"groceries","content":"- milk (dairy aisle)\n"}`)); res.Error != "" {
+		t.Fatalf("update_page: %s", res.Error)
+	}
+	if b.lastIfMatch == nil || !b.lastIfMatch.Equal(readVersion) {
+		t.Fatalf("update_page wrote against %v, want the version the model read (%v)", b.lastIfMatch, readVersion)
+	}
+}
+
+// A conflicting concurrent edit refuses the write and tells the model to
+// re-read, instead of overwriting the human.
+func TestUpdatePage_StaleReportsReread(t *testing.T) {
+	b := newFakeWiki()
+	bk := b.seedBook("home", "Home", map[string]string{"operator": "owner"})
+	b.seedPage(bk.ID, "groceries", "Groceries", "- milk\n")
+	s := newSkillWith(b)
+	b.failStaleTimes = 1
+	res, _ := s.Execute(ctxInSession("operator", "sess-1"), "update_page",
+		json.RawMessage(`{"book_slug":"home","page_slug":"groceries","content":"- sorted\n"}`))
+	if !strings.Contains(res.Error, "read_page again") {
+		t.Fatalf("stale write result = %+v, want a re-read instruction", res)
+	}
+}
+
+// Without a read this session, the write is still conditional on the
+// version fetched just before it.
+func TestUpdatePage_WithoutAReadStillConditional(t *testing.T) {
+	b := newFakeWiki()
+	bk := b.seedBook("home", "Home", map[string]string{"operator": "owner"})
+	before := b.seedPage(bk.ID, "groceries", "Groceries", "- milk\n").UpdatedAt
+	s := newSkillWith(b)
+	if res, _ := s.Execute(ctxInSession("operator", "sess-2"), "update_page",
+		json.RawMessage(`{"book_slug":"home","page_slug":"groceries","content":"- milk\n- jam\n"}`)); res.Error != "" {
+		t.Fatalf("update_page: %s", res.Error)
+	}
+	if b.lastIfMatch == nil || !b.lastIfMatch.Equal(before) {
+		t.Fatalf("unconditional write (If-Match %v)", b.lastIfMatch)
+	}
+}

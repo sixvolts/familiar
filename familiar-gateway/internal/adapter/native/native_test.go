@@ -4,10 +4,13 @@ package native
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/familiar/gateway/internal/session"
 )
@@ -370,5 +373,60 @@ func TestChat_SessionHeldByAnotherUserRefused(t *testing.T) {
 	}
 	if held.UserID() != "alice" {
 		t.Fatalf("alice's session was re-homed to %q", held.UserID())
+	}
+}
+
+func TestServerPersistsReply(t *testing.T) {
+	conv := "3f2c9a1e-7b4d-4e8a-9c1f-2a6b8d0e4f13"
+	cases := []struct {
+		name      string
+		conv      string
+		haveStore bool
+		target    *ShardChatTarget
+		want      bool
+	}{
+		{"workspace conversation", conv, true, nil, true},
+		{"persistent shard conversation", conv, true, &ShardChatTarget{ShardID: "k"}, true},
+		{"ephemeral shard turn", conv, true, &ShardChatTarget{ShardID: "k", Ephemeral: true}, false},
+		{"no conversation", "", true, nil, false},
+		{"no store", conv, false, nil, false},
+	}
+	for _, c := range cases {
+		if got := serverPersistsReply(c.conv, c.haveStore, c.target); got != c.want {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// A stream must outlive the server's WriteTimeout: it is one deadline per
+// request, and it cut every chat stream at ten minutes while turns may
+// run for thirty.
+func TestClearWriteDeadline_StreamOutlivesWriteTimeout(t *testing.T) {
+	for _, clear := range []bool{true, false} {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/s", func(w http.ResponseWriter, r *http.Request) {
+			if clear {
+				clearWriteDeadline(w)
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			time.Sleep(400 * time.Millisecond)
+			fmt.Fprint(w, "event: done\ndata: {}\n\n")
+		})
+		srv := httptest.NewUnstartedServer(mux)
+		srv.Config.WriteTimeout = 150 * time.Millisecond
+		srv.Start()
+		resp, err := http.Get(srv.URL + "/s")
+		var body []byte
+		if err == nil {
+			body, _ = io.ReadAll(resp.Body)
+			resp.Body.Close()
+		}
+		srv.Close()
+		got := strings.Contains(string(body), "event: done")
+		if got != clear {
+			t.Errorf("clearWriteDeadline=%v: late event delivered=%v", clear, got)
+		}
 	}
 }

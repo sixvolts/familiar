@@ -10,7 +10,9 @@ package slack
 //   2. persists the user prompt BEFORE the pipeline runs,
 //   3. runs the pipeline under the conversation's id as the session id
 //      (so hydration replays that conversation), and
-//   4. persists the assistant reply AFTER.
+//   4. does NOT write the reply itself: the pipeline persists the turn's
+//      tool rows and final reply into that conversation (pipeline tests
+//      cover it), so an adapter write stored the reply twice.
 //
 // The resolver needs Postgres (its cache loads from users + identity_map),
 // so this is DB-gated; the ordering/wiring it proves is the part the
@@ -167,7 +169,7 @@ func TestSlackAdapter_PersistsDurableConversation(t *testing.T) {
 	go func() { _ = adapter.Run(runCtx) }()
 
 	select {
-	case <-posted: // the assistant reply is persisted before postMessage, so this gates the assertion
+	case <-posted: // the reply is posted after the turn, so this gates the assertion
 	case <-time.After(10 * time.Second):
 		t.Fatal("no reply posted back to Slack")
 	}
@@ -179,12 +181,11 @@ func TestSlackAdapter_PersistsDurableConversation(t *testing.T) {
 	}
 
 	// Exact sequence: ensure the DM conversation, persist the user
-	// prompt, run the turn, persist the reply.
+	// prompt, run the turn — and no adapter-side reply write after it.
 	want := []string{
 		"ensure:" + DMExternalKey(canonical),
 		"append:" + convs.convID + ":user:what did you send me",
 		"handle:" + canonical,
-		"append:" + convs.convID + ":assistant:here is your answer",
 	}
 	got := rec.events()
 	if len(got) != len(want) {

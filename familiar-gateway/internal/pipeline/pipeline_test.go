@@ -54,6 +54,9 @@ func (m *mockEngine) CommitFacts(ctx context.Context, sessionID string, facts []
 	}
 	return &pb.CommitFactsResponse{Committed: uint32(len(facts))}, nil
 }
+func (m *mockEngine) ReplaceSourceFacts(context.Context, string, string, string, string, []*pb.FactProto) (int64, error) {
+	return 0, nil
+}
 func (m *mockEngine) QueryMemory(ctx context.Context, req *pb.MemoryQueryRequest) (*pb.MemoryQueryResponse, error) {
 	return &pb.MemoryQueryResponse{}, nil
 }

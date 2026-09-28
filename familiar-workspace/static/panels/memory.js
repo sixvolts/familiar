@@ -774,7 +774,9 @@
 
     async function deleteCurrent() {
         if (!memState.currentID) return;
-        if (!confirm("Delete this memory? This cannot be undone.")) return;
+        // Deleting a fact also deletes the older versions it replaced;
+        // otherwise the previous version would come back as current.
+        if (!confirm("Delete this memory, and the older versions it replaced? This cannot be undone.")) return;
         setError("detail-error", null);
         try {
             await apiJSON("/console/api/memories/" + encodeURIComponent(memState.currentID), {

@@ -2,6 +2,7 @@ package memengine
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"net/url"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/familiar/gateway/internal/db"
+	"github.com/familiar/gateway/internal/llm"
 	"github.com/familiar/gateway/internal/testutil"
 )
 
@@ -276,8 +278,10 @@ func TestSweepLeavesQueueWhenEmbedderDown(t *testing.T) {
 		`SELECT attempts, last_error FROM pending_embeds`).Scan(&attempts, &lastErr); err != nil {
 		t.Fatalf("reading queue row: %v", err)
 	}
-	if attempts != 1 {
-		t.Errorf("attempts = %d, want 1", attempts)
+	// An outage isn't the row's fault: it must not move the row toward
+	// being parked.
+	if attempts != 0 {
+		t.Errorf("attempts = %d, want 0 (an unreachable embedder doesn't count against the row)", attempts)
 	}
 	if lastErr == nil || *lastErr == "" {
 		t.Error("expected last_error to be recorded")
@@ -354,5 +358,166 @@ func TestSweepRespectsBatchCap(t *testing.T) {
 	}
 	if got := s.RunOnce(context.Background()); got != 1 {
 		t.Fatalf("second pass fixed %d, want the remaining 1", got)
+	}
+}
+
+// rejecting is an embedder that answers but refuses some inputs, the
+// way llama.cpp refuses an input longer than its context.
+func rejecting(refuse func(text string) bool, calls *[]string) EmbedFunc {
+	return func(ctx context.Context, text string) ([]float32, error) {
+		if calls != nil {
+			*calls = append(*calls, text)
+		}
+		if refuse(text) {
+			return nil, &llm.EmbedAPIError{Status: 500, Message: "input is too large to process"}
+		}
+		return []float32{0.3, 0.3, 0.3}, nil
+	}
+}
+
+func queueRow(t *testing.T, e *MemEngine, content string) (attempts int, queued bool) {
+	t.Helper()
+	err := e.pool.QueryRowContext(context.Background(), `
+		SELECT p.attempts FROM pending_embeds p JOIN memories m ON m.id = p.memory_id
+		 WHERE m.content = $1`, content).Scan(&attempts)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return attempts, true
+}
+
+// One row the embedder refuses must not stop the rest of the queue. It
+// used to head every pass (oldest first) and end it, so nothing queued
+// behind it was ever embedded.
+func TestSweepSkipsRejectedRow(t *testing.T) {
+	e := setupReembedTest(t)
+	commitFact(t, e, "poison row", nil)
+	commitFact(t, e, "good row", nil)
+	s := NewReembedSweeper(e.pool, rejecting(func(text string) bool { return strings.Contains(text, "poison") }, nil), time.Minute, 10)
+	if got := s.RunOnce(context.Background()); got != 1 {
+		t.Fatalf("sweep fixed %d rows, want the 1 the embedder accepts", got)
+	}
+	if _, queued := queueRow(t, e, "good row"); queued {
+		t.Error("the row behind the rejected one is still queued")
+	}
+	if attempts, queued := queueRow(t, e, "poison row"); !queued || attempts != 1 {
+		t.Errorf("rejected row: queued=%v attempts=%d, want queued with 1 attempt", queued, attempts)
+	}
+}
+
+// An over-long input the embedder refuses gets a vector of its leading
+// part rather than none.
+func TestSweepShrinksOverlongInput(t *testing.T) {
+	e := setupReembedTest(t)
+	long := strings.Repeat("A long pasted document. ", 150) // ~3.6K chars
+	commitFact(t, e, long, nil)
+	var calls []string
+	s := NewReembedSweeper(e.pool, rejecting(func(text string) bool { return len(text) > 1000 }, &calls), time.Minute, 10)
+	if got := s.RunOnce(context.Background()); got != 1 {
+		t.Fatalf("sweep fixed %d rows, want the over-long one embedded from a prefix", got)
+	}
+	if last := calls[len(calls)-1]; len(last) > 1000 || !strings.HasPrefix(long, last) {
+		t.Errorf("embedded %d bytes; want a prefix of the content under the embedder's limit", len(last))
+	}
+}
+
+// A row the embedder keeps refusing is parked: no more embed calls, but
+// it stays in the queue (and the pending count) with its last error.
+func TestSweepParksRepeatedlyRejectedRow(t *testing.T) {
+	e := setupReembedTest(t)
+	commitFact(t, e, "poison row", nil)
+	var calls []string
+	s := NewReembedSweeper(e.pool, rejecting(func(text string) bool { return strings.Contains(text, "poison") }, &calls), time.Minute, 10)
+	for i := 0; i < maxReembedAttempts; i++ {
+		s.RunOnce(context.Background())
+	}
+	before := 0
+	for _, c := range calls {
+		if strings.Contains(c, "poison") {
+			before++
+		}
+	}
+	s.RunOnce(context.Background())
+	after := 0
+	for _, c := range calls {
+		if strings.Contains(c, "poison") {
+			after++
+		}
+	}
+	if after != before {
+		t.Error("a parked row was sent to the embedder again")
+	}
+	if attempts, queued := queueRow(t, e, "poison row"); !queued || attempts != maxReembedAttempts {
+		t.Errorf("parked row: queued=%v attempts=%d", queued, attempts)
+	}
+	if c, _ := s.PendingCount(context.Background()); c != 1 {
+		t.Errorf("pending count = %d, want the parked row still counted", c)
+	}
+
+	// Writing the row again gives it another round.
+	commitFact(t, e, "poison row", nil)
+	if attempts, _ := queueRow(t, e, "poison row"); attempts != 0 {
+		t.Errorf("a re-committed parked row kept %d attempts, want a fresh round", attempts)
+	}
+}
+
+// Rows with fewer rejections go first, so the batch isn't spent on the
+// same refused rows every pass.
+func TestSweepOrdersByAttempts(t *testing.T) {
+	e := setupReembedTest(t)
+	commitFact(t, e, "older, rejected before", nil)
+	commitFact(t, e, "newer, never tried", nil)
+	if _, err := e.pool.ExecContext(context.Background(), `
+		UPDATE pending_embeds SET attempts = 3
+		 WHERE memory_id = (SELECT id FROM memories WHERE content = 'older, rejected before')`); err != nil {
+		t.Fatal(err)
+	}
+	var calls []string
+	s := NewReembedSweeper(e.pool, rejecting(func(string) bool { return false }, &calls), time.Minute, 1)
+	s.RunOnce(context.Background())
+	if len(calls) != 1 || calls[0] != "newer, never tried" {
+		t.Errorf("a batch of 1 embedded %q, want the never-tried row", calls)
+	}
+}
+
+// A busy or unreachable upstream (503) is an outage: stop the pass and
+// don't count it against the row.
+func TestSweepStopsOnUnavailableEmbedder(t *testing.T) {
+	e := setupReembedTest(t)
+	commitFact(t, e, "first", nil)
+	commitFact(t, e, "second", nil)
+	var calls int
+	busy := func(ctx context.Context, text string) ([]float32, error) {
+		calls++
+		return nil, &llm.EmbedAPIError{Status: 503, Message: "loading model"}
+	}
+	s := NewReembedSweeper(e.pool, busy, time.Minute, 10)
+	s.RunOnce(context.Background())
+	if calls != 1 {
+		t.Errorf("embedder called %d times during an outage, want 1 (stop the pass)", calls)
+	}
+	if attempts, _ := queueRow(t, e, "first"); attempts != 0 {
+		t.Errorf("an outage counted against the row: attempts=%d", attempts)
+	}
+}
+
+// A server that fails every request, however trivial, is an outage:
+// nothing is counted against the rows, so a misconfigured embedder
+// can't park the whole queue.
+func TestSweepDoesNotBlameRowsForBrokenEmbedder(t *testing.T) {
+	e := setupReembedTest(t)
+	commitFact(t, e, "first", nil)
+	commitFact(t, e, "second", nil)
+	s := NewReembedSweeper(e.pool, rejecting(func(string) bool { return true }, nil), time.Minute, 10)
+	for i := 0; i < maxReembedAttempts+1; i++ {
+		s.RunOnce(context.Background())
+	}
+	for _, c := range []string{"first", "second"} {
+		if attempts, queued := queueRow(t, e, c); !queued || attempts != 0 {
+			t.Errorf("%s: queued=%v attempts=%d; a broken embedder counted against the row", c, queued, attempts)
+		}
 	}
 }

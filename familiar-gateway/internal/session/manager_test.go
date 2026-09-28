@@ -298,3 +298,26 @@ func TestSessionConcurrency(t *testing.T) {
 		t.Fatalf("expected %d turns (capped), got %d", MaxSessionTurns, len(s.Turns))
 	}
 }
+
+// A session already bound to one user must not be re-homed to another.
+// SetIdentity overwrote it, so a colliding id let a second user's turn
+// read the first user's history and commit facts under the wrong id.
+func TestClaimIdentity_RefusesAnotherUsersSession(t *testing.T) {
+	m := NewManager()
+	s := m.GetOrCreateWithID("conv-1", "slack:C1", "U1")
+	if !s.ClaimIdentity("slack", "alice") {
+		t.Fatal("claiming an unbound session failed")
+	}
+	if !s.ClaimIdentity("slack", "alice") {
+		t.Fatal("re-claiming by the same user failed")
+	}
+	if s.ClaimIdentity("slack", "bob") {
+		t.Fatal("bob claimed alice's session")
+	}
+	if got := s.UserID(); got != "alice" {
+		t.Fatalf("session re-homed to %q after a refused claim", got)
+	}
+	if s.ClaimIdentity("slack", "") {
+		t.Fatal("an empty identity claimed a session")
+	}
+}

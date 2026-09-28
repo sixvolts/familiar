@@ -549,7 +549,8 @@ func (r *Runner) execute(actionID, runID, trigger, eventNote string) {
 	// Stable session per action — history + committed facts
 	// accumulate across runs like the config scheduler's tasks do
 	// (scheduler.go:164), under the shard's scope when enveloped.
-	sess := r.deps.Sessions.GetOrCreate("action:"+a.ID, "action:"+a.ID)
+	key := actionSessionKey(a)
+	sess := r.deps.Sessions.GetOrCreate(key, key)
 	sess.SetIdentity("actions", a.OwnerID)
 
 	// Third-party text about to enter a fully-trusted turn. New webhook
@@ -699,4 +700,22 @@ func wrapTZ(s cron.Schedule, loc *time.Location) cron.Schedule {
 
 func (t tzSchedule) Next(from time.Time) time.Time {
 	return t.inner.Next(from.In(t.loc))
+}
+
+// actionSessionKey is the session an action's runs accumulate history
+// in. It is per envelope as well as per action: keyed by action id
+// alone, an action tested "Run as you" (reading private notes and memory
+// through tools) and then switched to a shard carried up to 20 of those
+// full-trust turns, tool results included, into the shard's runs, where
+// they could be repeated into the shard's delivery. The trusted envelope
+// keeps the original key so existing actions keep their history.
+func actionSessionKey(a *Action) string {
+	key := "action:" + a.ID
+	if a.Envelope != "" && a.Envelope != EnvelopeUser {
+		key += ":" + a.Envelope
+		if a.ShardID != "" {
+			key += ":" + a.ShardID
+		}
+	}
+	return key
 }

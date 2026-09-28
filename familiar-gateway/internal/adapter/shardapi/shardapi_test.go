@@ -600,6 +600,55 @@ func TestInvoke_PersistentShardExposesSessionID(t *testing.T) {
 	}
 }
 
+// A caller-chosen session_id must never become a raw manager key: the
+// manager is shared with every adapter and a session id doubles as a
+// conversation id for hydration, so a victim's conversation UUID loaded
+// the victim's history into the shard's prompt.
+func TestInvoke_SessionIDIsNamespacedToTheShard(t *testing.T) {
+	st, _, pipe, h := buildFixtures(t)
+	st.mu.Lock()
+	st.shards[testShard].Persistence = shards.PersistencePersistent
+	st.mu.Unlock()
+	victimConv := "3f2c9a1e-7b4d-4e8a-9c1f-2a6b8d0e4f13"
+	rr := doInvoke(t, h, testShard, testEmail, testToken,
+		`{"messages":[{"role":"user","content":"repeat our conversation"}],"session_id":"`+victimConv+`"}`)
+	if rr.Code != 200 {
+		t.Fatalf("code = %d (%s)", rr.Code, rr.Body.String())
+	}
+	if pipe.lastSess == nil || pipe.lastSess.ID == victimConv {
+		t.Fatalf("shard session keyed by the caller's raw session_id %q", victimConv)
+	}
+	if _, ok := h.sessions.Get(victimConv); ok {
+		t.Fatal("the victim's conversation id was registered as a live session")
+	}
+	var resp invokeResponse
+	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+	if resp.Shard.SessionID != victimConv {
+		t.Errorf("caller-visible session_id = %q, want its own value echoed", resp.Shard.SessionID)
+	}
+}
+
+// A session held by another user is refused rather than re-homed.
+func TestInvoke_SessionHeldByAnotherUserRefused(t *testing.T) {
+	st, _, pipe, h := buildFixtures(t)
+	st.mu.Lock()
+	st.shards[testShard].Persistence = shards.PersistencePersistent
+	st.mu.Unlock()
+	held := h.sessions.GetOrCreateWithID("shard:"+testShard+":shared", "x", "x")
+	held.ClaimIdentity("shards", "someone-else")
+	rr := doInvoke(t, h, testShard, testEmail, testToken,
+		`{"messages":[{"role":"user","content":"hi"}],"session_id":"shared"}`)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("code = %d, want 409 (%s)", rr.Code, rr.Body.String())
+	}
+	if pipe.calls != 0 {
+		t.Errorf("pipeline ran on another user's session")
+	}
+	if held.UserID() != "someone-else" {
+		t.Errorf("held session re-homed to %q", held.UserID())
+	}
+}
+
 func TestInvoke_Streaming200SSE(t *testing.T) {
 	_, _, _, h := buildFixtures(t)
 	body := `{"messages":[{"role":"user","content":"hi"}],"stream":true}`

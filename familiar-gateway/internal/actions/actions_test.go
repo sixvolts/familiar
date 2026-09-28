@@ -1022,3 +1022,86 @@ func TestRunner_EphemeralEnvelopeReachesInvoke(t *testing.T) {
 		t.Errorf("ephemeral skips not all set: %+v", ov)
 	}
 }
+
+// History is per envelope: a shard run must never inherit the turns of
+// earlier full-trust runs of the same action.
+func TestActionSessionKey_PerEnvelope(t *testing.T) {
+	user := actionSessionKey(&Action{ID: "a1", Envelope: EnvelopeUser})
+	if user != "action:a1" {
+		t.Errorf("trusted key = %q, want the original action:a1 so existing history carries over", user)
+	}
+	shardA := actionSessionKey(&Action{ID: "a1", Envelope: EnvelopeShard, ShardID: "kitchen"})
+	shardB := actionSessionKey(&Action{ID: "a1", Envelope: EnvelopeShard, ShardID: "garage"})
+	eph := actionSessionKey(&Action{ID: "a1", Envelope: EnvelopeEphemeral})
+	seen := map[string]string{user: "user"}
+	for name, k := range map[string]string{"shard kitchen": shardA, "shard garage": shardB, "ephemeral": eph} {
+		if prev, dup := seen[k]; dup {
+			t.Errorf("%s shares session key %q with %s", name, k, prev)
+		}
+		seen[k] = name
+	}
+}
+
+func TestRunner_ShardRunDoesNotInheritTrustedHistory(t *testing.T) {
+	sh := &shards.Shard{
+		ID: "hist-shard", OwnerID: "hist-owner", Name: "Hist",
+		Persistence: shards.PersistencePersistent, Visibility: shards.VisibilityIsolated,
+		ScopeTag: "shard:hist-shard", SystemPrompt: "bounded", MaxTokens: 256,
+	}
+	var mu sync.Mutex
+	var turnsSeen []int
+	invoke := func(ctx context.Context, sess *session.Session, prompt string, ov *pipeline.ShardOverrides) (string, *pipeline.RouteInfo, error) {
+		mu.Lock()
+		turnsSeen = append(turnsSeen, sess.TurnCount())
+		mu.Unlock()
+		if ov == nil {
+			// A full-trust run reads something private into its history.
+			sess.AddTurn("tool", "PRIVATE: contents of the owner's journal")
+		}
+		return "report", &pipeline.RouteInfo{ModelID: "test/fake"}, nil
+	}
+	h := newHarness(t, invoke, func(d *Deps) {
+		d.GetShard = func(ctx context.Context, id string) (*shards.Shard, error) { return sh, nil }
+	})
+	ctx := context.Background()
+	owner := seedOwner(t, h.store, "hist-owner")
+	if _, err := h.store.pool.ExecContext(ctx, `
+		INSERT INTO shards (id, owner_id, name, persistence, visibility, scope_tag, system_prompt)
+		VALUES ($1, $2, 'Hist', 'persistent', 'isolated', 'shard:hist-shard', 'x')
+		ON CONFLICT (id) DO NOTHING`, sh.ID, owner); err != nil {
+		t.Fatalf("seed shard row: %v", err)
+	}
+	act := validAction(owner)
+	act.Envelope = EnvelopeUser
+	a, err := h.store.Create(ctx, act)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	runID, err := h.runner.RunNow(ctx, a.ID, owner, false)
+	if err != nil {
+		t.Fatalf("RunNow (trusted): %v", err)
+	}
+	waitRun(t, h.store, a.ID, runID)
+
+	a.Envelope = EnvelopeShard
+	a.ShardID = sh.ID
+	if _, err := h.store.pool.ExecContext(ctx,
+		`UPDATE scheduled_actions SET envelope = 'shard', shard_id = $2 WHERE id = $1`, a.ID, sh.ID); err != nil {
+		t.Fatalf("switch to shard: %v", err)
+	}
+	runID, err = h.runner.RunNow(ctx, a.ID, owner, false)
+	if err != nil {
+		t.Fatalf("RunNow (shard): %v", err)
+	}
+	if run := waitRun(t, h.store, a.ID, runID); run.Status != RunStatusOK {
+		t.Fatalf("shard run status = %s (%s)", run.Status, run.Error)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(turnsSeen) != 2 {
+		t.Fatalf("invocations = %d, want 2", len(turnsSeen))
+	}
+	if turnsSeen[1] != 0 {
+		t.Fatalf("the shard run started with %d turn(s) of the trusted run's history", turnsSeen[1])
+	}
+}

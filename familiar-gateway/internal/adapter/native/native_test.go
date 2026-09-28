@@ -309,3 +309,66 @@ func TestStop_ShardSessionCannotStopOwnerTurn(t *testing.T) {
 		t.Fatalf("status = %d, want 403: a kiosk must not address its owner's sessions (body: %s)", w.Code, w.Body.String())
 	}
 }
+
+func TestEphemeralConversation(t *testing.T) {
+	conv := "3f2c9a1e-7b4d-4e8a-9c1f-2a6b8d0e4f13"
+	cases := map[string]bool{
+		conv + ":1727350000000000000": true,
+		conv:                          false, // plain conversation key
+		conv + ":":                    false,
+		conv + ":12ab":                false,
+		"not-a-uuid:123":              false,
+		"shard:kitchen:123":           false,
+	}
+	for key, want := range cases {
+		got, ok := ephemeralConversation(key)
+		if ok != want || (ok && got != conv) {
+			t.Errorf("ephemeralConversation(%q) = (%q, %v), want ok=%v", key, got, ok, want)
+		}
+	}
+}
+
+// Stop and status must reach an ephemeral shard turn (it runs under an
+// unregistered per-message session), proving ownership through the
+// conversation, and must refuse anyone who doesn't own it.
+func TestTurnOwnership_EphemeralTurnsGoThroughTheConversation(t *testing.T) {
+	conv := "3f2c9a1e-7b4d-4e8a-9c1f-2a6b8d0e4f13"
+	eph := conv + ":1727350000000000000"
+	a := &Adapter{sessions: session.NewManager()}
+
+	a.SetConversationOwner(&fakeConvOwner{owned: true})
+	if owned, live := a.turnOwnership(context.Background(), eph, "alice", ""); !owned || !live {
+		t.Errorf("owner's ephemeral turn: owned=%v live=%v, want both true", owned, live)
+	}
+	a.SetConversationOwner(&fakeConvOwner{owned: false})
+	if owned, _ := a.turnOwnership(context.Background(), eph, "mallory", ""); owned {
+		t.Error("a non-owner was allowed to stop an ephemeral turn")
+	}
+
+	held := a.sessions.GetOrCreateWithID(conv, "workspace", "alice")
+	held.ClaimIdentity("workspace", "alice")
+	if owned, _ := a.turnOwnership(context.Background(), conv, "mallory", ""); owned {
+		t.Error("a non-owner was allowed to stop a registered session")
+	}
+	if owned, live := a.turnOwnership(context.Background(), "no-such-session", "alice", ""); !owned || live {
+		t.Errorf("unknown key: owned=%v live=%v, want owned with nothing live", owned, live)
+	}
+}
+
+// A live session another user holds is refused, never re-homed onto the
+// caller (the pipeline is nil, so re-homing would panic instead).
+func TestChat_SessionHeldByAnotherUserRefused(t *testing.T) {
+	conv := "3f2c9a1e-7b4d-4e8a-9c1f-2a6b8d0e4f13"
+	a := &Adapter{sessions: session.NewManager()}
+	a.SetSessionReader(fakeSessionReader{uid: "bob", ok: true})
+	a.SetConversationOwner(&fakeConvOwner{owned: true}) // a colliding id that passes the store check
+	held := a.sessions.GetOrCreateWithID(conv, "workspace", "alice")
+	held.ClaimIdentity("workspace", "alice")
+	w := postChat(t, a, `{"message":"hi","conversation_id":"`+conv+`"}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (body: %s)", w.Code, w.Body.String())
+	}
+	if held.UserID() != "alice" {
+		t.Fatalf("alice's session was re-homed to %q", held.UserID())
+	}
+}

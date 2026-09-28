@@ -354,7 +354,11 @@ func (h *Handler) handleInvoke(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	overrides := buildOverrides(auth.shard)
-	sessionID, sess := h.sessionFor(auth.shard, auth.canonicalID, req.SessionID, r.Header.Get("X-Familiar-User-Email"))
+	sessionID, sess, ok := h.sessionFor(auth.shard, auth.canonicalID, req.SessionID, r.Header.Get("X-Familiar-User-Email"))
+	if !ok {
+		writeError(w, http.StatusConflict, "session_id is in use by another caller")
+		return
+	}
 
 	streaming := false
 	if req.Stream != nil {
@@ -382,8 +386,9 @@ func (h *Handler) handleInvoke(w http.ResponseWriter, r *http.Request) {
 // respects this via SkipSessionHydration + SkipCommit on the overrides,
 // so the unregistered session never gets a persistence round-trip.
 //
-// Returns the caller-visible session_id and the Session object.
-func (h *Handler) sessionFor(shard *shards.Shard, canonicalID, reqSessionID, email string) (string, *session.Session) {
+// Returns the caller-visible session_id and the Session object; ok is
+// false when the session is held by another user.
+func (h *Handler) sessionFor(shard *shards.Shard, canonicalID, reqSessionID, email string) (string, *session.Session, bool) {
 	if shard.Persistence == shards.PersistenceEphemeral {
 		// Fresh session every time, never registered so no lookup collisions.
 		now := time.Now()
@@ -398,19 +403,31 @@ func (h *Handler) sessionFor(shard *shards.Shard, canonicalID, reqSessionID, ema
 		sess.SetIdentity("shards", canonicalID)
 		// Ephemeral invocations don't expose a session_id — there's
 		// nothing for the caller to resume.
-		return "", sess
+		return "", sess, true
 	}
 
 	sessionID := reqSessionID
 	if sessionID == "" {
 		sessionID = uuid.NewString()
 	}
-	// Include session_id in the channel so two different sessions for
-	// the same (shard, caller) are distinct objects in the manager.
+	// The caller chooses session_id, so it must never be the manager
+	// key on its own. The manager is one namespace shared with every
+	// adapter, and a session id doubles as a conversation id for
+	// hydration: passing another user's conversation UUID loaded that
+	// conversation into the shard's prompt and wrote the shard's tool
+	// rows into it, and two owners' integrations both sending
+	// "default" shared one session. Namespacing by shard (ids are
+	// unique instance-wide) keeps every key inside this shard, and the
+	// prefix means it is never a conversation UUID. The caller keeps
+	// seeing its own session_id.
+	key := "shard:" + shard.ID + ":" + sessionID
 	channelID := "shards:" + shard.ID + ":" + sessionID
-	sess := h.sessions.GetOrCreateWithID(sessionID, channelID, email)
-	sess.SetIdentity("shards", canonicalID)
-	return sessionID, sess
+	sess := h.sessions.GetOrCreateWithID(key, channelID, email)
+	if !sess.ClaimIdentity("shards", canonicalID) {
+		log.Printf("[shards] session %q on %s is held by another user; refusing", sessionID, shard.ID)
+		return "", nil, false
+	}
+	return sessionID, sess, true
 }
 
 // buildOverrides translates a stored Shard row into the pipeline

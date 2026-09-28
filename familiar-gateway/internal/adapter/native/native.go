@@ -32,6 +32,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/familiar/gateway/internal/config"
 	"github.com/familiar/gateway/internal/engine"
 	"github.com/familiar/gateway/internal/memevents"
@@ -484,8 +486,14 @@ func (a *Adapter) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	// The session cookie's user id is already a verified canonical
 	// ID, so set it directly — the pipeline's identity resolver then
-	// has nothing to re-resolve.
-	sess.SetIdentity("workspace", senderID)
+	// has nothing to re-resolve. Claim rather than overwrite: a live
+	// session under this id that another user holds is refused, never
+	// re-homed onto the caller.
+	if !sess.ClaimIdentity("workspace", senderID) {
+		log.Printf("[http] session %q is held by another user; refusing %q", sess.ID, senderID)
+		writeError(w, http.StatusConflict, "conversation is in use by another session")
+		return
+	}
 
 	wantsStream := strings.Contains(r.Header.Get("Accept"), "text/event-stream")
 	ctx := r.Context()
@@ -540,23 +548,17 @@ func (a *Adapter) handleStop(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "no user identity: authenticate via the workspace session")
 		return
 	}
-	if shardID != "" && !a.shardMayAddress(r.Context(), key, senderID, shardID) {
+	owned, live := a.turnOwnership(r.Context(), key, senderID, shardID)
+	if !owned {
+		log.Printf("[http] stop: rejected session %q for %q", key, senderID)
 		writeError(w, http.StatusForbidden, "session not found")
 		return
 	}
-
-	// Resolve the live session and confirm the caller owns it. A missing
-	// session isn't an error — the turn already finished, or the key is
-	// stale — it just means there's nothing to stop.
-	sess, ok := a.sessions.Get(key)
-	if !ok {
+	// A missing session isn't an error: the turn already finished, or
+	// the key is stale. There's just nothing to stop.
+	if !live {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]bool{"stopped": false})
-		return
-	}
-	if sess.UserID() != senderID {
-		log.Printf("[http] stop: rejected session %q not owned by %q", key, senderID)
-		writeError(w, http.StatusForbidden, "session not found")
 		return
 	}
 
@@ -590,26 +592,76 @@ func (a *Adapter) handleTurnStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "no user identity: authenticate via the workspace session")
 		return
 	}
-	if shardID != "" && !a.shardMayAddress(r.Context(), key, senderID, shardID) {
+	owned, live := a.turnOwnership(r.Context(), key, senderID, shardID)
+	if !owned {
+		log.Printf("[http] status: rejected session %q for %q", key, senderID)
 		writeError(w, http.StatusForbidden, "session not found")
 		return
 	}
-
 	// A missing session is not an error: the turn finished and the
 	// session was reaped, or the key is stale. Either way nothing is
 	// running, which is exactly what the caller needs to know.
 	running := false
-	if sess, ok := a.sessions.Get(key); ok {
-		if sess.UserID() != senderID {
-			log.Printf("[http] status: rejected session %q not owned by %q", key, senderID)
-			writeError(w, http.StatusForbidden, "session not found")
-			return
-		}
-		running = a.pipeline.TurnRunning(sess.ID)
+	if live {
+		running = a.pipeline.TurnRunning(key)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]bool{"running": running})
+}
+
+// ephemeralConversation extracts the conversation id from an ephemeral
+// shard turn's session id ("<conversation uuid>:<unix nanos>", minted
+// in handleChat). ok is false for any other key.
+func ephemeralConversation(key string) (convID string, ok bool) {
+	i := strings.LastIndexByte(key, ':')
+	if i <= 0 || i == len(key)-1 {
+		return "", false
+	}
+	for _, c := range key[i+1:] {
+		if c < '0' || c > '9' {
+			return "", false
+		}
+	}
+	if _, err := uuid.Parse(key[:i]); err != nil {
+		return "", false
+	}
+	return key[:i], true
+}
+
+// turnOwnership decides whether the caller may stop or poll the turn
+// keyed by key. owned=false means refuse; live reports whether there
+// is a turn under that key to act on. A registered session is checked
+// against its owner. An ephemeral shard turn runs under an unregistered
+// session, so its ownership is its conversation's; without this path
+// Stop never reached those turns and the model kept decoding. A shard
+// session may only address turns in conversations bound to its shard.
+func (a *Adapter) turnOwnership(ctx context.Context, key, userID, shardID string) (owned, live bool) {
+	convKey := key
+	cid, ephemeral := ephemeralConversation(key)
+	if ephemeral {
+		convKey = cid
+	}
+	if shardID != "" && !a.shardMayAddress(ctx, convKey, userID, shardID) {
+		return false, false
+	}
+	if sess, ok := a.sessions.Get(key); ok {
+		return sess.UserID() == userID, true
+	}
+	if !ephemeral {
+		return true, false
+	}
+	a.mu.RLock()
+	owner := a.convOwner
+	a.mu.RUnlock()
+	if owner == nil {
+		return false, false
+	}
+	ok, err := owner.OwnsConversation(ctx, convKey, userID)
+	if err != nil || !ok {
+		return false, false
+	}
+	return true, true
 }
 
 func (a *Adapter) handleStreaming(ctx context.Context, w http.ResponseWriter, sess *session.Session, userMsg string, shardTarget *ShardChatTarget) {

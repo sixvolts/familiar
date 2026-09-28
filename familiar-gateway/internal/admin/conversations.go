@@ -277,11 +277,21 @@ func (s *ConversationStore) EnsureExternalConversation(ctx context.Context, user
 		&c.CreatedAt, &c.UpdatedAt, &c.ArchivedAt, &c.Pinned, &folderID); err != nil {
 		return nil, fmt.Errorf("conversations: ensure external: %w", err)
 	}
+	// The key already belonged to another user's conversation. Handing
+	// that row back made it a shared conversation: the caller's turns
+	// hydrated the owner's history and wrote into it.
+	if c.UserID != userID {
+		return nil, ErrExternalConversationOwner
+	}
 	if folderID.Valid {
 		c.FolderID = &folderID.String
 	}
 	return &c, nil
 }
+
+// ErrExternalConversationOwner is returned by EnsureExternalConversation
+// when the external key is bound to another user's conversation.
+var ErrExternalConversationOwner = errors.New("conversations: external key belongs to another user")
 
 // Update applies the patch fields. Each *string/*bool is "set when
 // non-nil"; nil leaves the column alone. archive=true sets
@@ -468,8 +478,15 @@ func (s *ConversationStore) MessagesAll(ctx context.Context, conversationID stri
 // so non-workspace adapters whose session ids aren't UUIDs (e.g.
 // the Slack sha256 scheme) get a harmless no-op when the pipeline
 // speculatively asks for hydration.
-func (s *ConversationStore) LoadRecentTurns(ctx context.Context, conversationID string, limit int, visit func(role, content string, toolCalls []byte, toolCallID string)) error {
-	if visit == nil || limit <= 0 {
+//
+// ownerID is the session's canonical user. Only a conversation that user
+// owns is replayed: the session id is the conversation id, and several
+// adapters derive session ids a client can influence, so without the
+// owner check a colliding id loaded someone else's history (tool
+// results included) into the caller's prompt. An empty ownerID loads
+// nothing.
+func (s *ConversationStore) LoadRecentTurns(ctx context.Context, conversationID, ownerID string, limit int, visit func(role, content string, toolCalls []byte, toolCallID string)) error {
+	if visit == nil || limit <= 0 || ownerID == "" {
 		return nil
 	}
 	if _, err := uuid.Parse(conversationID); err != nil {
@@ -477,15 +494,16 @@ func (s *ConversationStore) LoadRecentTurns(ctx context.Context, conversationID 
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT role, content, tool_calls, COALESCE(tool_call_id, '') FROM (
-			SELECT role, content, tool_calls, tool_call_id, seq
-			  FROM messages
-			 WHERE conversation_id = $1::uuid
-			   AND role IN ('user', 'assistant', 'tool')
-			 ORDER BY seq DESC
+			SELECT m.role, m.content, m.tool_calls, m.tool_call_id, m.seq
+			  FROM messages m
+			  JOIN conversations c ON c.id = m.conversation_id AND c.user_id = $3
+			 WHERE m.conversation_id = $1::uuid
+			   AND m.role IN ('user', 'assistant', 'tool')
+			 ORDER BY m.seq DESC
 			 LIMIT $2
 		) sub
 		ORDER BY seq ASC`,
-		conversationID, limit)
+		conversationID, limit, ownerID)
 	if err != nil {
 		return fmt.Errorf("messages: recent turns: %w", err)
 	}
@@ -514,7 +532,10 @@ func (s *ConversationStore) LoadRecentTurns(ctx context.Context, conversationID 
 // The message-shape type lives in pipeline package so the pipeline
 // can satisfy its own ConversationStore interface without two
 // packages owning the same struct.
-func (s *ConversationStore) AppendIntermediateMessages(ctx context.Context, conversationID string, msgs []pipeline.IntermediateMessage) error {
+//
+// ownerID is the session's canonical user; the write only lands in a
+// conversation that user owns, for the same reason as LoadRecentTurns.
+func (s *ConversationStore) AppendIntermediateMessages(ctx context.Context, conversationID, ownerID string, msgs []pipeline.IntermediateMessage) error {
 	if len(msgs) == 0 {
 		return nil
 	}
@@ -531,10 +552,17 @@ func (s *ConversationStore) AppendIntermediateMessages(ctx context.Context, conv
 	// matter. Actions persist their output through the delivery path instead,
 	// so there is nothing to write here; skip quietly, as with a non-UUID id.
 	var exists bool
+	var owner sql.NullString
 	if err := s.db.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM conversations WHERE id = $1::uuid)`,
-		conversationID).Scan(&exists); err != nil {
+		`SELECT true, user_id FROM conversations WHERE id = $1::uuid`,
+		conversationID).Scan(&exists, &owner); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("messages: check conversation: %w", err)
+	}
+	if exists && owner.String != ownerID {
+		// A session whose id names someone else's conversation. Refuse
+		// loudly: writing here put one user's tool calls and results
+		// into another user's thread.
+		return fmt.Errorf("messages: conversation %s is not owned by session user %q", conversationID, ownerID)
 	}
 	if !exists {
 		// Log rather than returning silently. The FK violation this replaces

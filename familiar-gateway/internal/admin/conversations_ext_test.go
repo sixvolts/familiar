@@ -10,10 +10,12 @@ package admin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
+	"github.com/familiar/gateway/internal/pipeline"
 	"github.com/familiar/gateway/internal/testutil"
 )
 
@@ -109,7 +111,7 @@ func TestEnsureExternalConversation_IdempotentAndHydrates(t *testing.T) {
 	}
 
 	var got []string
-	err = s.LoadRecentTurns(ctx, first.ID, 10, func(role, content string, _ []byte, _ string) {
+	err = s.LoadRecentTurns(ctx, first.ID, userID, 10, func(role, content string, _ []byte, _ string) {
 		got = append(got, role+":"+content)
 	})
 	if err != nil {
@@ -184,5 +186,74 @@ func TestMessagesAll_ReturnsWholeThreadPast100(t *testing.T) {
 	}
 	if last := all[len(all)-1].Content; last != fmt.Sprintf("msg-%03d", total-1) {
 		t.Errorf("last message = %q, want the newest msg-%03d (the turn the 100-cap dropped)", last, total-1)
+	}
+}
+
+// The session id doubles as the conversation id, and several adapters
+// derive session ids a client can influence. Hydration and intermediate
+// writes must therefore check the conversation belongs to the session's
+// user, or a colliding id reads and writes someone else's thread.
+func TestConversationStore_TurnsAreOwnerScoped(t *testing.T) {
+	pool := testutil.PgTestPool(t)
+	s := NewConversationStore(pool)
+	ctx := context.Background()
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	owner, other := "own-owner-"+suffix, "own-other-"+suffix
+	seedUser(t, s, owner)
+	seedUser(t, s, other)
+	c, err := s.Create(ctx, owner, "Private", "familiar")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := s.AppendMessage(ctx, &Message{ConversationID: c.ID, Role: "user", Content: "my private question"}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+
+	var loaded []string
+	visit := func(_, content string, _ []byte, _ string) { loaded = append(loaded, content) }
+	if err := s.LoadRecentTurns(ctx, c.ID, other, 10, visit); err != nil {
+		t.Fatalf("load as other: %v", err)
+	}
+	if len(loaded) != 0 {
+		t.Fatalf("another user's session hydrated %d turn(s) of this conversation", len(loaded))
+	}
+	if err := s.LoadRecentTurns(ctx, c.ID, owner, 10, visit); err != nil || len(loaded) != 1 {
+		t.Fatalf("owner hydrate: %d turn(s), err=%v; want 1", len(loaded), err)
+	}
+
+	err = s.AppendIntermediateMessages(ctx, c.ID, other, []pipeline.IntermediateMessage{{Role: "tool", Content: "injected", ToolCallID: "t1"}})
+	if err == nil {
+		t.Fatal("another user's session wrote into this conversation")
+	}
+	msgs, err := s.MessagesAll(ctx, c.ID)
+	if err != nil {
+		t.Fatalf("messages: %v", err)
+	}
+	for _, m := range msgs {
+		if m.Content == "injected" {
+			t.Fatal("the refused write landed anyway")
+		}
+	}
+}
+
+// An external key already bound to another user's conversation is
+// refused rather than handed back as a shared conversation.
+func TestEnsureExternalConversation_RefusesAnotherUsersKey(t *testing.T) {
+	pool := testutil.PgTestPool(t)
+	s := NewConversationStore(pool)
+	ctx := context.Background()
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	alice, bob := "ext-alice-"+suffix, "ext-bob-"+suffix
+	seedUser(t, s, alice)
+	seedUser(t, s, bob)
+	key := "slack:thread:C1:171.5:" + suffix
+	if _, err := s.EnsureExternalConversation(ctx, alice, key, "Slack thread"); err != nil {
+		t.Fatalf("alice ensure: %v", err)
+	}
+	if _, err := s.EnsureExternalConversation(ctx, bob, key, "Slack thread"); !errors.Is(err, ErrExternalConversationOwner) {
+		t.Fatalf("bob got alice's conversation (err=%v), want ErrExternalConversationOwner", err)
+	}
+	if c, err := s.EnsureExternalConversation(ctx, alice, key, "Slack thread"); err != nil || c.UserID != alice {
+		t.Fatalf("alice re-ensure: %+v, %v", c, err)
 	}
 }

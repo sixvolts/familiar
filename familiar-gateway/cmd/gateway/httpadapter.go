@@ -561,12 +561,6 @@ func runHTTPAdapter(ctx context.Context, d httpAdapterDeps, adminHOut **admin.Ha
 					log.Printf("[admin] shards CRUD attached (%d skills / %d tools in catalog)",
 						len(skillInfos), len(toolNames))
 
-					// MODEL-SELECTOR: project router.Registry into
-					// the narrow ModelCatalog interface the admin
-					// /console/api/models endpoint consumes. The
-					// console UI's "..." → Models submenu reads
-					// from this list to render the model picker.
-					adminH.AttachModelCatalog(modelCatalog{reg: reg})
 				} else {
 					log.Printf("[admin] warning: shards CRUD disabled: %v", shardErr)
 				}

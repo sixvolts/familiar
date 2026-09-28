@@ -86,36 +86,34 @@
         if (ws && ws.setTabDirty) ws.setTabDirty(shell.tab.id, dirty);
     }
 
-    // fenceBody returns the body of the Nth ```mermaid fence, or null.
+    // fences lists the page's mermaid code blocks the way the editor
+    // counts them (the index a diagram tab carries comes from the editor):
+    // familiarMermaid.fences, one scanner for both sides.
+    function fences(content) {
+        const fm = window.familiarMermaid;
+        if (!fm || !fm.fences) throw new Error("the diagram renderer isn't loaded");
+        return fm.fences(content);
+    }
+
+    // fenceBody returns the body of the Nth mermaid fence, or null.
     function fenceBody(content, index) {
-        const re = /```mermaid[^\n]*\n([\s\S]*?)```/g;
-        let m;
-        let i = -1;
-        while ((m = re.exec(content)) !== null) {
-            i++;
-            if (i === index) return m[1];
-        }
-        return null;
+        const f = fences(content)[index];
+        return f ? f.body : null;
     }
 
     function sameDiagram(a, b) {
         return (a || "").replace(/\s+$/, "") === (b || "").replace(/\s+$/, "");
     }
 
-    // replaceFence swaps the body of the Nth ```mermaid fence.
+    // replaceFence swaps the body of the Nth mermaid fence, keeping its
+    // own fence lines (```Mermaid, ~~~mermaid, four backticks).
     // Returns null when the page no longer has that many fences —
     // the diagram moved or was deleted under us.
     function replaceFence(content, index, newSource) {
-        const re = /```mermaid[^\n]*\n([\s\S]*?)```/g;
-        let i = -1;
-        let result = null;
-        result = content.replace(re, (match) => {
-            i++;
-            if (i !== index) return match;
-            const body = newSource.endsWith("\n") ? newSource : newSource + "\n";
-            return "```mermaid\n" + body + "```";
-        });
-        return i >= index ? result : null;
+        const f = fences(content)[index];
+        if (!f) return null;
+        const body = newSource.endsWith("\n") ? newSource : newSource + "\n";
+        return content.slice(0, f.bodyStart) + body + content.slice(f.bodyEnd);
     }
 
     async function saveShell(shell) {
@@ -223,21 +221,17 @@
                     api("/console/api/books/" + encodeURIComponent(tab.state.book_slug) +
                         "/page-by-id/" + encodeURIComponent(tab.state.page_id))
                         .then((page) => {
-                            const re = /```mermaid[^\n]*\n([\s\S]*?)```/g;
-                            let m, i = -1;
-                            while ((m = re.exec(page.content || ""))) {
-                                i++;
-                                if (i === (tab.state.fence_index || 0)) {
-                                    loadShell(shell, {
-                                        ...tab.state,
-                                        source: m[1],
-                                        // The fence just read is the baseline;
-                                        // the persisted one may predate saves.
-                                        base_source: m[1],
-                                        page_title: tab.state.page_title || page.title,
-                                    });
-                                    return;
-                                }
+                            const f = fences(page.content || "")[tab.state.fence_index || 0];
+                            if (f) {
+                                loadShell(shell, {
+                                    ...tab.state,
+                                    source: f.body,
+                                    // The fence just read is the baseline;
+                                    // the persisted one may predate saves.
+                                    base_source: f.body,
+                                    page_title: tab.state.page_title || page.title,
+                                });
+                                return;
                             }
                             shell.crumb.textContent = "Diagram no longer on the page";
                         })

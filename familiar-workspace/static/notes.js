@@ -58,7 +58,6 @@
     const CDN = {
         marked:    "/vendor/marked/marked.min.js",
         dompurify: "/vendor/dompurify/purify.min.js",
-        hljsJS:    "/vendor/highlight/core.min.js",
         hljsCSS:   "/vendor/highlight/atom-one-dark.min.css",
     };
 
@@ -80,7 +79,6 @@
                 }
                 if (!window.marked) await loadScript(CDN.marked);
                 if (!window.DOMPurify) await loadScript(CDN.dompurify);
-                if (!window.hljs) await loadScript(CDN.hljsJS);
                 return renderMarkdownReal;
             } catch (e) {
                 console.warn("notes: markdown deps failed, falling back", e);

@@ -1583,7 +1583,7 @@ func (p *Pipeline) runTurn(
 		// before the completion that failed. Record what they did, or
 		// the next turn contradicts it.
 		if len(loopMsgs) > 0 {
-			p.commitUnfinished(ctx, sess, userMsg, preamble+unfinishedNote("the model request failed"), loopMsgs, info, overrides)
+			p.commitUnfinished(ctx, sess, userMsg, preamble+loopProse(loopMsgs)+unfinishedNote("the model request failed"), loopMsgs, info, overrides)
 		}
 		return "", err
 	}
@@ -1635,6 +1635,24 @@ func (p *Pipeline) runTurn(
 	return responseText, nil
 }
 
+// loopProse is the prose the tool loop's assistant messages carried,
+// followed by a blank line, or "". On success it is merged into the
+// reply; a turn that failed mid-loop records it in the note's place, so
+// the conversation (which shows the reply, not the tool-call rows)
+// keeps what the user saw.
+func loopProse(loopMsgs []llm.Message) string {
+	var parts []string
+	for _, m := range loopMsgs {
+		if m.Role == "assistant" && strings.TrimSpace(m.Content) != "" {
+			parts = append(parts, m.Content)
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "\n\n") + "\n\n"
+}
+
 // unfinishedNote is the reply recorded for a turn whose tools ran but
 // which produced no answer. It is written to the session and the
 // conversation, so the next turn knows the tool calls happened.
@@ -1678,6 +1696,9 @@ func (p *Pipeline) handle(ctx context.Context, sess *session.Session, userMsg st
 	// a client disconnect. See turnContext / prepContext.
 	turnCtx, turnCancel := p.turnContext(ctx, sess.ID)
 	defer turnCancel()
+	// A session with a turn running is not idle (see Session.BeginTurn).
+	sess.BeginTurn()
+	defer sess.EndTurn()
 
 	prepCtx, prepCancel := prepContext(turnCtx, ctx)
 	route, info, err := p.beginTurn(prepCtx, sess, userMsg, overrides)
@@ -1740,6 +1761,9 @@ func (p *Pipeline) handleStream(
 	// a client disconnect (nothing has been produced yet at that point).
 	turnCtx, turnCancel := p.turnContext(ctx, sess.ID)
 	defer turnCancel()
+	// A session with a turn running is not idle (see Session.BeginTurn).
+	sess.BeginTurn()
+	defer sess.EndTurn()
 
 	prepCtx, prepCancel := prepContext(turnCtx, ctx)
 	route, info, err := p.beginTurn(prepCtx, sess, userMsg, overrides)
@@ -2237,6 +2261,10 @@ func (p *Pipeline) runToolLoop(
 			Role:      "assistant",
 			Content:   resp.Content,
 			ToolCalls: resp.ToolCalls,
+			// Its reasoning too: a formatter that keeps the current
+			// turn's reasoning (Qwen) shows the model its own plan on the
+			// next iteration, instead of it re-reasoning from scratch.
+			ReasoningContent: resp.ReasoningContent,
 		})
 		// Charged after this iteration's dispatch: the calls are in the
 		// context whether or not they run, so they must not stop
@@ -3285,11 +3313,24 @@ func persistedReply(responseText string, info *RouteInfo) IntermediateMessage {
 // shape stored on session.Turn.ToolCalls (and the messages table's
 // tool_calls JSONB column). Returns nil for empty/missing slices so
 // the storage row stays NULL instead of holding an empty array.
+//
+// A call whose arguments aren't valid JSON keeps its place with the
+// arguments as a JSON string: one bad call used to fail the whole
+// slice, and the turn was saved without any of its tool calls while its
+// tool results kept their ids, orphaned in every later prompt.
 func marshalToolCalls(tcs []llm.ToolCall) []byte {
 	if len(tcs) == 0 {
 		return nil
 	}
-	b, err := json.Marshal(tcs)
+	safe := make([]llm.ToolCall, len(tcs))
+	for i, tc := range tcs {
+		safe[i] = tc
+		if len(tc.Arguments) > 0 && !json.Valid(tc.Arguments) {
+			log.Printf("[pipeline] marshalToolCalls: %s arguments are not JSON; kept as a string", tc.Name)
+			safe[i].Arguments, _ = json.Marshal(string(tc.Arguments))
+		}
+	}
+	b, err := json.Marshal(safe)
 	if err != nil {
 		log.Printf("[pipeline] marshalToolCalls: %v (dropping tool_calls metadata)", err)
 		return nil

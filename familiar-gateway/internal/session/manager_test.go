@@ -342,3 +342,49 @@ func TestReplaceTurnsIf(t *testing.T) {
 		t.Errorf("replaced turns %v, want two with increasing Seq", got)
 	}
 }
+
+// A session with a turn running is not evicted as idle: its LastActive
+// only moved when a turn committed, so a long turn on a quiet session
+// was evicted mid-turn.
+func TestEvictIdle_SkipsSessionsWithATurnRunning(t *testing.T) {
+	m := NewManager()
+	s := m.GetOrCreateWithID("conv-1", "workspace", "u")
+	s.BeginTurn()
+	s.mu.Lock()
+	s.LastActive = time.Now().Add(-time.Hour)
+	s.mu.Unlock()
+	if n := m.EvictIdle(time.Minute); n != 0 {
+		t.Fatalf("evicted %d sessions with a turn running", n)
+	}
+	s.EndTurn()
+	s.mu.Lock()
+	s.LastActive = time.Now().Add(-time.Hour)
+	s.mu.Unlock()
+	if n := m.EvictIdle(time.Minute); n != 1 {
+		t.Fatalf("evicted %d idle sessions, want 1", n)
+	}
+}
+
+// Concurrent first requests for one (channel, sender) get one session;
+// the look-up-then-create raced into duplicates.
+func TestGetOrCreate_ConcurrentFirstRequestsShareASession(t *testing.T) {
+	m := NewManager()
+	var wg sync.WaitGroup
+	got := make([]*Session, 50)
+	for i := range got {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			got[i] = m.GetOrCreate("action:1", "scheduler")
+		}(i)
+	}
+	wg.Wait()
+	for _, s := range got {
+		if s != got[0] {
+			t.Fatal("concurrent first requests created more than one session")
+		}
+	}
+	if n := m.Count(); n != 1 {
+		t.Errorf("manager holds %d sessions, want 1", n)
+	}
+}

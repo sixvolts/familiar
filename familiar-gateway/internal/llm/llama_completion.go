@@ -21,7 +21,6 @@ import (
 	"log"
 	"net/http"
 	"strings"
-	"time"
 )
 
 // LlamaCompletionProvider implements Provider against
@@ -57,8 +56,9 @@ func NewLlamaCompletionProvider(name, endpoint, apiKey string, formatter ModelFo
 		endpoint:  strings.TrimRight(endpoint, "/"),
 		apiKey:    apiKey,
 		formatter: formatter,
+		// No Client.Timeout (see NewOpenAIProvider): the caller's context
+		// bounds each request.
 		client: &http.Client{
-			Timeout: 600 * time.Second,
 			Transport: &http.Transport{
 				DisableKeepAlives: true, // fresh connection per request — avoids EOF from stale pooled connections
 			},
@@ -119,6 +119,7 @@ type completionRequest struct {
 type completionStreamChunk struct {
 	Content         string `json:"content"`
 	Stop            bool   `json:"stop"`
+	StopType        string `json:"stop_type"` // "eos", "word", "limit" (n_predict reached)
 	TokensEvaluated int    `json:"tokens_evaluated"`
 	TokensPredicted int    `json:"tokens_predicted"`
 	Timings         struct {
@@ -130,6 +131,7 @@ type completionStreamChunk struct {
 // completionResponse is the non-streaming reply.
 type completionResponse struct {
 	Content         string `json:"content"`
+	StopType        string `json:"stop_type"`
 	TokensEvaluated int    `json:"tokens_evaluated"`
 	TokensPredicted int    `json:"tokens_predicted"`
 }
@@ -226,7 +228,21 @@ func (p *LlamaCompletionProvider) Complete(ctx context.Context, req CompletionRe
 	if err := json.Unmarshal(raw, &cr); err != nil {
 		return nil, fmt.Errorf("parse response: %w (body: %s)", err, truncateForLog(string(raw)))
 	}
-	return p.parseAndFinalize(cr.Content, cr.TokensEvaluated, cr.TokensPredicted, 0, "stop")
+	// Thinking on with the think tag pre-filled, and no close tag in the
+	// output: the model was still reasoning when it stopped (n_predict).
+	thinkOpen := req.EnableThinking && !p.formatter.StreamTags().DetectThinkingInBody &&
+		!strings.Contains(cr.Content, p.formatter.StreamTags().ThinkClose)
+	return p.parseAndFinalize(cr.Content, thinkOpen, cr.TokensEvaluated, cr.TokensPredicted, 0, finishFor(cr.StopType))
+}
+
+// finishFor maps llama-server's stop_type to a finish reason: n_predict
+// reached is "length" (it was reported as "stop", so a reply cut off by
+// the token budget looked complete).
+func finishFor(stopType string) string {
+	if stopType == "limit" {
+		return "length"
+	}
+	return "stop"
 }
 
 // CompleteStream implements Provider. Streams /completion SSE
@@ -266,6 +282,11 @@ func (p *LlamaCompletionProvider) CompleteStream(ctx context.Context, req Comple
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	var tokensIn, tokensOut int
 	var decodeMs float64
+	// sawStop records the terminal chunk (stop=true). A stream that
+	// ends without one was cut off, and returned what it had as a
+	// success.
+	sawStop := false
+	stopType := ""
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -282,6 +303,8 @@ func (p *LlamaCompletionProvider) CompleteStream(ctx context.Context, req Comple
 		}
 		state.feed(chunk.Content)
 		if chunk.Stop {
+			sawStop = true
+			stopType = chunk.StopType
 			if chunk.TokensEvaluated > 0 {
 				tokensIn = chunk.TokensEvaluated
 			}
@@ -297,21 +320,41 @@ func (p *LlamaCompletionProvider) CompleteStream(ctx context.Context, req Comple
 	// the tokens already produced and streamed rather than erroring the
 	// turn, so the committed history matches what the user saw. Only when
 	// there is content to keep; an empty cancel is a real error.
-	finish := "stop"
+	finish := finishFor(stopType)
+	// Whether the output ended inside the thinking block, as the stream
+	// state saw it (it sent those tokens to the thinking panel).
+	thinkOpen := state.inReasoning
 	state.flush()
 	full := state.full()
 	if ctxErr := ctx.Err(); ctxErr != nil && strings.TrimSpace(full) != "" {
 		finish = "stopped"
 	} else if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("scan stream: %w", err)
+	} else if !sawStop {
+		return nil, fmt.Errorf("completion stream: ended without a stop chunk (%d chars received): %w", len(full), io.ErrUnexpectedEOF)
 	}
 
-	return p.parseAndFinalize(full, tokensIn, tokensOut, decodeMs, finish)
+	return p.parseAndFinalize(full, thinkOpen, tokensIn, tokensOut, decodeMs, finish)
 }
 
 // parseAndFinalize runs the formatter parser and packages the
 // result into the wire shape callers expect.
-func (p *LlamaCompletionProvider) parseAndFinalize(raw string, tokensIn, tokensOut int, decodeMs float64, finish string) (*CompletionResponse, error) {
+//
+// thinkOpen means the output ended inside the thinking block (a Stop or
+// n_predict while the model reasoned): all of it is reasoning. The
+// formatter only splits at the close tag, so the whole chain of thought
+// became the answer, was shown in place of it and committed.
+func (p *LlamaCompletionProvider) parseAndFinalize(raw string, thinkOpen bool, tokensIn, tokensOut int, decodeMs float64, finish string) (*CompletionResponse, error) {
+	if thinkOpen {
+		return &CompletionResponse{
+			ReasoningContent: strings.TrimSpace(raw),
+			InputTokens:      tokensIn,
+			OutputTokens:     tokensOut,
+			DecodeMs:         decodeMs,
+			FinishReason:     finish,
+			Model:            p.name,
+		}, nil
+	}
 	reasoning, content, calls, err := p.formatter.ParseResponse(raw)
 	if err != nil {
 		return nil, err

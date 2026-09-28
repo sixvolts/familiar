@@ -430,3 +430,19 @@ func TestClearWriteDeadline_StreamOutlivesWriteTimeout(t *testing.T) {
 		}
 	}
 }
+
+// A conversation's turn whose session was evicted while it ran is still
+// the caller's to stop and poll: Stop and status looked the session up
+// and reported nothing running while the model generated.
+func TestTurnOwnership_EvictedSessionGoesThroughTheConversation(t *testing.T) {
+	conv := "3f2c9a1e-7b4d-4e8a-9c1f-2a6b8d0e4f13"
+	a := &Adapter{sessions: session.NewManager()}
+	a.SetConversationOwner(&fakeConvOwner{owned: true})
+	if owned, live := a.turnOwnership(context.Background(), conv, "alice", ""); !owned || !live {
+		t.Errorf("owner's conversation with no session: owned=%v live=%v, want both true", owned, live)
+	}
+	a.SetConversationOwner(&fakeConvOwner{owned: false})
+	if owned, live := a.turnOwnership(context.Background(), conv, "mallory", ""); !owned || live {
+		t.Errorf("someone else's conversation: owned=%v live=%v, want nothing live to act on", owned, live)
+	}
+}

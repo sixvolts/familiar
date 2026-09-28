@@ -98,7 +98,6 @@ type Handler struct {
 	notes              *NotesStore                                               // optional; wired via AttachNotesStore (workspace notes)
 	wiki               *WikiStore                                                // optional; wired via AttachWikiStore (books + wiki pages)
 	shardPasskeys      *ShardPasskeyStore                                        // optional; wired via AttachShardPasskeyStore (SHARD-AUTH-SPEC)
-	models             ModelCatalog                                              // optional; wired via AttachModelCatalog (MODEL-SELECTOR)
 	weather            *weather.Skill                                            // optional; wired via AttachWeather (Home weather widget)
 	pageEvents         *pageevents.Bus                                           // optional; wired via AttachPageEvents (SSE push)
 	actions            *actions.Store                                            // optional; wired via AttachActions (SCHEDULED-ACTIONS-SPEC)
@@ -340,7 +339,6 @@ func (h *Handler) Mux(authed http.Handler) http.Handler {
 	// PATCH /console/api/users/{id} (admin-only).
 	authedMux.HandleFunc("PATCH /console/api/profile/me", h.patchOwnProfile)
 	authedMux.HandleFunc("GET /console/api/skills/tools", h.listSkillTools)
-	authedMux.HandleFunc("GET /console/api/models", h.listModels)
 
 	authedMux.HandleFunc("GET /console/api/memories", h.listMemories)
 	authedMux.HandleFunc("GET /console/api/memories/facets", h.memoryFacets)

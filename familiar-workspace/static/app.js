@@ -890,6 +890,8 @@ window.familiarDialog = (function () {
 
     window.familiarAppHelpers = {
         apiJSON,
+        // For surfaces that fetch without apiJSON (the chat stream).
+        handleUnauthorized,
         toast,
         setError,
         ensureCytoscape,

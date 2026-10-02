@@ -116,11 +116,25 @@ test("the chat panel never scrolls horizontally", async ({ stack, browser, reque
             return out;
         });
 
-        // TABLE / PRE / the thinking trace scrolling inside themselves is by design.
+        // Only a TABLE (and the collapsible thinking trace) may scroll inside
+        // itself. Code blocks WRAP: operator decision 2026-10-02, after a long
+        // curl in a code block forced horizontal scrolling. PRE/CODE are no
+        // longer exempt, so a code block that scrolls fails here.
         const bad = offenders.filter(
-            (o) => !/^(TABLE|PRE|CODE)\./.test(o) && !/chat-msg-thinking-body/.test(o),
+            (o) => !/^TABLE\./.test(o) && !/chat-msg-thinking-body/.test(o),
         );
         expect(bad, "unexpected horizontal overflow:\n" + offenders.join("\n")).toEqual([]);
+
+        const pre = await page.evaluate(() => {
+            const el = document.querySelector(".chat-msg-body pre");
+            if (!el) return null;
+            const lh = parseFloat(getComputedStyle(el).lineHeight) || 18;
+            return { lines: el.clientHeight / lh, clipped: el.scrollWidth > el.clientWidth + 1,
+                     ws: getComputedStyle(el.querySelector("code") || el).whiteSpace };
+        });
+        expect(pre, "no code block rendered").not.toBeNull();
+        expect(pre!.clipped, "code block clips or scrolls instead of wrapping").toBe(false);
+        expect(pre!.lines, "400-char line should wrap onto several lines, ws=" + pre!.ws).toBeGreaterThan(3);
     } finally {
         await ctx.close();
     }

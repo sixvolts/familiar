@@ -3993,9 +3993,9 @@ code {
     /* Long URLs and unbroken tokens wrap instead of widening the panel. */
     overflow-wrap: anywhere;
 }
-/* Code blocks keep their formatting, so they cannot wrap — let them scroll
-   inside their own box rather than stretching the message column and taking
-   the whole conversation sideways with it. */
+/* Code blocks wrap rather than scroll: see the "Code blocks WRAP" block
+   at the end of this file. The width rules below still keep a long line
+   from sizing the message column. */
 .chat-msg-body pre {
     /* width:0 makes this contribute nothing to the parent's max-content size,
        so .chat-msg-body is sized by its other children instead of by the
@@ -6699,4 +6699,29 @@ code {
     clip: rect(0, 0, 0, 0);
     white-space: nowrap;
     border: 0;
+}
+
+/* ── Code blocks WRAP, they don't scroll (2026-10-02) ────────────────────
+   Operator decision after a long curl in a chat code block forced horizontal
+   scrolling. This supersedes the earlier "let code blocks scroll inside their
+   own box" choice in every view that renders markdown code.
+
+   Wrapping has to reach the inner <code>, not just the <pre>: highlight.js
+   styles .hljs, and text inside a non-wrapping <code> ignores its parent.
+   Measured before the fix: CODE.hljs scrollWidth 2834 in a 378px box.
+   overflow-wrap:anywhere breaks unbroken tokens (URLs, base64, long flags)
+   that pre-wrap alone would leave running off the edge.
+
+   Placed last so it wins over the per-view rules above at equal specificity,
+   and over any highlight.js theme's lower-specificity .hljs rule. Guarded by
+   tests/e2e/flows/chat-overflow.spec.ts, which now fails if a code block
+   scrolls or clips instead of wrapping. */
+.chat-msg-body pre,
+.chat-msg-body pre code,
+.chat-msg-body pre code.hljs,
+.notes-editor .toastui-editor-contents pre,
+.notes-editor .toastui-editor-contents pre code,
+.action-run-detail pre {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
 }

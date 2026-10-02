@@ -2318,3 +2318,16 @@ select.mob-sa-input {
     position: absolute;
     inset: -7px;
 }
+
+/* ── Code blocks WRAP, they don't scroll (2026-10-02) ────────────────────
+   Mirrors the same rule in app.css; see its comment. Mobile chat bubbles had
+   the identical bug (overflow-x:auto, no wrap) and a phone is where sideways
+   scrolling a code block is worst. */
+.mob-msg .bubble pre,
+.mob-msg .bubble pre code,
+.mob-msg .bubble pre code.hljs,
+.mob-note-body .toastui-editor-contents pre,
+.mob-note-body .toastui-editor-contents pre code {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}

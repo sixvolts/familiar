@@ -274,7 +274,7 @@ func (s *Skill) Tools() []skills.ToolDefinition {
 	return []skills.ToolDefinition{
 		{
 			Name:        "list_books",
-			Description: "List the user's wiki books (the books they're a member of), most-recently-updated first. Returns slug, name, role, and description.",
+			Description: "List the user's wiki books (the books they're a member of), by name. Returns slug, name, role, and description.",
 			Parameters:  listBooksParams,
 		},
 		{

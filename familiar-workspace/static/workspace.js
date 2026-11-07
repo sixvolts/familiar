@@ -1351,8 +1351,8 @@
     // re-use the cache so collapse/re-expand is instant.
     const sidebarWikiPagesCache = new Map();
 
-    async function ensureWikiPagesFetched(bookSlug) {
-        if (sidebarWikiPagesCache.has(bookSlug)) return;
+    async function ensureWikiPagesFetched(bookSlug, refetch = false) {
+        if (!refetch && sidebarWikiPagesCache.has(bookSlug)) return;
         // `helpers` is function-local everywhere in this file — grab
         // our own. Referencing a sibling scope's const here threw a
         // ReferenceError that the catch below ate, which cached []
@@ -1375,8 +1375,25 @@
             }
         } catch (e) {
             console.warn("[wiki sidebar] pages fetch failed for", bookSlug, ":", e);
-            sidebarWikiPagesCache.set(bookSlug, []);
+            // A failed refresh keeps the pages it had.
+            if (!sidebarWikiPagesCache.has(bookSlug)) sidebarWikiPagesCache.set(bookSlug, []);
         }
+    }
+
+    // refreshWikiPagesCache re-fetches the page trees of the books the rail
+    // shows expanded, and drops the rest (they fetch when expanded). It
+    // replaces clearing the whole cache, which left every expanded book a
+    // cache miss: the next render showed "Loading…" in place of its pages
+    // until the fetch came back. Page events, which follow every save,
+    // did that, so the rail flashed while you typed.
+    async function refreshWikiPagesCache() {
+        const open = sidebarCatState.expanded.has("wiki") ? getSetFor(sidebarTreeExpanded, "wiki") : new Set();
+        const keep = [];
+        for (const key of Array.from(sidebarWikiPagesCache.keys())) {
+            if (open.has(key)) keep.push(key);
+            else sidebarWikiPagesCache.delete(key);
+        }
+        await Promise.all(keep.map((key) => ensureWikiPagesFetched(key, true)));
     }
 
     function getSetFor(map, category) {
@@ -1388,8 +1405,15 @@
         return s;
     }
 
+    // Builds the rows off the page and swaps them in only when the result
+    // differs from what the rail already shows. Clearing the host and
+    // rebuilding in place flashed the rail on every refresh, and refreshes
+    // follow every save. Comparing the rendered rows, rather than the data
+    // behind them, can't miss a change: expansion state and the cached
+    // page trees feed the render, and fingerprinting the data skipped
+    // real updates whenever one of those changed outside it.
     function renderCategoryChildren(host, category, data) {
-        host.innerHTML = "";
+        const next = document.createElement("div");
         // Back-compat: callers that still pass a bare array get the
         // flat renderer.
         if (Array.isArray(data)) {
@@ -1397,14 +1421,16 @@
         }
         const kind = (data && data.kind) || "flat";
         if (kind === "tree") {
-            renderTreeChildren(host, category, data.items || []);
+            renderTreeChildren(next, category, data.items || []);
         } else if (kind === "wiki") {
-            renderWikiChildren(host, data.books || []);
+            renderWikiChildren(next, data.books || []);
         } else if (kind === "folder-grouped") {
-            renderFolderGroupedChildren(host, category, data.folders || [], data.items || []);
+            renderFolderGroupedChildren(next, category, data.folders || [], data.items || []);
         } else {
-            renderFlatChildren(host, category, data.items || []);
+            renderFlatChildren(next, category, data.items || []);
         }
+        if (next.innerHTML === host.innerHTML) return;
+        host.replaceChildren(...next.childNodes);
     }
 
     // renderWikiChildren paints the rail's wiki section: one row
@@ -1886,40 +1912,14 @@
 
     // Refresh sidebar children for all currently-expanded categories.
     // Called when titles change or docs are created/deleted so the
-    // sidebar list stays current without a page refresh.
-    // force=true (default): always repaint. force=false: skip the repaint
-    // when neither the fetched category data NOR the expanded set changed —
-    // used ONLY by the autosave-driven sidebarRefresh path to stop the rail
-    // flashing on every 500ms debounce.
-    //
-    // Safe-by-default is deliberate. The first cut inverted this: it diffed
-    // the category data and skipped on a match, which silently suppressed a
-    // caret toggle (expansion state lives outside that data) and a
-    // created/deleted page (page trees live in sidebarWikiPagesCache, also
-    // outside it). Any mutation path — notesChanged clearing the cache, a
-    // caret toggle, a drag — must force the repaint; only the pure autosave
-    // signal opts out.
-    async function refreshSidebarChildren(force = true) {
+    // sidebar list stays current without a page refresh. A refresh that
+    // changes nothing leaves the rows alone (renderCategoryChildren).
+    async function refreshSidebarChildren() {
         for (const category of sidebarCatState.expanded) {
             const childList = document.querySelector('.sidebar-children[data-category="' + category + '"]');
             if (!childList) continue;
             const items = await fetchCategoryChildren(category);
-            if (!force) {
-                const expandedSet = sidebarTreeExpanded.get(category);
-                const expandedSig = expandedSet ? Array.from(expandedSet).sort().join(",") : "";
-                const sig = JSON.stringify(items) + "|" + expandedSig;
-                if (!sidebarCatState.renderSig) sidebarCatState.renderSig = {};
-                const same = sidebarCatState.renderSig[category] === sig;
-                sidebarCatState.renderSig[category] = sig;
-                sidebarCatState.cache[category] = items;
-                if (same) continue;
-            } else {
-                sidebarCatState.cache[category] = items;
-                // Invalidate the skip-cache so the NEXT autosave refresh, if it
-                // fetches this same data, still repaints once to reflect this
-                // forced change before it starts skipping again.
-                if (sidebarCatState.renderSig) delete sidebarCatState.renderSig[category];
-            }
+            sidebarCatState.cache[category] = items;
             renderCategoryChildren(childList, category, items);
         }
     }
@@ -2030,7 +2030,7 @@
                     body: JSON.stringify({ parent_id: parentID }),
                 },
             );
-            sidebarWikiPagesCache.delete(bookSlug);
+            await ensureWikiPagesFetched(bookSlug, true);
             refreshSidebarChildren();
             // Wiki shells listen for this and refresh their page
             // lists (same signal AI page edits use).
@@ -2109,17 +2109,17 @@
     });
 
     // Listen for sidebar refresh requests from surface modules.
-    window.addEventListener("familiar:sidebarRefresh", () => refreshSidebarChildren(false));
+    window.addEventListener("familiar:sidebarRefresh", () => refreshSidebarChildren());
 
     // AI tool calls that mutate notes / pages dispatch
     // familiar:notesChanged via chat.js when the gateway emits the
     // TOOL_EFFECT signal. Refresh the sidebar children too so a
     // brand new note created by the AI shows up in the expanded
-    // list without manual re-expand. Also drop the per-book wiki
-    // pages cache — a created/renamed/deleted wiki page invalidates
-    // every cached book, so the next render re-fetches.
-    window.addEventListener("familiar:notesChanged", () => {
-        sidebarWikiPagesCache.clear();
+    // list without manual re-expand. A created/renamed/deleted wiki
+    // page can be in any book, so the expanded books' page trees are
+    // re-fetched first (refreshWikiPagesCache) and the rest dropped.
+    window.addEventListener("familiar:notesChanged", async () => {
+        await refreshWikiPagesCache();
         refreshSidebarChildren();
     });
 
@@ -2140,9 +2140,9 @@
     let pageEventSidebarTimer = null;
     window.addEventListener("familiar:pageEvent", () => {
         if (pageEventSidebarTimer) return;
-        pageEventSidebarTimer = setTimeout(() => {
+        pageEventSidebarTimer = setTimeout(async () => {
             pageEventSidebarTimer = null;
-            sidebarWikiPagesCache.clear();
+            await refreshWikiPagesCache();
             refreshSidebarChildren();
         }, 250);
     });

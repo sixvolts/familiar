@@ -557,3 +557,109 @@ test("the wiki ⋯ menu pins a page for the user and it lands on Home", async ({
         await ctx.close();
     }
 });
+
+// Saving a page or a note must not repaint the rail. Every save comes
+// back to the saving tab as a page-saved event, and the rail's handler
+// dropped every book's cached page tree and repainted: each expanded
+// book showed "Loading…" until its pages came back, then rebuilt, so the
+// rail flashed on every autosave while editing. A book lists its most
+// recently edited pages first, so the first save may move the page up;
+// after that, saves must leave every row where it is.
+test("autosaves leave the rail's rows in place", async ({ stack, browser, request }) => {
+    const user = await createTestUser({ role: "admin" });
+    const headers = { Cookie: user.cookieHeader, "Content-Type": "application/json" };
+    const bookName = `Steady ${Date.now().toString(36)}`;
+    const book = await (await request.post(`${stack.workspaceURL}/console/api/books`, {
+        headers, data: { name: bookName },
+    })).json();
+    const wikiPage = await (await request.post(`${stack.workspaceURL}/console/api/books/${book.slug}/pages`, {
+        headers, data: { title: "Steady Page", content: "steady body" },
+    })).json();
+    await request.post(`${stack.workspaceURL}/console/api/books/${book.slug}/pages`, {
+        headers, data: { title: "Other Page", content: "other body" },
+    });
+    const note = await (await request.post(`${stack.workspaceURL}/console/api/books/personal/pages`, {
+        headers, data: { title: "Steady Note", content: "note body" },
+    })).json();
+    expect(wikiPage.id && note.id).toBeTruthy();
+
+    const ctx = await browser.newContext();
+    await attachSession(ctx, stack.workspaceURL, user);
+    const page = await ctx.newPage();
+    try {
+        await page.goto(stack.workspaceURL);
+        await expect(page.locator("#view-dashboard")).toBeVisible({ timeout: 15_000 });
+        const wikiRail = page.locator('.sidebar-children[data-category="wiki"]');
+        await page.locator(".sidebar-cat-wiki .sidebar-row-chevron").click();
+        const bookRow = wikiRail.locator("a.sidebar-child", { hasText: bookName });
+        await bookRow.locator(".sidebar-tree-caret").click();
+        await expect(wikiRail.locator("a.sidebar-child", { hasText: "Other Page" })).toBeVisible({ timeout: 10_000 });
+        const notesRail = page.locator('.sidebar-children[data-category="notes"]');
+        await page.locator(".sidebar-cat-notes .sidebar-row-chevron").click();
+        await expect(notesRail.locator("a.sidebar-child", { hasText: "Steady Note" })).toBeVisible({ timeout: 10_000 });
+
+        // Record every row the rail removes and every "Loading…" it shows.
+        await page.evaluate(() => {
+            const w = window as any;
+            w.__railChurn = { removed: 0, loading: 0 };
+            const obs = new MutationObserver((muts) => {
+                for (const m of muts) {
+                    for (const n of Array.from(m.removedNodes)) {
+                        if (n instanceof Element && (n.matches(".sidebar-child") || n.querySelector(".sidebar-child"))) w.__railChurn.removed++;
+                    }
+                    for (const n of Array.from(m.addedNodes)) {
+                        if (n instanceof Element && (n.matches(".sidebar-children-loading") || n.querySelector(".sidebar-children-loading"))) w.__railChurn.loading++;
+                    }
+                }
+            });
+            document.querySelectorAll(".sidebar-children").forEach((el) => obs.observe(el, { childList: true, subtree: true }));
+        });
+        const churn = () => page.evaluate(() => (window as any).__railChurn);
+
+        // Edit the wiki page: several autosaves.
+        await page.evaluate(({ s, i }) => {
+            (window as any).FamiliarWorkspace.openDoc("wiki", s, "Wiki", { pageId: i });
+        }, { s: book.slug, i: wikiPage.id });
+        const wiki = page.locator(".wiki-shell:visible").first();
+        const wikiEditor = wiki.locator(".toastui-editor-ww-container .ProseMirror").first();
+        await expect(wikiEditor).toContainText("steady body", { timeout: 10_000 });
+        const save = async (editor: any, shell: any, chunk: string) => {
+            await editor.click();
+            await page.keyboard.press("ControlOrMeta+End");
+            await page.keyboard.type(chunk);
+            await expect(shell.locator(".notes-saved")).not.toHaveText("•", { timeout: 10_000 });
+            await page.waitForTimeout(1200); // the page-saved event, its debounce and any refetch
+        };
+        const reset = () => page.evaluate(() => { (window as any).__railChurn = { removed: 0, loading: 0 }; });
+        await reset();
+        await save(wikiEditor, wiki, " zero");
+        expect((await churn()).loading, "first wiki save showed Loading… in the rail").toBe(0);
+        await reset();
+        for (const chunk of [" one", " two", " three"]) await save(wikiEditor, wiki, chunk);
+        expect(await churn(), "rail churn while editing a wiki page").toEqual({ removed: 0, loading: 0 });
+
+        // Edit the note: same.
+        await page.evaluate((nid) => {
+            (window as any).FamiliarWorkspace.openDoc("notes", nid, "Steady Note");
+        }, note.id);
+        const notes = page.locator(".notes-shell:not(.wiki-shell)", {
+            has: page.locator(".toastui-editor-ww-container .ProseMirror", { hasText: "note body" }),
+        }).first();
+        const noteEditor = notes.locator(".toastui-editor-ww-container .ProseMirror").first();
+        await expect(noteEditor).toContainText("note body", { timeout: 10_000 });
+        await reset();
+        await save(noteEditor, notes, " zero");
+        expect((await churn()).loading, "first note save showed Loading… in the rail").toBe(0);
+        await reset();
+        for (const chunk of [" one", " two", " three"]) await save(noteEditor, notes, chunk);
+        expect(await churn(), "rail churn while editing a note").toEqual({ removed: 0, loading: 0 });
+
+        // A real change still reaches the rail.
+        await request.post(`${stack.workspaceURL}/console/api/books/${book.slug}/pages`, {
+            headers, data: { title: "Arrived Page", content: "new" },
+        });
+        await expect(wikiRail.locator("a.sidebar-child", { hasText: "Arrived Page" })).toBeVisible({ timeout: 10_000 });
+    } finally {
+        await ctx.close();
+    }
+});

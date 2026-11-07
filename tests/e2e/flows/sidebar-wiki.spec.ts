@@ -562,9 +562,9 @@ test("the wiki ⋯ menu pins a page for the user and it lands on Home", async ({
 // back to the saving tab as a page-saved event, and the rail's handler
 // dropped every book's cached page tree and repainted: each expanded
 // book showed "Loading…" until its pages came back, then rebuilt, so the
-// rail flashed on every autosave while editing. A book lists its most
-// recently edited pages first, so the first save may move the page up;
-// after that, saves must leave every row where it is.
+// rail flashed on every autosave while editing. Books and pages also
+// sorted by last edit, so the page being edited jumped to the top on its
+// first save. Saves must leave every row where it is, the first included.
 test("autosaves leave the rail's rows in place", async ({ stack, browser, request }) => {
     const user = await createTestUser({ role: "admin" });
     const headers = { Cookie: user.cookieHeader, "Content-Type": "application/json" };
@@ -632,10 +632,7 @@ test("autosaves leave the rail's rows in place", async ({ stack, browser, reques
         };
         const reset = () => page.evaluate(() => { (window as any).__railChurn = { removed: 0, loading: 0 }; });
         await reset();
-        await save(wikiEditor, wiki, " zero");
-        expect((await churn()).loading, "first wiki save showed Loading… in the rail").toBe(0);
-        await reset();
-        for (const chunk of [" one", " two", " three"]) await save(wikiEditor, wiki, chunk);
+        for (const chunk of [" zero", " one", " two", " three"]) await save(wikiEditor, wiki, chunk);
         expect(await churn(), "rail churn while editing a wiki page").toEqual({ removed: 0, loading: 0 });
 
         // Edit the note: same.
@@ -648,10 +645,7 @@ test("autosaves leave the rail's rows in place", async ({ stack, browser, reques
         const noteEditor = notes.locator(".toastui-editor-ww-container .ProseMirror").first();
         await expect(noteEditor).toContainText("note body", { timeout: 10_000 });
         await reset();
-        await save(noteEditor, notes, " zero");
-        expect((await churn()).loading, "first note save showed Loading… in the rail").toBe(0);
-        await reset();
-        for (const chunk of [" one", " two", " three"]) await save(noteEditor, notes, chunk);
+        for (const chunk of [" zero", " one", " two", " three"]) await save(noteEditor, notes, chunk);
         expect(await churn(), "rail churn while editing a note").toEqual({ removed: 0, loading: 0 });
 
         // A real change still reaches the rail.

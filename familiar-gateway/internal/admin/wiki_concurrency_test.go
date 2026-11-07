@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -516,5 +517,72 @@ func TestUpdatePage_UnchangedTitleStillMerges(t *testing.T) {
 	})
 	if !errors.Is(err, ErrPageStale) {
 		t.Fatalf("stale rename + edit: err = %v, want ErrPageStale", err)
+	}
+}
+
+// Lists keep their order while pages are edited: books by name, pages
+// by sort_order then title. They sorted by last edit, so the page being
+// edited jumped to the top of the rail on its first save, and its book
+// with it.
+func TestListOrderIgnoresEdits(t *testing.T) {
+	s, user := wikiStoreForTest(t)
+	ctx := context.Background()
+	suffix := time.Now().Format("150405.000000")
+	bravo, err := s.CreateBook(ctx, user, "Bravo "+suffix, "", "")
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+	alpha, err := s.CreateBook(ctx, user, "alpha "+suffix, "", "")
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+	for _, title := range []string{"Charlie", "alpha", "Bravo"} {
+		if _, err := s.CreatePage(ctx, bravo.ID, user, title, "body", ""); err != nil {
+			t.Fatalf("CreatePage %s: %v", title, err)
+		}
+	}
+	pageTitles := func() []string {
+		rows, err := s.ListPages(ctx, bravo.ID)
+		if err != nil {
+			t.Fatalf("ListPages: %v", err)
+		}
+		var out []string
+		for _, r := range rows {
+			out = append(out, r.Title)
+		}
+		return out
+	}
+	bookOrder := func() []string {
+		rows, err := s.ListBooks(ctx, user, false)
+		if err != nil {
+			t.Fatalf("ListBooks: %v", err)
+		}
+		var out []string
+		for _, r := range rows {
+			if r.ID == alpha.ID || r.ID == bravo.ID {
+				out = append(out, r.ID)
+			}
+		}
+		return out
+	}
+	wantPages := []string{"alpha", "Bravo", "Charlie"}
+	wantBooks := []string{alpha.ID, bravo.ID}
+	if got := pageTitles(); !reflect.DeepEqual(got, wantPages) {
+		t.Fatalf("pages = %v, want %v", got, wantPages)
+	}
+	if got := bookOrder(); !reflect.DeepEqual(got, wantBooks) {
+		t.Fatalf("books = %v, want %v", got, wantBooks)
+	}
+
+	// Edit the last page (bumping it and its book to the newest).
+	content := "edited"
+	if _, err := s.UpdatePage(ctx, bravo.ID, "charlie", user, PagePatch{Content: &content}); err != nil {
+		t.Fatalf("UpdatePage: %v", err)
+	}
+	if got := pageTitles(); !reflect.DeepEqual(got, wantPages) {
+		t.Errorf("after an edit, pages = %v, want %v", got, wantPages)
+	}
+	if got := bookOrder(); !reflect.DeepEqual(got, wantBooks) {
+		t.Errorf("after an edit, books = %v, want %v", got, wantBooks)
 	}
 }

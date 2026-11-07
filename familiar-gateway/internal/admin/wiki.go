@@ -485,7 +485,10 @@ func (s *WikiStore) listBooksFiltered(ctx context.Context, userID string, includ
 	if !includeArchived {
 		q += ` AND b.archived_at IS NULL`
 	}
-	q += ` ORDER BY b.updated_at DESC`
+	// By name, not by last edit: every page save bumps the book's
+	// updated_at, and lists that reorder while you edit are what the rail
+	// and the wiki splash showed.
+	q += ` ORDER BY lower(b.name), b.created_at, b.id`
 	rows, err := s.db.QueryContext(ctx, q, userID)
 	if err != nil {
 		return nil, fmt.Errorf("books: list: %w", err)
@@ -1007,15 +1010,17 @@ func (s *WikiStore) recordAudit(ctx context.Context, bookID, actorUserID, action
 // MemberRole(bookID, userID) first and bail on "" before invoking
 // these.
 
-// ListPages returns every non-deleted page in a book, newest-edit-
-// first. See PRECONDITION above.
+// ListPages returns every non-deleted page in a book in a fixed order:
+// sort_order, then title, then creation. Ordering by last edit moved the
+// page you were editing to the top of every list on its first save.
+// See PRECONDITION above.
 func (s *WikiStore) ListPages(ctx context.Context, bookID string) ([]WikiPageSummary, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id::text, slug, title, content, updated_at, updated_by,
 		       parent_id::text, sort_order
 		  FROM wiki_pages
 		 WHERE book_id = $1::uuid AND deleted_at IS NULL
-		 ORDER BY sort_order ASC, updated_at DESC`, bookID)
+		 ORDER BY sort_order ASC, lower(title), created_at, id`, bookID)
 	if err != nil {
 		return nil, fmt.Errorf("wiki: list: %w", err)
 	}
